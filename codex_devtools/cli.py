@@ -247,12 +247,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--expect-amxd-sha256",
         help="require the expected and referenced AMXD bytes to match this SHA-256",
     )
+    from .harness_control import register_cli
+
+    register_cli(commands)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.group == "harness":
+            from .harness_control import run_cli
+
+            result, code = run_cli(args)
+            _json_out(result)
+            return code
         if args.group == "runtime" and args.action == "node":
             from .runtime import discover_node
 
