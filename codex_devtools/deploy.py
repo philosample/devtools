@@ -176,8 +176,19 @@ def _validate_plan(plan: dict[str, Any]) -> tuple[Path, Path, list[dict[str, Any
         raise ValueError("plan source_root must be a non-empty path")
     if not isinstance(destination_value, str) or not destination_value:
         raise ValueError("plan destination_root must be a non-empty path")
-    source = Path(source_value).resolve(strict=False)
-    destination = Path(destination_value).resolve(strict=False)
+    source_path = Path(source_value)
+    destination_path = Path(destination_value)
+    for label, root_path in (
+        ("source", source_path),
+        ("destination", destination_path),
+    ):
+        if not root_path.is_absolute():
+            raise ValueError(f"plan {label}_root must be absolute")
+        anchor = Path(root_path.anchor)
+        relative_root = root_path.relative_to(anchor).as_posix()
+        _check_no_symlinks(anchor, relative_root, allow_missing=True)
+    source = source_path.resolve(strict=False)
+    destination = destination_path.resolve(strict=False)
     raw = plan.get("files")
     if not isinstance(raw, list) or not raw:
         raise ValueError("plan files must be a non-empty array")

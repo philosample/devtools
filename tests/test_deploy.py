@@ -198,6 +198,77 @@ class DeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source_root"):
             deploy.verify_plan(self.out)
 
+    def test_verify_rejects_source_root_replaced_by_symlink(self):
+        expected = b"planned bytes"
+        (self.source / "device.js").write_bytes(expected)
+        (self.destination / "device.js").write_bytes(expected)
+        self.plan(["device.js"])
+
+        replacement = self.root / "replacement-source"
+        replacement.mkdir()
+        (replacement / "device.js").write_bytes(expected)
+        original = self.root / "original-source"
+        self.source.rename(original)
+        try:
+            self.source.symlink_to(replacement, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            deploy.verify_plan(self.out)
+        self.assertEqual(self.source.readlink(), replacement)
+        self.assertEqual((replacement / "device.js").read_bytes(), expected)
+        self.assertEqual((self.destination / "device.js").read_bytes(), expected)
+
+    def test_verify_rejects_destination_root_replaced_by_symlink(self):
+        expected = b"planned bytes"
+        (self.source / "device.js").write_bytes(expected)
+        (self.destination / "device.js").write_bytes(b"original bytes")
+        self.plan(["device.js"])
+
+        replacement = self.root / "replacement-destination"
+        replacement.mkdir()
+        (replacement / "device.js").write_bytes(expected)
+        original = self.root / "original-destination"
+        self.destination.rename(original)
+        try:
+            self.destination.symlink_to(replacement, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            deploy.verify_plan(self.out)
+        self.assertEqual(self.destination.readlink(), replacement)
+        self.assertEqual((replacement / "device.js").read_bytes(), expected)
+        self.assertEqual((original / "device.js").read_bytes(), b"original bytes")
+
+    def test_verify_rejects_symlink_added_to_root_ancestor(self):
+        expected = b"planned bytes"
+        tree = self.root / "source-tree"
+        source = tree / "source"
+        source.mkdir(parents=True)
+        self.source = source
+        (self.source / "device.js").write_bytes(expected)
+        (self.destination / "device.js").write_bytes(expected)
+        self.plan(["device.js"])
+
+        replacement_parent = self.root / "replacement-tree"
+        replacement_source = replacement_parent / "source"
+        replacement_source.mkdir(parents=True)
+        (replacement_source / "device.js").write_bytes(expected)
+        original_parent = self.root / "original-source-tree"
+        tree.rename(original_parent)
+        try:
+            tree.symlink_to(replacement_parent, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            deploy.verify_plan(self.out)
+        self.assertEqual(tree.readlink(), replacement_parent)
+        self.assertEqual((replacement_source / "device.js").read_bytes(), expected)
+        self.assertEqual((self.destination / "device.js").read_bytes(), expected)
+
     def test_plan_output_must_remain_outside_source_and_destination_roots(self):
         (self.source / "device.amxd").write_bytes(b"source")
         self.manifest_paths(["device.amxd"])
