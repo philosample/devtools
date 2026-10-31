@@ -26,14 +26,28 @@ class DeploymentTests(unittest.TestCase):
         self.manifest = self.root / "manifest.json"
 
     def manifest_paths(self, paths):
-        self.manifest.write_text(json.dumps({"format": deploy.MANIFEST_FORMAT, "files": paths}))
+        self.manifest.write_text(
+            json.dumps({"format": deploy.MANIFEST_FORMAT, "files": paths})
+        )
 
     def plan(self, paths):
         self.manifest_paths(paths)
-        self.assertEqual(main([
-            "deploy", "plan", str(self.manifest), "--source-root", str(self.source),
-            "--destination-root", str(self.destination), "--out", str(self.out),
-        ]), 0)
+        self.assertEqual(
+            main(
+                [
+                    "deploy",
+                    "plan",
+                    str(self.manifest),
+                    "--source-root",
+                    str(self.source),
+                    "--destination-root",
+                    str(self.destination),
+                    "--out",
+                    str(self.out),
+                ]
+            ),
+            0,
+        )
         return json.loads(self.out.read_text())
 
     def verify(self):
@@ -189,10 +203,19 @@ class DeploymentTests(unittest.TestCase):
         self.manifest_paths(["device.amxd"])
         for output in (self.source / "plan.json", self.destination / "plan.json"):
             with self.subTest(output=output):
-                result = main([
-                    "deploy", "plan", str(self.manifest), "--source-root", str(self.source),
-                    "--destination-root", str(self.destination), "--out", str(output),
-                ])
+                result = main(
+                    [
+                        "deploy",
+                        "plan",
+                        str(self.manifest),
+                        "--source-root",
+                        str(self.source),
+                        "--destination-root",
+                        str(self.destination),
+                        "--out",
+                        str(output),
+                    ]
+                )
                 self.assertEqual(result, 2)
                 self.assertFalse(output.exists())
 
@@ -200,10 +223,19 @@ class DeploymentTests(unittest.TestCase):
         (self.source / "device.amxd").write_bytes(b"source")
         self.manifest_paths(["device.amxd"])
         original = self.manifest.read_bytes()
-        result = main([
-            "deploy", "plan", str(self.manifest), "--source-root", str(self.source),
-            "--destination-root", str(self.destination), "--out", str(self.manifest),
-        ])
+        result = main(
+            [
+                "deploy",
+                "plan",
+                str(self.manifest),
+                "--source-root",
+                str(self.source),
+                "--destination-root",
+                str(self.destination),
+                "--out",
+                str(self.manifest),
+            ]
+        )
         self.assertEqual(result, 2)
         self.assertEqual(self.manifest.read_bytes(), original)
 
@@ -259,10 +291,15 @@ class DeploymentTests(unittest.TestCase):
                     (self.source / "a").write_bytes(b"changed after source hash")
             return digest
 
-        with mock.patch.object(deploy, "_digest_or_none", side_effect=edit_source_after_apply_recheck):
+        with mock.patch.object(
+            deploy, "_digest_or_none", side_effect=edit_source_after_apply_recheck
+        ):
             receipt = deploy.apply_plan(self.out, self.backup)
         self.assertEqual((self.destination / "a").read_bytes(), planned_source)
-        self.assertEqual(json.loads(receipt.read_text())["files"][0]["source_sha256"], deploy.sha256(planned_source))
+        self.assertEqual(
+            json.loads(receipt.read_text())["files"][0]["source_sha256"],
+            deploy.sha256(planned_source),
+        )
 
     def test_rollback_refuses_post_deployment_edit(self):
         (self.source / "a").write_bytes(b"new")
@@ -299,13 +336,19 @@ class DeploymentTests(unittest.TestCase):
         original_atomic_write = deploy._atomic_write
 
         def fail_second_destination(path, data):
-            if path.resolve(strict=False) == (self.destination / "b").resolve(strict=False):
+            if path.resolve(strict=False) == (self.destination / "b").resolve(
+                strict=False
+            ):
                 raise OSError("injected write failure")
             return original_atomic_write(path, data)
 
-        with mock.patch.object(deploy, "_atomic_write", side_effect=fail_second_destination):
-            with self.assertRaisesRegex(OSError, "injected"):
-                deploy.apply_plan(self.out, self.backup)
+        with (
+            mock.patch.object(
+                deploy, "_atomic_write", side_effect=fail_second_destination
+            ),
+            self.assertRaisesRegex(OSError, "injected"),
+        ):
+            deploy.apply_plan(self.out, self.backup)
         self.assertEqual((self.destination / "a").read_bytes(), b"old a")
         self.assertFalse((self.destination / "b").exists())
         receipt = json.loads((self.backup / "receipt.json").read_text())
