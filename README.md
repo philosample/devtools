@@ -70,3 +70,7 @@ python3 -m unittest discover -s tests -v
 Timed Snoize MIDI Monitor capture, CoreMIDI endpoint inventory, JSON/CSV export and offline assertions are available under `python3 -m codex_devtools midi`. See [capture setup and evidence limits](docs/MIDI-CAPTURE.md).
 
 For JavaScript tests, `python3 -m codex_devtools runtime node --json` discovers and verifies an existing Node runtime, including Live's bundled Max Node when PATH has none. See [runtime discovery](docs/RUNTIMES.md); no installation or app launch is performed.
+
+## Ruff and Lefthook
+
+`python3 -m codex_devtools.quality bootstrap` installs the pinned Ruff `0.17.3` and Lefthook `2.2.2` tools with a local rollback receipt. See [Python quality tooling](docs/QUALITY.md) for hook activation, staged-file behavior, manual and CI commands, and rollback.
