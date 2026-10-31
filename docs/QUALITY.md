@@ -12,7 +12,7 @@ python3 -m codex_devtools.quality bootstrap
 python3 -m codex_devtools.quality doctor
 ```
 
-The bootstrap installs `ruff-0.17.3` and `lefthook-2.2.2`. If `lefthook` is not already on `PATH`, it creates a `~/.local/bin/lefthook` symlink to the pinned executable, because generated Git hook shims invoke `lefthook` by its normal command name. It refuses to replace a different version. A local receipt at `~/.local/state/codex-devtools/quality-tools.json` records which pieces it created. To reverse only that setup, run:
+The bootstrap installs `ruff-0.17.3` and `lefthook-2.2.2`. It checks that the pipx bin directory is on `PATH` before writing. If `lefthook` is not already on `PATH`, it creates a `~/.local/bin/lefthook` symlink to the pinned executable, because generated Git hook shims invoke `lefthook` by its normal command name. It refuses to replace a different version. A local receipt at `~/.local/state/codex-devtools/quality-tools.json` records which pieces it created. To reverse only that setup, run:
 
 ```sh
 python3 -m codex_devtools.quality remove

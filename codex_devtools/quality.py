@@ -76,6 +76,21 @@ def doctor() -> dict[str, str]:
 
 def bootstrap(*, dry_run: bool = False) -> dict[str, str] | None:
     bin_dir = _bin_dir()
+    resolved_before = shutil.which("lefthook")
+    path_dirs = {
+        Path(entry or os.curdir).expanduser().resolve()
+        for entry in os.environ.get("PATH", "").split(os.pathsep)
+    }
+    if resolved_before and not _matching_version(
+        Path(resolved_before), "lefthook", LEFTHOOK_VERSION
+    ):
+        raise RuntimeError(
+            f"refusing to replace existing Lefthook on PATH: {resolved_before}"
+        )
+    if resolved_before is None and bin_dir.resolve() not in path_dirs:
+        raise RuntimeError(
+            f"pipx bin directory must be on PATH before setup: {bin_dir}"
+        )
     if not shutil.which("pipx"):
         raise RuntimeError(
             "pipx is required; install pipx before bootstrapping quality tools"
@@ -85,13 +100,6 @@ def bootstrap(*, dry_run: bool = False) -> dict[str, str] | None:
     ruff = bin_dir / f"ruff-{RUFF_VERSION}"
     lefthook_versioned = bin_dir / f"lefthook-{LEFTHOOK_VERSION}"
     lefthook_alias = bin_dir / "lefthook"
-    resolved_before = shutil.which("lefthook")
-    if resolved_before and not _matching_version(
-        Path(resolved_before), "lefthook", LEFTHOOK_VERSION
-    ):
-        raise RuntimeError(
-            f"refusing to replace existing Lefthook on PATH: {resolved_before}"
-        )
     if (
         not resolved_before
         and lefthook_alias.exists()

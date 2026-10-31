@@ -60,7 +60,10 @@ class QualityBootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = Path(tmp) / "bin"
             with (
-                patch.dict(os.environ, {"PIPX_BIN_DIR": str(bin_dir)}),
+                patch.dict(
+                    os.environ,
+                    {"PIPX_BIN_DIR": str(bin_dir), "PATH": f"{bin_dir}:/usr/bin:/bin"},
+                ),
                 patch(
                     "codex_devtools.quality.shutil.which",
                     side_effect=lambda command: (
@@ -69,6 +72,23 @@ class QualityBootstrapTests(unittest.TestCase):
                 ),
             ):
                 self.assertEqual(quality.main("bootstrap", dry_run=True), 0)
+                self.assertFalse(bin_dir.exists())
+
+    def test_bootstrap_refuses_bin_directory_outside_path_before_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            with (
+                patch.dict(
+                    os.environ, {"PIPX_BIN_DIR": str(bin_dir), "PATH": "/usr/bin:/bin"}
+                ),
+                patch(
+                    "codex_devtools.quality.shutil.which",
+                    side_effect=lambda command: (
+                        "/usr/bin/pipx" if command == "pipx" else None
+                    ),
+                ),
+            ):
+                self.assertEqual(quality.main("bootstrap"), 2)
                 self.assertFalse(bin_dir.exists())
 
 
