@@ -10,6 +10,7 @@ Use the existing private `philosample/devtools` checkout located through `~/Code
 Choose the cheapest evidence that answers the acceptance check:
 
 - Saved `.mmon` available: use `midi export` or `midi report` without opening UI.
+- Need only native byte-transport evidence: use `python3 -m codex_devtools midi loopback --out <new-local-receipt.json>` on macOS. It sends four fixed events only to its own temporary destination and checks exact bytes/order plus cleanup. It does not test MIDI Monitor, Max/M4L/Live, IAC, external routing or hardware. Reuse its saved source-pinned receipt while that native component is unchanged.
 - Need a new MIDI observation: `midi endpoints`, create a local exact-source template, then explicit `midi capture` to a new run directory. Keep the raw document, preflight document, JSON/CSV and receipt together outside Git.
 - Need Live transport/tempo evidence: use max-host's M4L harness and validator inside Live; Node handles logging only, the Live API remains in Max. Follow that repository's test instructions. Offline synthetic logs are not a hosted test.
 
