@@ -13,6 +13,14 @@ class CaptureConfigurationTests(unittest.TestCase):
                          source_identity({"portInputStream": [{"uniqueID": 1, "name": "new"}], "spyingInputStream": []}))
         with self.assertRaises(ValueError):
             source_identity({"portInputStream": [{"name": "no identity"}]})
+        with self.assertRaisesRegex(ValueError, "at least one valid portInputStream"):
+            source_identity({"portOutputStream": [{"uniqueID": 2}]})
+        with self.assertRaisesRegex(ValueError, "endpoint objects"):
+            source_identity({"portInputStream": "bogus"})
+        with self.assertRaisesRegex(ValueError, "integer uniqueID"):
+            source_identity({"portInputStream": [{"uniqueID": True}]})
+        with self.assertRaisesRegex(ValueError, "duplicate endpoint"):
+            source_identity({"portInputStream": [{"uniqueID": 1}, {"uniqueID": 1}]})
 
     def test_template_resolves_only_unique_online_source(self):
         inventory = [{"direction": "source", "name": "Capture", "displayName": "IAC Capture", "uniqueID": 123, "offline": False}]

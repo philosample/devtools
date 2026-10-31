@@ -20,14 +20,20 @@ def source_identity(settings: dict) -> dict:
         raise ValueError("streamSettings must be a dictionary")
     result = {}
     for key, value in settings.items():
-        if not value:
-            continue
-        if isinstance(value, list):
-            if any(not isinstance(s, dict) or not isinstance(s.get("uniqueID"), int) for s in value):
-                raise ValueError("source entries must contain integer uniqueID values")
-            result[key] = sorted(s["uniqueID"] for s in value)
-        else:
-            result[key] = value
+        if not isinstance(key, str) or not isinstance(value, list):
+            raise ValueError("source stream settings must be lists of endpoint objects")
+        if any(not isinstance(source, dict)
+               or not isinstance(source.get("uniqueID"), int)
+               or isinstance(source.get("uniqueID"), bool)
+               for source in value):
+            raise ValueError("source entries must contain integer uniqueID values")
+        identifiers = [source["uniqueID"] for source in value]
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError(f"{key} contains duplicate endpoint uniqueID values")
+        if identifiers or key == "portInputStream":
+            result[key] = sorted(identifiers)
+    if not result.get("portInputStream"):
+        raise ValueError("streamSettings must contain at least one valid portInputStream source")
     return result
 
 

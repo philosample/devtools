@@ -115,6 +115,21 @@ class MidiAssertionsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "source identity"):
                 verify_capture_receipt(capture, document, receipt_path)
 
+            receipt["resolved_settings"] = {"streamSettings": {"portInputStream": "bogus"}}
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "endpoint objects"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+            receipt["resolved_settings"] = {"streamSettings": {"portOutputStream": [{"uniqueID": 123}]}}
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "at least one valid portInputStream"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+            receipt["resolved_settings"] = {"streamSettings": {"portInputStream": [{"uniqueID": True}]}}
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "integer uniqueID"):
+                verify_capture_receipt(capture, document, receipt_path)
+
 
 if __name__ == "__main__":
     unittest.main()
