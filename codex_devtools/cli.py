@@ -53,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate = max_sub.add_parser("validate", help="check JSON syntax and patch graph ports")
     validate.add_argument("path", type=Path)
     validate.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    package = max_sub.add_parser("package-m4l-candidate", help="build an unfrozen M4L MIDI-effect candidate with declared sidecars")
+    package.add_argument("--source-root", required=True, type=Path, help="root constraining the source maxpat and dependency files")
+    package.add_argument("--source", required=True, type=Path, help="M4L MIDI-effect source .maxpat (relative to source root or inside it)")
+    package.add_argument("--template", required=True, type=Path, help="unfrozen raw-patcher MIDI-effect .amxd template")
+    package.add_argument("--dependency-allowlist", required=True, type=Path, help="JSON array of {name, source} dependency entries")
+    package.add_argument("--out", required=True, type=Path, help="new output directory; must not exist")
     preview = max_sub.add_parser("preview", help="inspect source geometry and optionally export a static SVG schematic")
     preview.add_argument("path", type=Path, help="Max patcher source (no Max/JSUI code is executed)")
     preview.add_argument("--out", type=Path, help="new SVG output path; refuses overwrite")
@@ -196,6 +202,12 @@ def main(argv: list[str] | None = None) -> int:
                 if not graph["errors"]:
                     print("OK")
             return 1 if graph["errors"] else 0
+        if args.group == "max" and args.action == "package-m4l-candidate":
+            from .m4l_package import package_m4l_candidate
+            manifest = package_m4l_candidate(args.source_root, args.source, args.template,
+                                             args.dependency_allowlist, args.out)
+            _json_out({"out": str(args.out.expanduser().absolute()), "manifest": manifest})
+            return 0
         if args.group == "max" and args.action == "preview":
             from .max_preview import preview as max_preview
             result = max_preview(args.path, args.out)
