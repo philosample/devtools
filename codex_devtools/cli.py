@@ -70,12 +70,56 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--backup-root", required=True, type=Path)
     undo = deploy_sub.add_parser("rollback", help="restore files from an apply receipt")
     undo.add_argument("receipt", type=Path)
+    midi = commands.add_parser("midi", help="capture or inspect Snoize MIDI Monitor documents")
+    midi_sub = midi.add_subparsers(dest="action", required=True)
+    midi_sub.add_parser("endpoints", help="read-only CoreMIDI inventory (macOS + Swift)")
+    template = midi_sub.add_parser("template", help="create a local single-source capture template")
+    template.add_argument("--source", required=True, help="exact source name or displayName")
+    template.add_argument("--out", required=True, type=Path)
+    report = midi_sub.add_parser("report", help="summarize a saved capture and optionally assert event counts")
+    report.add_argument("path", type=Path)
+    report.add_argument("--expect", type=Path)
+    export = midi_sub.add_parser("export", help="decode a saved capture without opening any app")
+    export.add_argument("path", type=Path)
+    export.add_argument("--out", required=True, type=Path)
+    export.add_argument("--format", choices=["json", "csv"], default="json")
+    capture = midi_sub.add_parser("capture", help="explicit macOS GUI capture in an isolated document")
+    capture.add_argument("--template", required=True, type=Path)
+    capture.add_argument("--out", required=True, type=Path, help="new run directory; refuses existing paths")
+    capture.add_argument("--seconds", required=True, type=float)
+    capture.add_argument("--max-events", type=int, default=100000)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.group == "midi":
+            from .midi_monitor import parse_document, write_json, write_csv
+            if args.action in ("endpoints", "template"):
+                from .midi_capture import endpoints, make_template
+                _json_out(endpoints() if args.action == "endpoints" else make_template(args.out, args.source))
+                return 0
+            if args.action == "report":
+                from .midi_assertions import analyze, check_expectations
+                document = parse_document(args.path)
+                result = {"analysis": analyze(document["events"])}
+                if args.expect:
+                    result["assertions"] = check_expectations(document["events"], json.loads(args.expect.read_text()))
+                _json_out(result)
+                return 0 if result.get("assertions", {}).get("passed", True) else 1
+            if args.action == "export":
+                if args.out.exists():
+                    raise ValueError("export output already exists")
+                document = parse_document(args.path)
+                (write_json if args.format == "json" else write_csv)(document, args.out)
+                print(f"exported {len(document['events'])} events: {args.out}")
+                return 0
+            if args.action == "capture":
+                from .midi_capture import capture
+                result = capture(args.template, args.out, args.seconds, args.max_events)
+                _json_out(result)
+                return 1 if result["status"] != "captured" else 0
         if args.group == "max" and args.action == "inspect":
             report = inventory(args.path)
             if args.json:
