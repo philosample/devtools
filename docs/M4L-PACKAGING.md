@@ -34,11 +34,16 @@ unchanged.
 ## Dependencies and outputs
 
 The dependency allowlist is a JSON array of exact `{ "name", "source" }`
-rows. The set of output names must match the source root's `dependency_cache`
-exactly, including no unreferenced extras. Each output name is one safe flat
-filename; source paths are relative to the declared root and resolve to
-regular files within it. Duplicate or case/Unicode-colliding names, duplicate
-source paths, missing files, symlink escapes, nonlocal bootpaths, frozen Max
+rows. Its output names must exactly match dependencies declared by the source
+root and every inline nested patcher. If an allowlisted dependency is itself a
+`.maxpat` sidecar, its root and inline nested patchers are also traversed for
+further declarations. This prevents a nested patcher's sidecar from being
+silently omitted; repeated references to the same name are one dependency,
+but conflicting bootpaths are rejected. No unreferenced extras are accepted.
+Each output name is one safe flat filename; source paths are relative to the
+declared root and resolve to regular files within it. Duplicate or
+case/Unicode-colliding names, duplicate source paths, malformed dependency
+caches, missing files, symlink escapes, nonlocal bootpaths, frozen Max
 containers, and collisions with the candidate or manifest are rejected.
 
 The output directory must be new and outside the source root. It is created

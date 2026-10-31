@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 import struct
 import unicodedata
 
-from .maxfiles import decode_file, graph_report, sha256
+from .maxfiles import decode_file, graph_report, sha256, walk_patchers
 
 
 MANIFEST_NAME = "manifest.json"
@@ -105,33 +105,34 @@ def _load_dependency_allowlist(path: Path) -> list[dict]:
     return results
 
 
-def _dependency_inputs(source_root: Path, source_patch: dict, allowlist: list[dict]) -> list[dict]:
-    root = source_patch.get("patcher")
+def _declared_dependencies(patch: dict, label: str) -> dict[str, object]:
+    """Collect dependency declarations from a root and all inline patchers."""
+    root = patch.get("patcher", patch)
     if not isinstance(root, dict):
-        raise ValueError("source root has no Max patcher object")
-    cache = root.get("dependency_cache", [])
-    if not isinstance(cache, list):
-        raise ValueError("source patcher dependency_cache must be an array")
-    referenced = []
-    for index, entry in enumerate(cache):
-        if not isinstance(entry, dict):
-            raise ValueError(f"dependency_cache entry {index} must be an object")
-        name = _safe_dependency_name(entry.get("name"), f"dependency_cache entry {index} name")
-        bootpath = entry.get("bootpath", "")
-        if bootpath not in (None, "", "."):
-            raise ValueError(f"dependency {name!r} has a nonlocal bootpath; sidecar packaging requires the output directory")
-        if name in referenced:
-            raise ValueError(f"duplicate dependency_cache name {name!r}")
-        referenced.append(name)
-    listed = {item["name"] for item in allowlist}
-    expected = set(referenced)
-    if listed != expected:
-        missing = sorted(expected - listed)
-        extra = sorted(listed - expected)
-        raise ValueError(f"dependency allowlist must match source dependency_cache (missing={missing}, unreferenced={extra})")
+        raise ValueError(f"{label} has no Max patcher object")
+    referenced: dict[str, object] = {}
+    for patcher_path, current in walk_patchers(root):
+        cache = current.get("dependency_cache", [])
+        if not isinstance(cache, list):
+            raise ValueError(f"{label} {patcher_path} dependency_cache must be an array")
+        for index, entry in enumerate(cache):
+            if not isinstance(entry, dict):
+                raise ValueError(f"{label} {patcher_path} dependency_cache entry {index} must be an object")
+            name = _safe_dependency_name(entry.get("name"), f"{label} {patcher_path} dependency_cache entry {index} name")
+            bootpath = entry.get("bootpath", "")
+            if bootpath not in (None, "", "."):
+                raise ValueError(f"dependency {name!r} has a nonlocal bootpath; sidecar packaging requires the output directory")
+            bootpath = "."  # Normalize equivalent local encodings before duplicate checks.
+            if name in referenced and referenced[name] != bootpath:
+                raise ValueError(f"dependency {name!r} has conflicting bootpaths in {label}")
+            referenced[name] = bootpath
+    return referenced
 
+
+def _dependency_inputs(source_root: Path, source_patch: dict, allowlist: list[dict]) -> list[dict]:
+    by_name = {item["name"]: item for item in allowlist}
     resolved_root = source_root.resolve(strict=True)
-    inputs = []
+    inputs_by_name = {}
     for item in sorted(allowlist, key=lambda row: row["name"]):
         lexical = source_root / Path(*PurePosixPath(item["source"]).parts)
         try:
@@ -145,8 +146,40 @@ def _dependency_inputs(source_root: Path, source_patch: dict, allowlist: list[di
         data = resolved.read_bytes()
         if data[:4] in (b"mx@c", b"ampf") or resolved.suffix.lower() in (".mxf", ".amxd"):
             raise ValueError(f"dependency {item['name']!r} is a packaged/frozen Max container; only sidecar source/assets are supported")
-        inputs.append({"name": item["name"], "source": item["source"], "path": resolved, "data": data})
-    return inputs
+        inputs_by_name[item["name"]] = {"name": item["name"], "source": item["source"], "path": resolved, "data": data}
+
+    referenced = _declared_dependencies(source_patch, "source patcher")
+    pending = list(referenced)
+    visited_sidecars = set()
+    while pending:
+        name = pending.pop()
+        item = by_name.get(name)
+        if item is None:
+            continue
+        if not name.lower().endswith(".maxpat") or name in visited_sidecars:
+            continue
+        visited_sidecars.add(name)
+        try:
+            sidecar_patch = json.loads(inputs_by_name[name]["data"].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Max patcher dependency {name!r} is not valid UTF-8 JSON: {exc}") from exc
+        if not isinstance(sidecar_patch, dict) or not isinstance(sidecar_patch.get("patcher"), dict):
+            raise ValueError(f"Max patcher dependency {name!r} must have an object-valued patcher root")
+        nested = _declared_dependencies(sidecar_patch, f"Max patcher dependency {name!r}")
+        for nested_name, nested_bootpath in nested.items():
+            if nested_name in referenced and referenced[nested_name] != nested_bootpath:
+                raise ValueError(f"dependency {nested_name!r} has conflicting bootpaths across patchers")
+            if nested_name not in referenced:
+                referenced[nested_name] = nested_bootpath
+                pending.append(nested_name)
+
+    listed = set(by_name)
+    expected = set(referenced)
+    if listed != expected:
+        missing = sorted(expected - listed)
+        extra = sorted(listed - expected)
+        raise ValueError(f"dependency allowlist must match all source and nested dependency_cache entries (missing={missing}, unreferenced={extra})")
+    return [inputs_by_name[item["name"]] for item in sorted(allowlist, key=lambda row: row["name"])]
 
 
 def _canonical_patch_hash(patch: dict) -> str:

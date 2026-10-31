@@ -29,6 +29,19 @@ def midi_patch(dependencies=()):
     }}
 
 
+def nested_patcher(dependencies=(), boxes=()):
+    children = []
+    for index, name in enumerate(boxes):
+        child = {"boxes": [], "lines": [],
+                 "dependency_cache": [{"name": dependency, "bootpath": "."}
+                                      for dependency in dependencies]}
+        children.append({"box": {"id": f"nested-{index}", "maxclass": "newobj",
+                                  "text": name, "patcher": child}})
+    return {"boxes": children, "lines": [],
+            "dependency_cache": [{"name": name, "type": "TEXT", "bootpath": "."}
+                                 for name in dependencies]}
+
+
 def template_bytes(patch=None, flag=0):
     root = midi_patch() if patch is None else patch
     body = (json.dumps(root, sort_keys=True) + "\n").encode() + b"\0"
@@ -236,6 +249,65 @@ class PackageM4LCandidateTests(unittest.TestCase):
             self._allow([{"name": "needed.js", "source": source}])
             with self.subTest(source=source), self.assertRaises(ValueError):
                 self._package(self.base / ("bad-" + str(len(source))))
+
+    def test_inline_nested_and_deep_dependency_caches_are_in_exact_closure(self):
+        patch = midi_patch()
+        deep = nested_patcher(["deep.js"])
+        nested = nested_patcher(["nested.js"], boxes=["deep patch"])
+        nested["boxes"][0]["box"]["patcher"] = deep
+        patch["patcher"]["boxes"].append({"box": {
+            "id": "inline", "maxclass": "newobj", "text": "nested patch", "patcher": nested,
+        }})
+        self._write_source(patch=patch)
+        (self.source_root / "nested.js").write_bytes(b"nested sidecar")
+        (self.source_root / "deep.js").write_bytes(b"deep sidecar")
+
+        self._allow([])
+        with self.assertRaisesRegex(ValueError, r"all source and nested dependency_cache entries.*deep.js.*nested.js"):
+            self._package(self.base / "nested-missing")
+
+        self._allow([
+            {"name": "nested.js", "source": "nested.js"},
+            {"name": "deep.js", "source": "deep.js"},
+        ])
+        manifest = self._package()
+        self.assertEqual([item["name"] for item in manifest["dependencies"]], ["deep.js", "nested.js"])
+        self.assertEqual((self.output / "nested.js").read_bytes(), b"nested sidecar")
+        self.assertEqual((self.output / "deep.js").read_bytes(), b"deep sidecar")
+
+    def test_nested_dependency_cache_rejects_casefold_collision_and_malformed_cache(self):
+        patch = midi_patch()
+        patch["patcher"]["boxes"].append({"box": {
+            "id": "inline", "maxclass": "newobj", "text": "nested",
+            "patcher": nested_patcher(["Nested.js"]),
+        }})
+        self._write_source(patch=patch)
+        self._allow([{"name": "Nested.js", "source": "one.js"},
+                     {"name": "nested.js", "source": "two.js"}])
+        with self.assertRaisesRegex(ValueError, "duplicate dependency destination name"):
+            self._package(self.base / "nested-collision")
+
+        patch["patcher"]["boxes"][2]["box"]["patcher"]["dependency_cache"] = "not-an-array"
+        self._write_source(patch=patch)
+        self._allow([])
+        with self.assertRaisesRegex(ValueError, "dependency_cache must be an array"):
+            self._package(self.base / "nested-malformed")
+
+    def test_sidecar_maxpat_dependency_cache_is_transitive(self):
+        patch = midi_patch(["helper.maxpat"])
+        self._write_source(patch=patch)
+        helper = self.source_root / "helper.maxpat"
+        helper.write_text(json.dumps({"patcher": {
+            "boxes": [], "lines": [], "dependency_cache": [{"name": "helper.js", "bootpath": "."}],
+        }}), encoding="utf-8")
+        (self.source_root / "helper.js").write_bytes(b"helper source")
+        self._allow([{"name": "helper.maxpat", "source": "helper.maxpat"}])
+        with self.assertRaisesRegex(ValueError, r"missing=\['helper.js'\]"):
+            self._package(self.base / "transitive-missing")
+        self._allow([{"name": "helper.maxpat", "source": "helper.maxpat"},
+                     {"name": "helper.js", "source": "helper.js"}])
+        manifest = self._package()
+        self.assertEqual({item["name"] for item in manifest["dependencies"]}, {"helper.maxpat", "helper.js"})
 
     def test_missing_and_escaping_dependency_sources_are_rejected(self):
         self._write_source(["needed.js"])
