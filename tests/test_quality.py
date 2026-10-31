@@ -116,6 +116,10 @@ class QualityBootstrapTests(unittest.TestCase):
                 receipt = json.loads(quality.RECEIPT.read_text())
                 self.assertEqual(receipt["pipx_bin_dir"], str(bin_dir.resolve()))
                 self.assertEqual(receipt["pipx_home"], str(pipx_home.resolve()))
+                self.assertEqual(
+                    receipt["ruff_verified_path"],
+                    str((bin_dir / "ruff-0.17.3").resolve()),
+                )
                 self.assertTrue(receipt["created_ruff"] == "true")
                 self.assertTrue(receipt["created_lefthook"] == "true")
                 self.assertEqual(quality.main("bootstrap"), 0)
@@ -129,6 +133,63 @@ class QualityBootstrapTests(unittest.TestCase):
                 self.assertFalse((bin_dir / "lefthook-2.2.2").exists())
                 self.assertFalse((bin_dir / "lefthook").exists())
                 self.assertTrue(other_alias.is_symlink())
+
+    def test_bootstrap_requires_bin_path_even_with_compatible_lefthook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "seed").mkdir()
+            seed_bin, _ = self._fixture(root / "seed")
+            path_dir = root / "path"
+            path_dir.mkdir()
+            shutil.copy2(seed_bin / "pipx", path_dir / "pipx")
+            external_lefthook = path_dir / "lefthook"
+            external_lefthook.write_text("#!/usr/bin/env python3\nprint('2.2.2')\n")
+            external_lefthook.chmod(0o755)
+            bin_dir = root / "pipx-bin"
+            pipx_home = root / "pipx-home"
+            receipt = root / "state/quality-tools.json"
+            env = {
+                "HOME": str(root / "home"),
+                "PATH": f"{path_dir}:/usr/bin:/bin",
+                "PIPX_BIN_DIR": str(bin_dir),
+                "PIPX_HOME": str(pipx_home),
+            }
+            with (
+                patch.dict(os.environ, env),
+                patch.object(quality, "RECEIPT", receipt),
+            ):
+                self.assertEqual(quality.main("bootstrap"), 2)
+                self.assertFalse(bin_dir.exists())
+                self.assertFalse(pipx_home.exists())
+                self.assertFalse(receipt.exists())
+                self.assertTrue(external_lefthook.is_file())
+
+    def test_doctor_rejects_wrong_ruff_shadowing_pinned_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir, pipx_home = self._fixture(root)
+            shadow_dir = root / "shadow"
+            shadow_dir.mkdir()
+            shadowed_ruff = shadow_dir / "ruff-0.17.3"
+            shadowed_ruff.write_text("#!/usr/bin/env python3\nprint('ruff 0.99.0')\n")
+            shadowed_ruff.chmod(0o755)
+            env = self._environment(root, bin_dir, pipx_home)
+            env["PATH"] = f"{shadow_dir}:{env['PATH']}"
+            with (
+                patch.dict(os.environ, env),
+                patch.object(quality, "RECEIPT", root / "state/quality-tools.json"),
+            ):
+                self.assertEqual(quality.main("bootstrap"), 2)
+                self.assertTrue((bin_dir / "ruff-0.17.3").is_file())
+                self.assertTrue(quality.RECEIPT.is_file())
+                with self.assertRaisesRegex(RuntimeError, "must resolve on PATH"):
+                    quality.doctor()
+                self.assertEqual(
+                    shadowed_ruff.read_text().splitlines()[-1], "print('ruff 0.99.0')"
+                )
+                self.assertEqual(quality.main("remove"), 0)
+                self.assertTrue(shadowed_ruff.is_file())
+                self.assertFalse(quality.RECEIPT.exists())
 
     def test_partial_pipx_failure_keeps_receipt_and_can_be_rolled_back(self):
         with tempfile.TemporaryDirectory() as tmp:

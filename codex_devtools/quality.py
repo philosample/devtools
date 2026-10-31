@@ -132,6 +132,13 @@ def doctor() -> dict[str, str]:
         raise RuntimeError(
             f"missing or wrong pinned Lefthook executable: {lefthook_versioned}"
         )
+    ruff_command = shutil.which(f"ruff-{RUFF_VERSION}")
+    if ruff_command is None or not _matching_version(
+        Path(ruff_command), "ruff", RUFF_VERSION
+    ):
+        raise RuntimeError(
+            f"ruff-{RUFF_VERSION} must resolve on PATH to the pinned version"
+        )
     alias = shutil.which("lefthook")
     if alias is None or not _matching_version(
         Path(alias), "lefthook", LEFTHOOK_VERSION
@@ -141,6 +148,7 @@ def doctor() -> dict[str, str]:
         )
     return {
         "ruff": str(ruff),
+        "ruff_resolved_path": str(Path(ruff_command).resolve()),
         "ruff_version": RUFF_VERSION,
         "lefthook": str(Path(alias).resolve()),
         "lefthook_version": LEFTHOOK_VERSION,
@@ -160,7 +168,7 @@ def bootstrap(*, dry_run: bool = False) -> dict[str, str] | None:
         raise RuntimeError(
             f"refusing to replace existing Lefthook on PATH: {resolved_before}"
         )
-    if resolved_before is None and bin_dir.resolve() not in path_dirs:
+    if bin_dir.resolve() not in path_dirs:
         raise RuntimeError(
             f"pipx bin directory must be on PATH before setup: {bin_dir}"
         )
@@ -276,7 +284,7 @@ def bootstrap(*, dry_run: bool = False) -> dict[str, str] | None:
         return None
 
     result = doctor()
-    receipt["ruff_verified_path"] = result["ruff"]
+    receipt["ruff_verified_path"] = result["ruff_resolved_path"]
     receipt["lefthook_resolved_path"] = result["lefthook"]
     _write_receipt(receipt)
     print(f"quality tools verified; local receipt: {RECEIPT}")
