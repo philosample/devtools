@@ -11,3 +11,9 @@ This is the review record for selecting reusable utilities from the existing loc
 The new suite adds a deterministic relative-path hash manifest because it is useful across repositories. Device-specific mappings and Markov regression models remain with their project. Transient runtime harnesses and project fixtures stay project-local; they encode project/runtime assumptions that are not a general CLI contract.
 
 The archive implementation is intentionally limited to the observed `mx@c` layout with root payload at offset 16 and `dlst` directory records. It does not claim compatibility with every historical Max archive variant. Graph validation checks inline JSON patchers and declared inlet/outlet indices; it does not prove object behavior, external patch loading, Max execution, Live loading, or hardware response.
+
+## Additional checkpoint decisions
+
+- The master-plan bootstrap is project-specific: its durable results are the studio backlog/plan, not a global devtool.
+- Markov Max-File dispatch tests, Host decoder tests, tempo guard regressions and TR capture fixtures stay in their owning repos.
+- Curated instruction/skill snapshots are tracked in guidance/; personal Codex state and credentials are excluded. Export/install automation is deferred until repeat usage establishes a stable interface.
