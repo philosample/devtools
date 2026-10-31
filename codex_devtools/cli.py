@@ -106,6 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
     node = runtime_sub.add_parser("node", help="locate and verify an existing Node.js executable")
     node.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     node.add_argument("--app", type=Path, help="Ableton Live.app or Max.app bundle to check after PATH")
+    ableton = commands.add_parser("ableton", help="inspect one explicitly selected Ableton Live Set")
+    ableton_sub = ableton.add_subparsers(dest="action", required=True)
+    set_refs = ableton_sub.add_parser("inspect-set-device-refs", help="report saved FileRef paths and local AMXD hashes without changing the Set")
+    set_refs.add_argument("path", type=Path, help="one selected gzip-compressed .als file; no directory scan")
+    set_refs.add_argument("--expect-amxd-path", type=Path,
+                          help="require the Set's sole distinct AMXD FileRef to resolve to this exact file")
+    set_refs.add_argument("--expect-amxd-sha256",
+                          help="require the expected and referenced AMXD bytes to match this SHA-256")
     return parser
 
 
@@ -122,6 +130,15 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(result["error"], file=sys.stderr)
             return 0 if result["available"] else 2
+        if args.group == "ableton" and args.action == "inspect-set-device-refs":
+            from .ableton_set import inspect_set_device_refs
+            result = inspect_set_device_refs(
+                args.path,
+                expected_amxd_path=args.expect_amxd_path,
+                expected_amxd_sha256=args.expect_amxd_sha256,
+            )
+            _json_out(result)
+            return 0
         if args.group == "midi":
             from .midi_monitor import parse_document, write_json, write_csv
             if args.action in ("endpoints", "template"):
