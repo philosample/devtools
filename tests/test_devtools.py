@@ -37,8 +37,10 @@ def archive(items):
     return b"mx@c" + struct.pack(">III", 16, 0, body_end) + payload + directory_chunk
 
 
-def amxd(body):
-    return b"ampf" + bytes(20) + b"ptch" + struct.pack("<I", len(body)) + body
+def amxd(body, meta_value=1):
+    return (b"ampf" + struct.pack("<I", 4) + b"mmmmmeta"
+            + struct.pack("<II", 4, meta_value) + b"ptch"
+            + struct.pack("<I", len(body)) + body)
 
 
 def valid_patch():
@@ -62,6 +64,22 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(decode_file(wrapped)[0], "amxd")
         with self.assertRaisesRegex(ValueError, "size does not match"):
             decode_file(wrapped[:-1])
+
+    def test_amxd_header_signature_and_supported_metadata_values(self):
+        body = json.dumps(valid_patch()).encode()
+        # Observed AMXD headers use distinct metadata values (including 1/7);
+        # the reader validates wrapper framing but leaves this field opaque.
+        for meta_value in (1, 7):
+            self.assertEqual(decode_file(amxd(body, meta_value))[0], "amxd")
+
+        malformed_scaffold = b"ampf" + bytes(20) + b"ptch" + struct.pack("<I", len(body)) + body
+        with self.assertRaisesRegex(ValueError, "mmmm/meta/ptch"):
+            decode_file(malformed_scaffold)
+
+        wrong_chunk = bytearray(amxd(body))
+        wrong_chunk[8:12] = b"xxxx"
+        with self.assertRaisesRegex(ValueError, "mmmm/meta/ptch"):
+            decode_file(bytes(wrong_chunk))
 
     def test_truncation_and_boundaries(self):
         raw = archive([("root.maxpat", b"{}")])

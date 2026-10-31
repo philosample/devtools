@@ -92,8 +92,17 @@ def decode_file(data: bytes) -> tuple[str, list[dict], dict | None]:
         entries = parse_mxf(data)
         return "mxf", entries, _patch_from_entries(entries)
     if data[:4] == b"ampf":
-        if len(data) < 32 or data[24:28] != b"ptch":
-            raise ValueError("unsupported AMXD header (expected meta/ptch layout)")
+        # The observed AMXD wrapper is a sequence of fixed-size fields:
+        # ampf, a 4-byte mmmm chunk, a 4-byte meta value, then ptch.
+        # Keep the meta value opaque: inspected devices use both 1 and 7,
+        # and it may encode device metadata that this reader does not use.
+        if (len(data) < 32
+                or data[4:8] != b"\x04\x00\x00\x00"
+                or data[8:12] != b"mmmm"
+                or data[12:16] != b"meta"
+                or data[16:20] != b"\x04\x00\x00\x00"
+                or data[24:28] != b"ptch"):
+            raise ValueError("unsupported AMXD header (expected mmmm/meta/ptch layout)")
         body_size = struct.unpack_from("<I", data, 28)[0]
         if body_size != len(data) - 32:
             raise ValueError("AMXD ptch size does not match file size")

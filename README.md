@@ -40,7 +40,7 @@ python3 -m codex_devtools deploy rollback /tmp/deployment-backup/receipt.json
 
 `deploy` is an explicit per-file deployment workflow. Its tracked manifest contains logical relative paths, while local roots and hash snapshots live in the plan outside the repository. Planning does not write into either root. Apply requires all planned hashes to remain current, creates exact-byte backups and a receipt, and atomically replaces only listed files. Rollback restores prior files or removes files created by that receipt only if their deployed hashes still match. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the manifest contract and recovery behavior.
 
-The tools accept raw `mx@c` archives, AMXD files using the `meta`/`ptch` wrapper layout, and plain Max JSON patchers. The parser bounds-checks archive headers, directory records, offsets, and payload lengths. Archive paths must be single safe filenames and duplicate names are rejected.
+The tools accept raw `mx@c` archives, AMXD files using the observed `ampf` + fixed-size `mmmm`/`meta` + `ptch` wrapper layout, and plain Max JSON patchers. The AMXD metadata value is preserved as opaque wrapper metadata; it is not interpreted as a device type. Other AMXD wrapper variants are reported as unsupported. The parser bounds-checks archive headers, directory records, offsets, and payload lengths. Archive paths must be single safe filenames and duplicate names are rejected.
 
 Run the standard-library regression suite from this directory:
 
