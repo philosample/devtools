@@ -27,6 +27,9 @@ def synthetic_document(*, class_name="SMVoiceMessage", status=0xB2, data=b"\x07\
         event.update(data=_uid(5), wasReceivedWithEOX=True)
         objects = ["$null", {"NS.objects": [_uid(2)]}, event,
                    {"$classname": class_name}, "From Synth", data]
+    elif class_name == "SMSystemRealTimeMessage":
+        objects = ["$null", {"NS.objects": [_uid(2)]}, event,
+                   {"$classname": class_name}, "From Synth"]
     else:
         event["dataBytes"] = data
         objects = ["$null", {"NS.objects": [_uid(2)]}, event,
@@ -64,6 +67,22 @@ class MidiMonitorTests(unittest.TestCase):
         result = self.parse_bytes(synthetic_document(status=0xC0, data=b"\x05\x00"))
         self.assertEqual(result["events"][0]["type"], "program_change")
         self.assertEqual(result["events"][0]["raw"], "C0 05")
+
+    def test_realtime_message_has_no_archived_data_bytes(self):
+        result = self.parse_bytes(synthetic_document(
+            class_name="SMSystemRealTimeMessage", status=0xF8, data=b""))
+        self.assertEqual(result["events"][0]["type"], "clock")
+        self.assertEqual(result["events"][0]["raw"], "F8")
+
+    def test_origin_is_archived_display_string_not_endpoint_object(self):
+        data = synthetic_document()
+        outer = plistlib.loads(data)
+        archive = plistlib.loads(outer["messageData"])
+        archive["$objects"][4] = {"$class": _uid(5), "name": "Synth"}
+        archive["$objects"].append({"$classname": "SMEndpointDescription"})
+        outer["messageData"] = plistlib.dumps(archive, fmt=plistlib.FMT_BINARY)
+        with self.assertRaisesRegex(ValueError, "originatingEndpoint is not an archived string"):
+            self.parse_bytes(plistlib.dumps(outer, fmt=plistlib.FMT_BINARY))
 
     def test_rejects_truncated_input_and_unknown_schemas(self):
         for raw in (b"bplist00\x00", b"not a plist"):

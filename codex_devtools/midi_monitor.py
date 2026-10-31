@@ -122,19 +122,22 @@ def _decode_event(objects: list[Any], ref: Any) -> dict[str, Any]:
         extras = b""
         event = {"type": "invalid"}
         raw = data
-    else:
+    elif class_name == "SMSystemCommonMessage":
         extras = item.get("dataBytes")
         if not isinstance(extras, bytes) or len(extras) != 2:
-            raise ValueError(f"malformed {class_name}: expected two dataBytes")
-        event = {"type": "system_common" if class_name == "SMSystemCommonMessage" else "system_realtime"}
-        if class_name == "SMSystemCommonMessage":
-            event["type"] = {0xF1:"time_code", 0xF2:"song_position", 0xF3:"song_select", 0xF6:"tune_request"}.get(status, "system_common")
-            count = {0xF1:1, 0xF2:2, 0xF3:1, 0xF6:0}.get(status)
-            if count is None:
-                raise ValueError(f"malformed SMSystemCommonMessage: unsupported status 0x{status:02X}")
-            extras = extras[:count]
-        else:
-            event["type"] = {0xF8:"clock", 0xFA:"start", 0xFB:"continue", 0xFC:"stop", 0xFE:"active_sense", 0xFF:"reset"}.get(status, "system_realtime")
+            raise ValueError("malformed SMSystemCommonMessage: expected two dataBytes")
+        event = {"type": {0xF1:"time_code", 0xF2:"song_position", 0xF3:"song_select", 0xF6:"tune_request"}.get(status, "system_common")}
+        count = {0xF1:1, 0xF2:2, 0xF3:1, 0xF6:0}.get(status)
+        if count is None:
+            raise ValueError(f"malformed SMSystemCommonMessage: unsupported status 0x{status:02X}")
+        extras = extras[:count]
+    else:
+        # SystemRealTimeMessage encodes only Message's fields; unlike
+        # SystemCommonMessage, it has no dataBytes field in Snoize's NSCoding.
+        extras = b""
+        event = {"type": {0xF8:"clock", 0xFA:"start", 0xFB:"continue", 0xFC:"stop", 0xFE:"active_sense", 0xFF:"reset"}.get(status)}
+        if event["type"] is None:
+            raise ValueError(f"malformed SMSystemRealTimeMessage: unsupported status 0x{status:02X}")
 
     if raw is None:
         raw = bytes([status]) + extras
@@ -142,6 +145,8 @@ def _decode_event(objects: list[Any], ref: Any) -> dict[str, Any]:
     origin = item.get("originatingEndpoint")
     if isinstance(origin, _UID):
         origin = _ref(objects, origin, "originatingEndpoint")
+        if not isinstance(origin, str):
+            raise ValueError("unknown messageData schema: originatingEndpoint is not an archived string")
     if isinstance(origin, str) and origin:
         event["origin"] = origin
     return event
