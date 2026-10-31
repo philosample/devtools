@@ -8,6 +8,7 @@ unarchiver or executes archived classes.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import plistlib
 from pathlib import Path
@@ -174,16 +175,22 @@ def parse_document(path: str | Path) -> dict[str, Any]:
     else:
         archive = _plist(message_data, "messageData archive")
         objects, refs = _archive_root(archive)
-    return {"version": version, "settings": settings, "events": [_decode_event(objects, ref) for ref in refs]}
+    return {
+        "version": version,
+        "document_sha256": hashlib.sha256(data).hexdigest(),
+        "settings": settings,
+        "events": [_decode_event(objects, ref) for ref in refs],
+    }
 
 
 def write_json(document: dict[str, Any], path: str | Path) -> None:
-    Path(path).write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    with Path(path).open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, ensure_ascii=False, indent=2) + "\n")
 
 
 def write_csv(document: dict[str, Any], path: str | Path) -> None:
     fields = ["timestamp", "timestamp_unit", "type", "channel", "controller", "value", "note", "program", "raw", "origin"]
-    with Path(path).open("w", newline="", encoding="utf-8") as handle:
+    with Path(path).open("x", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(document.get("events", []))

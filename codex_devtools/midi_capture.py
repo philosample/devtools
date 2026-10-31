@@ -83,6 +83,7 @@ def capture(template: Path, out: Path, seconds: float, max_events: int = 100000)
         "template_sha256": hashlib.sha256(template.read_bytes()).hexdigest(),
         "adapter_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
         "configured_settings": settings,
+        "configured_source_identity": source_identity(settings.get("streamSettings", {})),
         "capture_file": name,
         "timing_note": "UI-controlled capture; disconnecting inputs adds boundary uncertainty",
     }
@@ -115,6 +116,9 @@ def capture(template: Path, out: Path, seconds: float, max_events: int = 100000)
         receipt["event_count"] = len(parsed["events"])
         receipt["possible_truncation"] = len(parsed["events"]) >= max_events
         receipt["capture_sha256"] = hashlib.sha256(document.read_bytes()).hexdigest()
+        receipt["preflight_sha256"] = hashlib.sha256((out / "preflight.mmon").read_bytes()).hexdigest()
+        receipt["events_json_sha256"] = hashlib.sha256((out / "events.json").read_bytes()).hexdigest()
+        receipt["events_csv_sha256"] = hashlib.sha256((out / "events.csv").read_bytes()).hexdigest()
         receipt["status"] = "inconclusive" if receipt["possible_truncation"] else "captured"
         return receipt
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -123,4 +127,13 @@ def capture(template: Path, out: Path, seconds: float, max_events: int = 100000)
         raise ValueError(f"{exc}; partial evidence retained at {out}") from exc
     finally:
         receipt["elapsed_seconds"] = time.monotonic() - started
+        # Preserve hashes for any partial artifacts if automation or parsing fails.
+        for key, artifact in (
+            ("capture_sha256", document),
+            ("preflight_sha256", out / "preflight.mmon"),
+            ("events_json_sha256", out / "events.json"),
+            ("events_csv_sha256", out / "events.csv"),
+        ):
+            if artifact.is_file():
+                receipt[key] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         save()

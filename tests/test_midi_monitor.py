@@ -7,11 +7,16 @@ import plistlib
 import sys
 import tempfile
 import unittest
+import contextlib
+import io
+import json
+import hashlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from codex_devtools.midi_monitor import parse_document, write_csv, write_json
+from codex_devtools.cli import main
 
 
 def _uid(index):
@@ -106,6 +111,59 @@ class MidiMonitorTests(unittest.TestCase):
             self.assertIn('"control_change"', json_path.read_text())
             self.assertIn("controller", csv_path.read_text().splitlines()[0])
             self.assertIn("B2 07 64", csv_path.read_text())
+            with self.assertRaises(FileExistsError):
+                write_json(result, json_path)
+            with self.assertRaises(FileExistsError):
+                write_csv(result, csv_path)
+
+    def test_report_cli_emits_provenance_and_checks_matching_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            capture = root / "capture-run.mmon"
+            source = {"portInputStream": [{"uniqueID": 123, "name": "Capture"}]}
+            outer = plistlib.loads(synthetic_document())
+            outer["streamSettings"] = source
+            capture.write_bytes(plistlib.dumps(outer, fmt=plistlib.FMT_BINARY))
+            parsed = parse_document(capture)
+            receipt = {
+                "schema": "devtools-midi-capture-v1", "status": "captured",
+                "capture_file": capture.name,
+                "capture_sha256": hashlib.sha256(capture.read_bytes()).hexdigest(),
+                "configured_settings": {"streamSettings": source},
+                "resolved_settings": {"streamSettings": source},
+                "event_count": len(parsed["events"]),
+                "template_sha256": "template", "adapter_sha256": "adapter",
+            }
+            receipt_path = root / "receipt.json"
+            receipt_path.write_text(json.dumps(receipt))
+            expectations = root / "expectations.json"
+            expectations.write_text(json.dumps({"expectations": [
+                {"type": "control_change", "channel": 3, "controller": 7, "value": 100, "min_count": 1}
+            ]}))
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main(["midi", "report", str(capture), "--expect", str(expectations), "--receipt", str(receipt_path)])
+            result = json.loads(output.getvalue())
+            self.assertEqual(status, 0)
+            self.assertTrue(result["assertions"]["passed"])
+            self.assertEqual(result["provenance"]["receipt"]["source_identity"], {"portInputStream": [123]})
+
+            receipt["status"] = "inconclusive"
+            receipt_path.write_text(json.dumps(receipt))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main(["midi", "report", str(capture), "--expect", str(expectations), "--receipt", str(receipt_path)])
+            result = json.loads(output.getvalue())
+            self.assertEqual(status, 1)
+            self.assertFalse(result["assertions"]["passed"])
+            self.assertIn("event buffer reached", result["provenance"]["capture_gate"])
+
+            expectations.write_text('{"expectations": []}')
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(main(["midi", "report", str(capture), "--expect", str(expectations)]), 2)
+            self.assertIn("at least one explicit success condition", errors.getvalue())
 
 
 if __name__ == "__main__":
