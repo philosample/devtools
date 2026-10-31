@@ -54,3 +54,5 @@ python3 -m unittest discover -s tests -v
 # MIDI capture
 
 Timed Snoize MIDI Monitor capture, CoreMIDI endpoint inventory, JSON/CSV export and offline assertions are available under `python3 -m codex_devtools midi`. See [capture setup and evidence limits](docs/MIDI-CAPTURE.md).
+
+For JavaScript tests, `python3 -m codex_devtools runtime node --json` discovers and verifies an existing Node runtime, including Live's bundled Max Node when PATH has none. See [runtime discovery](docs/RUNTIMES.md); no installation or app launch is performed.

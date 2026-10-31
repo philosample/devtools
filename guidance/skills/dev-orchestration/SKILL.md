@@ -43,6 +43,8 @@ The parent continues useful complementary work instead of repeating the child's 
 
 Check returned evidence and the actual diff, resolve interface mismatches, then run the relevant integrated checks. Re-run child checks only if integration changed their assumptions or results are uncertain. Report what passed and any remaining limitation. A child saying “done” is not verification.
 
+Keep review heads stable while queued. A substantive fix can supersede a head, but report that change explicitly and review its delta. Do not churn provenance commits or repeat broad suites merely because an unrelated upstream commit advanced; compare the actual component/interface/artifact hashes. A direct user merge instruction can supersede a prior workflow gate; record that scope and the exact merged head so coordination remains auditable.
+
 ## Computer control
 
 A child can use computer control only if its runtime exposes the relevant tools and permissions. Confirm tool availability before assigning UI work; if unavailable, keep UI operations in the parent and delegate code or research.

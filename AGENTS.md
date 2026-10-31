@@ -1,6 +1,7 @@
 # DevTools repository guidance
 
 - This directory is a reusable, standard-library Python CLI package. Invoke it with `python3 -m codex_devtools` from `devtools/`; do not add installation steps for its basic use.
+- For JS checks when Node is missing from PATH, use `python3 -m codex_devtools runtime node --json` and the verified quoted executable path; read docs/RUNTIMES.md. An absent PATH entry is not proof no runtime is installed. This discovery does not launch Live/Max or install dependencies.
 - Preserve archive payload bytes. Never execute Max/Live, rewrite sets/presets, or perform host side effects from inspection commands. Artifact deployment is explicit opt-in only: require a tracked relative-file manifest, a dry-run plan, an apply against unchanged source/destination hashes, and a separate backup receipt for rollback. Never bulk-sync folders or overwrite sources.
 - Keep path validation, duplicate detection, and overwrite refusal in archive extraction. Add regression coverage when changing archive bounds or output behavior.
 - `max validate` covers JSON graph structure and port references, not runtime semantics or host compatibility.
