@@ -6,6 +6,7 @@ Requires macOS, Snoize MIDI Monitor (tested 1.5.4), Python 3 and Accessibility p
 python3 -m codex_devtools midi endpoints
 python3 -m codex_devtools midi template --source 'IAC Driver Studio Capture' --out /absolute/local/capture-template.mmon
 python3 -m codex_devtools midi capture --template /absolute/local/capture-template.mmon --seconds 10 --out /absolute/local/new-run
+python3 -m codex_devtools midi loopback --out /absolute/local/native-loopback.json --timeout 3
 python3 -m codex_devtools midi export /absolute/local/new-run/capture-new-run.mmon --format csv --out /absolute/local/export.csv
 python3 -m codex_devtools midi report /absolute/local/new-run/capture-new-run.mmon --receipt /absolute/local/new-run/receipt.json --expect /absolute/local/expectations.json
 ```
@@ -37,6 +38,12 @@ For a disposable Live test Set, disable **all input Track/Sync/Remote** switches
 IAC proves the Live output path. A physical device's MIDI output can provide stronger evidence if it returns a documented acknowledgement, parameter dump/readback or other device-generated response. A MIDI Thru echo proves a return route, not that the device applied the parameter. Record firmware, physical ports, response semantics and request/response matching separately. Sound/state checks remain necessary where the protocol has no readback.
 
 ## Runtime evidence and next improvements
+
+### Native isolated CoreMIDI loopback
+
+`midi loopback` compiles a small Swift program with the installed Apple toolchain and runs a bounded, same-process transport check. It creates one ephemeral CoreMIDI client, a uniquely named MIDI 1.0 virtual destination, and an output port. It sends a fixed note-on, note-off, CC, and realtime clock fixture only to the `MIDIEndpointRef` returned directly by that destination creation call. It never enumerates existing destinations, selects an endpoint by name, publishes a virtual source, or calls `MIDIReceivedEventList`. The destination callback records its received MIDI bytes in order and captures `DispatchTime.uptimeNanoseconds` separately from each CoreMIDI event's scheduled timestamp. All created resources are disposed before the result is returned. The command writes a JSON receipt locally and refuses to overwrite an existing path. Compilation and process execution have hard bounds; the callback wait defaults to 3 seconds and accepts 0.05–30 seconds.
+
+The receipt includes the Swift source SHA-256, macOS, Swift and SDK versions, fixture, sent/received counts, callback observation values, scheduled timestamps and cleanup result. A pass requires a positive count of four events, exact bytes and order, and successful disposal of the client, port and endpoint. A no-callback timeout and process timeout are failures. This establishes only local CoreMIDI byte transport to the test's ephemeral virtual destination. It does not establish timing precision, MIDI Monitor/Max/Live transport, external routing, hardware delivery or device behavior. See Apple's documentation for [`MIDIDestinationCreateWithProtocol`](https://developer.apple.com/documentation/coremidi/mididestinationcreatewithprotocol%28_%3A_%3A_%3A_%3A_%3A%29), [`MIDISendEventList`](https://developer.apple.com/documentation/coremidi/midisendeventlist%28_%3A_%3A_%3A%29), and [`MIDIReceiveBlock`](https://developer.apple.com/documentation/coremidi/midireceiveblock).
 
 On 2026-10-31: isolated Studio Capture 2-second requested run saved/exported zero events; passive TR-8S input 3-second requested run saved/exported 158 events. No output MIDI was sent. Existing 2022 `.mmon` parsed 1,000 events. The GUI adapter was tested after the user enabled Accessibility. Initial attempts exposed mixed category checkboxes enabling unrelated inputs; the final adapter expands categories and disables selected inputs without clicking mixed category controls. Source resolution and the final disconnected state are checked from saved documents. Evidence remains local, not in Git. Adapter hash in each receipt identifies the exact tested source.
 
