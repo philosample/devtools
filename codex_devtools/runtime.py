@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 from typing import Any
@@ -18,6 +19,14 @@ MAX_NODE_SUFFIX = Path(
     "Contents/Resources/C74/packages/Node for Max/source/bin/osx/node/node"
 )
 NODE_VERSION_TIMEOUT_SECONDS = 5
+_SEMVER_NUMBER = r"(?:0|[1-9][0-9]*)"
+_SEMVER_PRERELEASE_ID = r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+_SEMVER_BUILD_ID = r"[0-9A-Za-z-]+"
+_NODE_VERSION = re.compile(
+    rf"v{_SEMVER_NUMBER}\.{_SEMVER_NUMBER}\.{_SEMVER_NUMBER}"
+    rf"(?:-{_SEMVER_PRERELEASE_ID}(?:\.{_SEMVER_PRERELEASE_ID})*)?"
+    rf"(?:\+{_SEMVER_BUILD_ID}(?:\.{_SEMVER_BUILD_ID})*)?"
+)
 
 
 def _candidate_from_app(app_path: str | Path) -> Path:
@@ -56,6 +65,9 @@ def _try_node(path: Path, provenance: str, timeout: float) -> tuple[dict[str, An
     if not version:
         return None, {"provenance": provenance, "path": path_text, "status": "unavailable",
                       "error": "node --version returned no version string"}
+    if _NODE_VERSION.fullmatch(version[0]) is None:
+        return None, {"provenance": provenance, "path": path_text, "status": "unavailable",
+                      "error": f"node --version returned an invalid Node version string: {version[0][:120]!r}"}
     selected = {"path": path_text, "version": version[0], "provenance": provenance}
     return selected, {"provenance": provenance, "path": path_text, "status": "selected"}
 

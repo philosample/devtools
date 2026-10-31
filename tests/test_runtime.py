@@ -61,10 +61,12 @@ class NodeRuntimeTests(unittest.TestCase):
             app = Path(directory) / "Max.app"
             node = executable(app / runtime.MAX_NODE_SUFFIX)
             with patch("codex_devtools.runtime.shutil.which", return_value=None), \
-                    patch("codex_devtools.runtime.subprocess.run", return_value=version_result(node)):
+                    patch("codex_devtools.runtime.subprocess.run",
+                          return_value=version_result(node, "v22.1.0-rc.1+build.7")):
                 result = runtime.discover_node(app)
             self.assertTrue(result["available"])
             self.assertEqual(result["path"], str(node.resolve()))
+            self.assertEqual(result["version"], "v22.1.0-rc.1+build.7")
 
     def test_path_version_failure_falls_back_to_bundled_node(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -81,6 +83,21 @@ class NodeRuntimeTests(unittest.TestCase):
             self.assertEqual(result["path"], str(bundled_node.resolve()))
             self.assertEqual(result["attempts"][0]["status"], "unavailable")
             self.assertIn("status 1", result["attempts"][0]["error"])
+
+    def test_unrelated_path_output_is_rejected_and_bundled_node_used(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path_node = executable(root / "bin" / "node")
+            app = root / "Ableton Live.app"
+            bundled_node = executable(app / runtime.LIVE_NODE_SUFFIX)
+            unrelated = subprocess.CompletedProcess([str(path_node), "--version"], 0, "hello", "")
+            with patch("codex_devtools.runtime.shutil.which", return_value=str(path_node)), \
+                    patch("codex_devtools.runtime.subprocess.run",
+                          side_effect=[unrelated, version_result(bundled_node)]):
+                result = runtime.discover_node(app)
+            self.assertTrue(result["available"])
+            self.assertEqual(result["path"], str(bundled_node.resolve()))
+            self.assertIn("invalid Node version string", result["attempts"][0]["error"])
 
     def test_unavailable_runtime_and_timeout_are_explicit_failures(self):
         with tempfile.TemporaryDirectory() as directory:
