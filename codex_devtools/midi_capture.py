@@ -97,7 +97,7 @@ def capture(template: Path, out: Path, seconds: float, max_events: int = 100000)
     try:
         result = subprocess.run([
             "/usr/bin/osascript", str(script), str(document),
-            str(out / "preflight.mmon"), name, str(seconds), str(max_events),
+            str(out / "preflight.mmon"), name, str(seconds), str(max_events), document.as_uri(),
         ], capture_output=True, text=True, timeout=seconds + 60)
         receipt["adapter_stdout"] = result.stdout.strip()
         if result.returncode:

@@ -49,6 +49,8 @@ Lower levels do not prove higher ones. A captured sink replacing `ctlout` proves
 
 ## Reusable inspection tools
 
+For saved MIDI Monitor documents, timed captures, IAC isolation or host-log correlation, use the `midi-capture-testing` skill. Prefer offline reports and assertions when saved evidence answers the check. Use repository testing instructions for the actual branch; zero discovered tests and static graph validity do not establish behavior.
+
 For MXF/AMXD archive inventory/extraction, Max graph checks or deterministic hash manifests, read [Devtools entrypoints](references/devtools.md) and reuse the tested suite when its capabilities fit. Keep instrument tables, encoders, behavior tests and capture fixtures in their device/studio repository.
 
 ## Current studio license and deployment policy

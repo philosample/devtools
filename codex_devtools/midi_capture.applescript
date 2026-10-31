@@ -5,6 +5,14 @@ on run argv
     set captureTitle to item 3 of argv
     set secondsToCapture to (item 4 of argv) as real
     set maxEvents to item 5 of argv
+    set expectedDocumentURL to item 6 of argv
+    tell application "System Events"
+        if exists process "MIDI Monitor" then
+            tell process "MIDI Monitor"
+                if exists window captureTitle then error "A capture window with this title already exists; refusing collision"
+            end tell
+        end if
+    end tell
     tell application "MIDI Monitor"
         activate
         open POSIX file capturePath
@@ -18,6 +26,7 @@ on run argv
             end repeat
             if not (exists window captureTitle) then error "Capture document did not open"
             set w to window captureTitle
+            if value of attribute "AXDocument" of w is not expectedDocumentURL then error "Capture document path does not match"
             perform action "AXRaise" of w
             delay 0.2
             if name of front window is not captureTitle then error "Capture document is not frontmost"
@@ -39,6 +48,7 @@ on run argv
             set startedAt to (current date)
             delay secondsToCapture
             if name of front window is not captureTitle then error "Focus changed during capture; refusing further UI actions"
+            if value of attribute "AXDocument" of w is not expectedDocumentURL then error "Capture document path changed"
             -- Disconnect this document only. No global MIDI or hardware settings change.
             repeat with sa in scroll areas of w
                 repeat with tree in outlines of sa
