@@ -22,6 +22,7 @@ python3 -m codex_devtools max inspect path/to/device.amxd
 python3 -m codex_devtools max inspect path/to/patch.maxpat --json
 python3 -m codex_devtools max extract path/to/device.amxd --out /tmp/device-payloads
 python3 -m codex_devtools max validate path/to/device.amxd --json
+python3 -m codex_devtools max package-m4l-candidate --help
 python3 -m codex_devtools max preview path/to/device.maxpat --out /tmp/device-layout.svg
 python3 -m codex_devtools max preview path/to/device.maxpat --out /tmp/device-layout.svg
 python3 -m codex_devtools hash manifest path/to/source --out /tmp/source-hashes.json
@@ -33,6 +34,8 @@ python3 -m codex_devtools deploy rollback /tmp/deployment-backup/receipt.json
 `max inspect` reports file and archive entry hashes, entry counts, and graph counts where the root payload is Max JSON. JSON output is available with `--json`. `max extract` accepts MXF archives and AMXDs with embedded MXF payloads. It writes archive names as stored, preserves bytes, and refuses to overwrite any entry path already present in the requested output directory. Extraction is read-only with respect to the source file and does not launch or mutate Max or Live.
 
 `max validate` parses the root patch JSON and checks inline patcher IDs and source/destination port references recursively. It validates structure only; it does not establish Max object semantics, external dependencies, or host behavior. `hash manifest` records sorted relative file paths, byte lengths, and SHA-256 hashes. It excludes `.git`, Python/tool caches, `outputs`, `work`, symlinks, and the manifest being written. It records no timestamps.
+
+`max package-m4l-candidate` creates a new unfrozen MIDI-effect candidate from an explicit source `.maxpat`, a supported raw-patcher MIDI-effect `.amxd` template, and an exact loose-sidecar dependency allowlist. It preserves the accepted AMXD wrapper header, verifies the packaged root with `decode_file` and `graph_report`, hashes all inputs and outputs, and refuses existing output paths. This is offline packaging evidence only. See [M4L candidate packaging](docs/M4L-PACKAGING.md) for the supported narrow template signature and limits.
 
 `max preview` inspects stored patcher rectangles for the root and inline nested patchers and can export a deterministic static SVG schematic. The JSON report includes source and SVG hashes, per-patcher bounds and rectangle overlaps. It uses visible presentation boxes when a patcher defines them, otherwise its patching rectangles. It never opens Max or executes JSUI. The SVG shows source-derived box labels and rectangles only; it is not a native Max render and does not draw patchline routing. See [static Max preview limits](docs/MAX-PREVIEW.md).
 
