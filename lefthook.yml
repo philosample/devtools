@@ -1,0 +1,11 @@
+min_version: 2.2.2
+
+pre-commit:
+  parallel: true
+  commands:
+    ruff-check:
+      glob: "*.py"
+      run: ruff-0.17.3 check --force-exclude -- {staged_files}
+    ruff-format:
+      glob: "*.py"
+      run: ruff-0.17.3 format --check --force-exclude -- {staged_files}
