@@ -11,10 +11,12 @@ const same = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical
 function canonical(v) { return v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canonical(v[k])])) : v; }
 function atomic(file, value) {
   const tmp = file + '.' + uuid() + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(value), {mode: 0o600, flag: 'wx'});
+  const serialized = JSON.stringify(value);
+  if (Buffer.byteLength(serialized, 'utf8') > 65536) throw Error('mailbox JSON exceeds 65536 bytes');
+  fs.writeFileSync(tmp, serialized, {mode: 0o600, flag: 'wx'});
   fs.renameSync(tmp, file);
 }
-function read(file) { const s = fs.readFileSync(file, 'utf8'); if (s.length > 65536) throw Error('oversized JSON'); return JSON.parse(s); }
+function read(file) { const s = fs.readFileSync(file, 'utf8'); if (Buffer.byteLength(s, 'utf8') > 65536) throw Error('oversized JSON'); return JSON.parse(s); }
 function pinsValid(p) {
   const hash = x => typeof x === 'string' && /^[a-f0-9]{64}$/.test(x);
   return exact(p, ['artifact_sha256', 'components']) && hash(p.artifact_sha256) && p.components && !Array.isArray(p.components) && Object.keys(p.components).length > 0 && Object.keys(p.components).length <= 32 && Object.entries(p.components).every(([k,v]) => /^[a-zA-Z0-9_-]{1,64}$/.test(k) && hash(v));
@@ -43,7 +45,6 @@ function privateRoot(root) {
 }
 function createHarnessMailbox(options) {
   const root = options.root || path.join(os.homedir(), '.local', 'state', 'codex-devtools', 'harness');
-  privateRoot(root);
   if (!pinsValid(options.pins)) throw Error('invalid pins');
   const commands = options.commands && structuredClone(options.commands);
   if (!commands || Object.keys(commands).length < 1 || Object.keys(commands).length > 16 || !Object.entries(commands).every(([k,v]) => /^[a-z][a-z0-9_]{0,31}$/.test(k) && schemaValid(v))) throw Error('invalid capabilities');
@@ -51,6 +52,14 @@ function createHarnessMailbox(options) {
   const leaseMs = options.leaseMs === undefined ? 3000 : options.leaseMs;
   const timeoutMs = options.timeoutMs === undefined ? 10000 : options.timeoutMs;
   if (!Number.isInteger(leaseMs) || leaseMs < 200 || leaseMs > 30000 || !Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 60000) throw Error('invalid time bounds');
+  // Reserve the largest descriptor state before touching root/ownership/files.
+  const instance = uuid(), nonce = crypto.randomBytes(32).toString('hex');
+  const identity = {format:FORMAT, instance, nonce, pins:structuredClone(options.pins)};
+  const largestDescriptor = {...identity, commands, sequence:Number.MAX_SAFE_INTEGER,
+    state:'pending', pending:{request:uuid(),sequence:Number.MAX_SAFE_INTEGER},
+    expires_at_ms:Number.MIN_SAFE_INTEGER, timeout_ms:timeoutMs};
+  if (Buffer.byteLength(JSON.stringify(largestDescriptor), 'utf8') > 65536) throw Error('descriptor exceeds 65536-byte state bound');
+  privateRoot(root);
   const owner = path.join(root, 'owner');
   // Manual reconciliation is an assertion by the harness operator, never inferred from TTL.
   if (options.reconciliation !== undefined) {
@@ -58,10 +67,8 @@ function createHarnessMailbox(options) {
     fs.rmSync(owner, {recursive:true, force:true});
   }
   fs.mkdirSync(owner, {mode:0o700}); // Existing owner (even stale) requires reconciliation.
-  const instance = uuid(), nonce = crypto.randomBytes(32).toString('hex');
   const dir = path.join(root, instance); fs.mkdirSync(dir, {mode:0o700});
   const descriptorPath = path.join(dir, 'descriptor.json');
-  const identity = {format:FORMAT, instance, nonce, pins:structuredClone(options.pins)};
   atomic(path.join(owner, 'identity.json'), identity);
   let sequence = 0, pending = null, state = 'ready', closed = false;
   let previousWall = Date.now(), previousMono = process.hrtime.bigint();
@@ -76,7 +83,8 @@ function createHarnessMailbox(options) {
     while (acknowledgements.length > 32) fs.rmSync(path.join(dir, 'ack.'+acknowledgements.shift()+'.json'), {force:true});
   }
   function finish(command, status, detail) {
-    if (!pending || pending.request !== command.request || state === 'fenced') return false;
+    // Bind to this exact admission, not a UUID that may be reused after pruning.
+    if (pending !== command || pending.request !== command.request || pending.sequence !== command.sequence || state !== 'pending') return false;
     const elapsed = Number(process.hrtime.bigint()-pending.started)/1e6;
     const sincePoll = Number(process.hrtime.bigint()-previousMono)/1e6;
     if (elapsed >= timeoutMs || sincePoll > leaseMs || Math.abs(Date.now()-previousWall-sincePoll) > 250) {
@@ -114,15 +122,16 @@ function createHarnessMailbox(options) {
       if (!exact(actor, ['request']) || actor.request !== c.request) throw Error('actor mismatch');
     } catch (e) { fence('invalid command: '+e.message); return; }
     sequence=c.sequence; pending={...c, started:now}; state='pending'; publish();
+    const admission = pending;
     // Completion is explicit. Returning from handle/outlet means only enqueued.
     const controls = Object.freeze({
-      completed: () => finish(c,'completed','domain reported completion'),
-      failed: () => finish(c,'failed','domain reported failure')
+      completed: () => finish(admission,'completed','domain reported completion'),
+      failed: () => finish(admission,'failed','domain reported failure')
     });
     try {
       const result = options.handle(c.command, structuredClone(c.args), controls, Object.freeze({request:c.request,sequence:c.sequence}));
-      if (result && typeof result.then === 'function') result.catch(() => fence('handler rejected; effects unknown'));
-    } catch (_) { fence('handler threw; effects unknown'); }
+      if (result && typeof result.then === 'function') result.catch(() => { if (pending === admission) fence('handler rejected; effects unknown'); });
+    } catch (_) { if (pending === admission) fence('handler threw; effects unknown'); }
   }
   publish();
   const timer = setInterval(poll, Math.min(50, Math.floor(leaseMs/4)));

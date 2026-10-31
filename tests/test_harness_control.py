@@ -33,17 +33,30 @@ class HarnessTests(unittest.TestCase):
         self.pins = Path(self.temp.name) / "pins.json"
         self.pins.write_text(json.dumps(PINS))
 
-    def launch(self, mode="complete", timeout=1000, reconciliation=None):
+    def launch(self, mode="complete", timeout=1000, reconciliation=None, commands=None):
         script = """
 const {createHarnessMailbox}=require(process.argv[1]);
 const fs=require('fs');
 const mode=process.argv[5];
+let savedCompletion=null, dispatchCount=0;
 const h=createHarnessMailbox({root:process.argv[2],pins:JSON.parse(process.argv[3]),
   timeoutMs:Number(process.argv[6]),leaseMs:1000,
   reconciliation:process.argv[7] === 'none' ? undefined : process.argv[7],
-  commands:{arm:{value:{type:'integer',min:1,max:4}}},
+  commands:JSON.parse(process.argv[8]),
   handle:(command,args,done)=>{
     fs.appendFileSync(process.argv[4],command+'\\n');
+    dispatchCount++;
+    if(mode==='reuse') {
+      if(dispatchCount===1) savedCompletion=done.completed;
+      if(dispatchCount<=33) done.completed();
+      else {
+        fs.writeFileSync(process.argv[4]+'.stale',JSON.stringify(savedCompletion()));
+        setTimeout(()=>{
+          const first=done.completed(), duplicate=done.completed();
+          fs.writeFileSync(process.argv[4]+'.current',JSON.stringify({first,duplicate}));
+        },600);
+      }
+    }
     if(mode==='complete') setTimeout(()=>done.completed(),100);
     if(mode==='slow') setTimeout(()=>done.completed(),400);
     if(mode==='gap') {const end=Date.now()+1200; while(Date.now()<end) {} done.completed();}
@@ -67,6 +80,10 @@ process.on('SIGTERM',()=>process.exit(0));
                 mode,
                 str(timeout),
                 reconciliation or "none",
+                json.dumps(
+                    commands
+                    or {"arm": {"value": {"type": "integer", "min": 1, "max": 4}}}
+                ),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -116,6 +133,19 @@ process.on('SIGTERM',()=>process.exit(0));
 
     def calls(self):
         return self.count.read_text().splitlines() if self.count.exists() else []
+
+    def await_ready(self, descriptor):
+        # Terminal ACK publication precedes actor cleanup. Wait for receiver
+        # readiness before the next admission; never retry a submitted command.
+        until = time.monotonic() + 2
+        while time.monotonic() < until:
+            if (
+                client.status(descriptor)["state"] == "ready"
+                and not (descriptor.parent / "actor").exists()
+            ):
+                return
+            time.sleep(0.005)
+        self.fail("receiver did not finish terminal cleanup")
 
     def test_completed_cli_and_readonly_discovery(self):
         _, descriptor = self.launch()
@@ -197,6 +227,7 @@ process.on('SIGTERM',()=>process.exit(0));
         for _ in range(34):
             result = client.submit(descriptor, PINS, "arm", {"value": 1}, wait=2)
             self.assertEqual(result["status"], "completed")
+            self.await_ready(descriptor)
             if first is None:
                 first = result
         self.assertEqual(len(self.calls()), 34)
@@ -206,6 +237,70 @@ process.on('SIGTERM',()=>process.exit(0));
         client._atomic(descriptor.parent / "command.json", envelope)
         time.sleep(0.1)
         self.assertEqual(client.status(descriptor)["state"], "fenced")
+        self.assertEqual(len(self.calls()), 34)
+
+    def test_reused_uuid_with_retained_ack_is_rejected_without_overwrite(self):
+        _, descriptor = self.launch()
+        first = client.submit(descriptor, PINS, "arm", {"value": 1}, wait=2)
+        self.assertEqual(first["status"], "completed")
+        ack = descriptor.parent / f"ack.{first['request']}.json"
+        original = ack.read_bytes()
+        envelope = self.envelope(descriptor)
+        envelope["request"] = first["request"]
+        client._atomic(
+            descriptor.parent / "actor" / "identity.json", {"request": first["request"]}
+        )
+        client._atomic(descriptor.parent / "command.json", envelope)
+        until = time.monotonic() + 2
+        while (
+            client.status(descriptor)["state"] != "fenced" and time.monotonic() < until
+        ):
+            time.sleep(0.01)
+        self.assertEqual(client.status(descriptor)["state"], "fenced")
+        self.assertEqual(ack.read_bytes(), original)
+        self.assertEqual(self.calls(), ["arm"])
+
+    def test_old_callback_cannot_finish_reused_uuid_after_ack_pruning(self):
+        _, descriptor = self.launch("reuse", timeout=3000)
+        first = None
+        for _ in range(33):
+            result = client.submit(descriptor, PINS, "arm", {"value": 1}, wait=2)
+            self.assertEqual(result["status"], "completed")
+            self.await_ready(descriptor)
+            if first is None:
+                first = result
+        self.assertEqual(len(self.calls()), 33)
+        ack = descriptor.parent / f"ack.{first['request']}.json"
+        self.assertFalse(ack.exists())
+        envelope = self.envelope(descriptor)
+        envelope["request"] = first["request"]
+        client._atomic(
+            descriptor.parent / "actor" / "identity.json", {"request": first["request"]}
+        )
+        client._atomic(descriptor.parent / "command.json", envelope)
+        stale = Path(str(self.count) + ".stale")
+        until = time.monotonic() + 2
+        while not stale.exists() and time.monotonic() < until:
+            time.sleep(0.01)
+        self.assertFalse(json.loads(stale.read_text()))
+        self.assertFalse(ack.exists())
+        self.assertEqual(
+            client.status(descriptor)["pending"],
+            {"request": first["request"], "sequence": 34},
+        )
+        self.assertTrue((descriptor.parent / "actor").exists())
+        self.assertEqual(self.cli(descriptor).returncode, 2)
+        self.assertEqual(len(self.calls()), 34)
+        current = Path(str(self.count) + ".current")
+        until = time.monotonic() + 2
+        while not current.exists() and time.monotonic() < until:
+            time.sleep(0.01)
+        self.assertEqual(
+            json.loads(current.read_text()), {"first": True, "duplicate": False}
+        )
+        self.assertEqual(json.loads(ack.read_text())["sequence"], 34)
+        self.assertEqual(client.status(descriptor)["state"], "ready")
+        self.assertFalse((descriptor.parent / "actor").exists())
         self.assertEqual(len(self.calls()), 34)
 
     def test_wrong_pins_rejected_without_callback(self):
@@ -300,6 +395,65 @@ process.on('SIGTERM',()=>process.exit(0));
             json.loads(self.cli(descriptor).stdout)["status"], "unknown_effect"
         )
         self.assertEqual(len(self.calls()), 2)
+
+    def test_descriptor_exact_byte_bound_precedes_all_file_side_effects(self):
+        commands = {
+            "arm": {
+                f"arg{i}": {"enum": ["x" * 128 for _ in range(32)]} for i in range(16)
+            }
+        }
+
+        def encoded_size():
+            value = {
+                "format": client.FORMAT,
+                "instance": "0" * 36,
+                "nonce": "0" * 64,
+                "pins": PINS,
+                "commands": commands,
+                "sequence": 9007199254740991,
+                "state": "pending",
+                "pending": {"request": "0" * 36, "sequence": 9007199254740991},
+                "expires_at_ms": -9007199254740991,
+                "timeout_ms": 1000,
+            }
+            return len(
+                json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
+            )
+
+        excess = encoded_size() - 65536
+        self.assertGreater(excess, 0)
+        for rule in commands["arm"].values():
+            for i, item in enumerate(rule["enum"]):
+                remove = min(excess, len(item))
+                rule["enum"][i] = item[: len(item) - remove]
+                excess -= remove
+        self.assertEqual(encoded_size(), 65536)
+        # One extra UTF-8 byte must be rejected before even the root is created.
+        commands["arm"]["arg0"]["enum"][0] += "x"
+        self.assertEqual(encoded_size(), 65537)
+        before = set(Path(self.temp.name).iterdir())
+        with self.assertRaisesRegex(RuntimeError, "descriptor exceeds"):
+            self.launch(commands=commands)
+        self.assertFalse(self.root.exists())
+        self.assertEqual(set(Path(self.temp.name).iterdir()), before)
+        commands["arm"]["arg0"]["enum"][0] = commands["arm"]["arg0"]["enum"][0][:-1]
+        # Same character count, one additional UTF-8 byte: enforce bytes, not
+        # JavaScript UTF-16 string length.
+        original = commands["arm"]["arg15"]["enum"][-1]
+        commands["arm"]["arg15"]["enum"][-1] = "é" + original[1:]
+        self.assertEqual(encoded_size(), 65537)
+        with self.assertRaisesRegex(RuntimeError, "descriptor exceeds"):
+            self.launch(commands=commands)
+        self.assertFalse(self.root.exists())
+        self.assertEqual(set(Path(self.temp.name).iterdir()), before)
+        commands["arm"]["arg15"]["enum"][-1] = original
+        _, descriptor = self.launch(commands=commands)
+        self.assertTrue(client.status(descriptor)["lease_current"])
+        self.assertLessEqual(descriptor.stat().st_size, 65536)
+        arguments = {key: value["enum"][0] for key, value in commands["arm"].items()}
+        result = client.submit(descriptor, PINS, "arm", arguments, wait=2)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.calls(), ["arm"])
 
     def test_private_root_and_git_location_refused(self):
         self.root.mkdir(mode=0o755)
