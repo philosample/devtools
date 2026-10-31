@@ -13,6 +13,7 @@ Use this skill for Max for Live MIDI device work. Keep each task limited to the 
 - Give each device-specific abstraction a distinct name and explicit inlet/argument contract. Don't repurpose a generic or legacy abstraction if other devices may resolve it from a shared Max search path.
 - Treat the editable `.maxpat` and shipped `.amxd` as a source/build pair. Rebuild through the project's supported tooling, preserve frozen assets/dependencies, and verify source/device parity plus archive round-trip before delivery.
 - Preserve established Live parameter IDs, names, order, ranges, and defaults. Add new parameters without remapping old ones; update the parent parameter registry where the project uses one.
+- Live's compact device view has a fixed 169-pixel height ([Cycling '74 UI guide](https://docs.cycling74.com/userguide/m4l/live_userinterfaces/)). Declare logical viewport and preview render scale separately; larger panels need an expanded window plus a compact view. Static bounds do not prove host fit, window opening, input or recall.
 - A `live.button` can emit `bang`, which is not a numeric CC value. Convert its state to the intended numeric MIDI value explicitly and verify the chosen semantics against the official mapping before `ctlout`.
 
 ## Racks, Sets, and releases
