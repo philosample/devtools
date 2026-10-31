@@ -12,7 +12,7 @@ python3 -m codex_devtools.quality bootstrap
 python3 -m codex_devtools.quality doctor
 ```
 
-The bootstrap installs `ruff-0.17.3` and `lefthook-2.2.2`. It checks that the pipx bin directory is on `PATH` before writing. If `lefthook` is not already on `PATH`, it creates a `~/.local/bin/lefthook` symlink to the pinned executable, because generated Git hook shims invoke `lefthook` by its normal command name. It refuses to replace a different version. A local receipt at `~/.local/state/codex-devtools/quality-tools.json` records which pieces it created. To reverse only that setup, run:
+The bootstrap installs `ruff-0.17.3` and `lefthook-2.2.2`. It checks that the pipx bin directory is on `PATH` before writing. If `lefthook` is not already on `PATH`, it creates a `~/.local/bin/lefthook` symlink to the pinned executable, because generated Git hook shims invoke `lefthook` by its normal command name. It refuses to replace a different version. A local receipt at `~/.local/state/codex-devtools/quality-tools.json` records the pipx bin/home paths and each component it created, updating after each install so a partial setup can still be removed. Removal refuses to run from a different pipx context; restore the recorded `PIPX_BIN_DIR` and `PIPX_HOME`, then retry. To reverse only that setup, run:
 
 ```sh
 python3 -m codex_devtools.quality remove
@@ -43,6 +43,12 @@ git diff --cached -- path/to/file.py
 ```
 
 Ruff applies only fixes marked safe by default; `ruff.toml` also keeps `unsafe-fixes` disabled. Review and stage intended hunks yourself, especially when the file was partially staged. Ruff formats Python only; legacy Max JavaScript remains unchanged.
+
+## Proposed global guidance
+
+The following concise text is proposed for `~/.codex/AGENTS.md`; it is review-only and has not been installed:
+
+> Before committing, discover and use repository-configured Lefthook hooks when present, and run the repository's documented Ruff checks on changed Python paths. Keep hooks check-only. For repairs, run Ruff safe fixes only on explicit reviewed paths, inspect both staged and unstaged diffs, and stage intended hunks manually. Preserve partially staged changes. Do not run blanket autoformat or mass fixes, and do not apply a JavaScript formatter to legacy Max code without an explicit dialect-safe decision. Before a merge or other consequential follow-up, run prerequisite verification separately and confirm its result; do not put the follow-up in a shell sequence that continues after a failed check.
 
 ## References
 
