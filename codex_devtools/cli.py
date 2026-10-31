@@ -70,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--backup-root", required=True, type=Path)
     undo = deploy_sub.add_parser("rollback", help="restore files from an apply receipt")
     undo.add_argument("receipt", type=Path)
-    midi = commands.add_parser("midi", help="capture or inspect Snoize MIDI Monitor documents")
+    midi = commands.add_parser("midi", help="capture MIDI Monitor input or inspect/run isolated transport checks")
     midi_sub = midi.add_subparsers(dest="action", required=True)
     midi_sub.add_parser("endpoints", help="read-only CoreMIDI inventory (macOS + Swift)")
     template = midi_sub.add_parser("template", help="create a local single-source capture template")
@@ -89,6 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--out", required=True, type=Path, help="new run directory; refuses existing paths")
     capture.add_argument("--seconds", required=True, type=float)
     capture.add_argument("--max-events", type=int, default=100000)
+    loopback = midi_sub.add_parser("loopback", help="send an isolated CoreMIDI fixture to a private virtual destination")
+    loopback.add_argument("--out", required=True, type=Path, help="new local JSON evidence file; refuses overwrite")
+    loopback.add_argument("--timeout", type=float, default=3.0, help="callback wait bound in seconds (0.05–30)")
     runtime = commands.add_parser("runtime", help="discover existing local runtimes")
     runtime_sub = runtime.add_subparsers(dest="action", required=True)
     node = runtime_sub.add_parser("node", help="locate and verify an existing Node.js executable")
@@ -151,6 +154,11 @@ def main(argv: list[str] | None = None) -> int:
                 result = capture(args.template, args.out, args.seconds, args.max_events)
                 _json_out(result)
                 return 1 if result["status"] != "captured" else 0
+            if args.action == "loopback":
+                from .midi_loopback import loopback
+                result = loopback(args.out, args.timeout)
+                _json_out(result)
+                return 0 if result["status"] == "passed" else 1
         if args.group == "max" and args.action == "inspect":
             report = inventory(args.path)
             if args.json:
