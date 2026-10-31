@@ -53,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
     validate = max_sub.add_parser("validate", help="check JSON syntax and patch graph ports")
     validate.add_argument("path", type=Path)
     validate.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    preview = max_sub.add_parser("preview", help="inspect source geometry and optionally export a static SVG schematic")
+    preview.add_argument("path", type=Path, help="Max patcher source (no Max/JSUI code is executed)")
+    preview.add_argument("--out", type=Path, help="new SVG output path; refuses overwrite")
     hash_cmd = commands.add_parser("hash", help="hash a source tree")
     hash_sub = hash_cmd.add_subparsers(dest="action", required=True)
     manifest = hash_sub.add_parser("manifest", help="write a deterministic source-file hash manifest")
@@ -193,6 +196,11 @@ def main(argv: list[str] | None = None) -> int:
                 if not graph["errors"]:
                     print("OK")
             return 1 if graph["errors"] else 0
+        if args.group == "max" and args.action == "preview":
+            from .max_preview import preview as max_preview
+            result = max_preview(args.path, args.out)
+            _json_out(result)
+            return 0
         if args.group == "hash" and args.action == "manifest":
             result = _manifest(args.path, args.out)
             args.out.parent.mkdir(parents=True, exist_ok=True)
