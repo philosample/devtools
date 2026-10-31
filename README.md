@@ -29,6 +29,9 @@ python3 -m codex_devtools hash manifest path/to/source --out /tmp/source-hashes.
 python3 -m codex_devtools deploy plan deployment-manifest.json --source-root path/to/release --destination-root path/to/selected/library --out /tmp/deployment-plan.json
 python3 -m codex_devtools deploy apply /tmp/deployment-plan.json --backup-root /tmp/deployment-backup
 python3 -m codex_devtools deploy rollback /tmp/deployment-backup/receipt.json
+python3 -m codex_devtools ableton inspect-set-device-refs path/to/selected.als
+python3 -m codex_devtools ableton inspect-set-device-refs path/to/selected.als \
+  --expect-amxd-path path/to/expected-device.amxd --expect-amxd-sha256 <sha256>
 ```
 
 `max inspect` reports file and archive entry hashes, entry counts, and graph counts where the root payload is Max JSON. JSON output is available with `--json`. `max extract` accepts MXF archives and AMXDs with embedded MXF payloads. It writes archive names as stored, preserves bytes, and refuses to overwrite any entry path already present in the requested output directory. Extraction is read-only with respect to the source file and does not launch or mutate Max or Live.
@@ -42,6 +45,8 @@ python3 -m codex_devtools deploy rollback /tmp/deployment-backup/receipt.json
 `max preview` inspects stored patcher rectangles for the root and inline nested patchers and can export a deterministic static SVG schematic. The JSON report includes source and SVG hashes, per-patcher bounds and rectangle overlaps. It uses visible presentation boxes when a patcher defines them, otherwise its patching rectangles. It never opens Max or executes JSUI. The SVG shows source-derived box labels and rectangles only; it is not a native Max render and does not draw patchline routing. See [static Max preview limits](docs/MAX-PREVIEW.md).
 
 `deploy` is an explicit per-file deployment workflow. Its tracked manifest contains logical relative paths, while local roots and hash snapshots live in the plan outside the repository. Planning does not write into either root. Apply requires all planned hashes to remain current, creates exact-byte backups and a receipt, and atomically replaces only listed files. Rollback restores prior files or removes files created by that receipt only if their deployed hashes still match. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the manifest contract and recovery behavior.
+
+`ableton inspect-set-device-refs` reads one explicitly selected gzip-compressed `.als` file. It reports the compressed Set hash, deduplicated raw `FileRef/Path` values, and current local file hashes for AMXD paths. Optional expected path/hash arguments require the Set's sole distinct AMXD path to resolve to that exact file and digest. The command does not scan folders, write a Set, or launch Live. See [Ableton Set reference inspection](docs/ABLETON-SET-DEVICE-REFS.md) for the supported XML subset and limits.
 
 The tools accept raw `mx@c` archives, AMXD files using the observed `ampf` + fixed-size device-tag/`meta` + `ptch` wrapper layout, and plain Max JSON patchers. The observed four-byte device tags are `aaaa` (audio), `iiii` (instrument), and `mmmm` (MIDI); other tags and wrapper variants are reported as unsupported. Encrypted `ciph` payloads are also unsupported. The AMXD metadata value is preserved as opaque wrapper metadata. `max inspect` reports wrapper parsing and graph validity separately; graph validity covers only the parsed JSON structure and ports. The parser bounds-checks archive headers, directory records, offsets, and payload lengths. Archive paths must be single safe filenames and duplicate names are rejected.
 
