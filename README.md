@@ -74,3 +74,5 @@ For JavaScript tests, `python3 -m codex_devtools runtime node --json` discovers 
 ## Ruff and Lefthook
 
 `python3 -m codex_devtools.quality bootstrap` installs the pinned Ruff `0.17.3` and Lefthook `2.2.2` tools with a local rollback receipt. See [Python quality tooling](docs/QUALITY.md) for hook activation, staged-file behavior, manual and CI commands, and rollback.
+
+Opt-in test harnesses can publish a local command mailbox for repeatable scripted control through their own existing driver inlet. See [HARNESS-CONTROL.md](docs/HARNESS-CONTROL.md) for exact-instance/pin selection, explicit completion, timeout fencing and real cross-process tests. This transport provides no general Max, Live or MIDI control.
