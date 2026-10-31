@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import platform
 from pathlib import Path
 import subprocess
@@ -17,6 +18,12 @@ FIXTURE = [[0x90, 0x3C, 0x64], [0x80, 0x3C, 0x00], [0xB0, 0x07, 0x55], [0xF8]]
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _publish_exclusive(out: Path, contents: str) -> None:
+    """Create the evidence path once; never follow or replace an existing entry."""
+    with out.open("x", encoding="utf-8") as stream:
+        stream.write(contents)
 
 
 def _assess(native: dict) -> tuple[bool, str | None]:
@@ -40,8 +47,8 @@ def _assess(native: dict) -> tuple[bool, str | None]:
 
 def loopback(out: Path, timeout_seconds: float = 3.0) -> dict:
     """Compile and run the private virtual-destination smoke test, saving evidence."""
-    out = out.expanduser().resolve()
-    if out.exists():
+    out = out.expanduser().absolute()
+    if os.path.lexists(out):
         raise ValueError(f"evidence output already exists: {out}")
     if platform.system() != "Darwin":
         raise ValueError("native CoreMIDI loopback requires macOS; no other MIDI endpoint fallback is allowed")
@@ -92,15 +99,18 @@ def loopback(out: Path, timeout_seconds: float = 3.0) -> dict:
                         receipt["error"] = "native smoke test returned no JSON evidence"
                     else:
                         receipt["native"] = native
-                        passed, error = _assess(native)
-                        receipt["status"] = "passed" if passed else "failed"
-                        if error:
-                            receipt["error"] = error
+                        if run.returncode != 0:
+                            receipt["error"] = f"native process exited with status {run.returncode}"
+                        else:
+                            passed, error = _assess(native)
+                            receipt["status"] = "passed" if passed else "failed"
+                            if error:
+                                receipt["error"] = error
                 except subprocess.TimeoutExpired:
                     receipt["error"] = f"native process exceeded bounded runtime ({timeout_seconds + 8:g} seconds)"
     except (OSError, subprocess.SubprocessError) as exc:
         receipt["error"] = f"CoreMIDI toolchain unavailable: {exc}"
     receipt["finished_utc"] = _utc_now()
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _publish_exclusive(out, json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     return receipt
