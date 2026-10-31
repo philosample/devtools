@@ -35,7 +35,7 @@ Do not delegate further.
 
 Send facts needed for the work, not the whole exploration transcript. For an independent review, provide requirements and the diff but avoid coaching the reviewer toward a suspected answer.
 
-Treat shared workspaces as shared: children must preserve others' edits. Assign disjoint write ownership, keep shared interfaces and integration with the parent, and use an isolated worktree only when conflicting writes or revision-specific runs require it. An instruction to read only is a behavioral constraint, not a separate sandbox.
+Treat shared workspaces as shared: children must preserve others' edits. Assign disjoint write ownership, keep shared interfaces and integration with the parent, and give every Git-backed agent/session its own worktree and branch, including read-only review sessions and the coordinator. Never share a writable checkout or edit the canonical primary checkout. Inspect/reuse only a suitable worktree already owned by that same session; create another for a new owner. An instruction to read only is a behavioral constraint, not a separate sandbox.
 
 ## Coordinate and integrate
 

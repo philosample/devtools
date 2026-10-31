@@ -50,3 +50,13 @@ Lower levels do not prove higher ones. A captured sink replacing `ctlout` proves
 ## Reusable inspection tools
 
 For MXF/AMXD archive inventory/extraction, Max graph checks or deterministic hash manifests, read [Devtools entrypoints](references/devtools.md) and reuse the tested suite when its capabilities fit. Keep instrument tables, encoders, behavior tests and capture fixtures in their device/studio repository.
+
+## Current studio license and deployment policy
+
+The user owns Max for Live, not full Max. New performance/sequencing/control deliverables must run and be editable under that license inside Live. Launch the editor from Live’s Edit in Max command; supported deliverables are appropriate AMXD devices with their dependencies. Plain Max patches/JS can be shared modules or fixtures, but independent Max authoring or standalone application rebuilding is not an assumed workflow.
+
+Cycling ’74 documents separate Max/M4L licenses and restrictions on saving devices using Gen, MC and Jitter Geometry. Existing devices may run without granting authoring rights. Avoid those authoring dependencies in new work unless verified under the user’s license. The recovered Host has Gen/MC content: keep it a preserved reference/existing app until a specific M4L port or licensed-build path is proven. Do not recommend buying Max without a demonstrated required feature and evaluation of an M4L-compatible alternative.
+
+Canonical Git repos are under ~/Code; each agent works in its own worktree. Keep Ableton library paths stable and deploy only a reviewed file manifest with source/destination hashes, backup receipt and rollback. Max validation must include an actual Live-host device load/save/reopen and dependency check; standalone execution or offline AMXD packaging alone does not prove M4L compatibility.
+
+Sources: https://support.cycling74.com/hc/en-us/articles/360049845974-Common-questions-about-Max-for-Live and https://www.ableton.com/en/manual/max-for-live/ .
