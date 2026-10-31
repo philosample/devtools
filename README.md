@@ -7,6 +7,13 @@ cd devtools
 python3 -m codex_devtools --help
 ```
 
+From another project, point `PYTHONPATH` at an existing devtools checkout; this uses the suite in place without installing it and keeps the current directory as the project root:
+
+```sh
+DEVTOOLS_CHECKOUT=/path/to/devtools
+PYTHONPATH="$DEVTOOLS_CHECKOUT${PYTHONPATH:+:$PYTHONPATH}" python3 -m codex_devtools --help
+```
+
 ## Commands
 
 ```sh
