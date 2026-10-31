@@ -186,4 +186,3 @@ def check_expectations(events: Sequence[Mapping[str, Any]], expectations: Any) -
                        "min_count": rule.get("min_count"), "max_count": rule.get("max_count"),
                        "passed": passed})
     return {"passed": all(check["passed"] for check in checks), "checks": checks}
-

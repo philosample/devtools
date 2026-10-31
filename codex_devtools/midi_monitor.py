@@ -187,4 +187,3 @@ def write_csv(document: dict[str, Any], path: str | Path) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(document.get("events", []))
-
