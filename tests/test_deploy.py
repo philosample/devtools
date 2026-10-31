@@ -43,6 +43,29 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(plan["files"][0]["source_sha256"], deploy.sha256(b"source\0\xff\n"))
         self.assertEqual(plan["files"][0]["destination_sha256"], deploy.sha256(b"old\r\n"))
 
+    def test_plan_output_must_remain_outside_source_and_destination_roots(self):
+        (self.source / "device.amxd").write_bytes(b"source")
+        self.manifest_paths(["device.amxd"])
+        for output in (self.source / "plan.json", self.destination / "plan.json"):
+            with self.subTest(output=output):
+                result = main([
+                    "deploy", "plan", str(self.manifest), "--source-root", str(self.source),
+                    "--destination-root", str(self.destination), "--out", str(output),
+                ])
+                self.assertEqual(result, 2)
+                self.assertFalse(output.exists())
+
+    def test_plan_output_cannot_overwrite_its_manifest(self):
+        (self.source / "device.amxd").write_bytes(b"source")
+        self.manifest_paths(["device.amxd"])
+        original = self.manifest.read_bytes()
+        result = main([
+            "deploy", "plan", str(self.manifest), "--source-root", str(self.source),
+            "--destination-root", str(self.destination), "--out", str(self.manifest),
+        ])
+        self.assertEqual(result, 2)
+        self.assertEqual(self.manifest.read_bytes(), original)
+
     def test_apply_backup_and_rollback_preserve_exact_bytes(self):
         original, deployed = b"old\0\xff\r\n", b"new\0\xf0\r\n"
         (self.source / "device.amxd").write_bytes(deployed)
@@ -78,6 +101,27 @@ class DeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "destination changed"):
             deploy.apply_plan(self.out, self.backup)
         self.assertEqual((self.destination / "a").read_bytes(), b"dest edit")
+
+    def test_apply_writes_the_exact_source_bytes_that_passed_hash_check(self):
+        planned_source = b"planned source bytes"
+        (self.source / "a").write_bytes(planned_source)
+        self.plan(["a"])
+        original_digest = deploy._digest_or_none
+        destination_reads = 0
+
+        def edit_source_after_apply_recheck(path):
+            nonlocal destination_reads
+            digest = original_digest(path)
+            if path == self.destination / "a":
+                destination_reads += 1
+                if destination_reads == 2:
+                    (self.source / "a").write_bytes(b"changed after source hash")
+            return digest
+
+        with mock.patch.object(deploy, "_digest_or_none", side_effect=edit_source_after_apply_recheck):
+            receipt = deploy.apply_plan(self.out, self.backup)
+        self.assertEqual((self.destination / "a").read_bytes(), planned_source)
+        self.assertEqual(json.loads(receipt.read_text())["files"][0]["source_sha256"], deploy.sha256(planned_source))
 
     def test_rollback_refuses_post_deployment_edit(self):
         (self.source / "a").write_bytes(b"new")

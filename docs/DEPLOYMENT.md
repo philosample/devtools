@@ -11,11 +11,21 @@ Create a manifest containing logical paths only:
 }
 ```
 
-Plan records each source SHA-256 and the current destination SHA-256 (or `null` for an absent file). It writes only the requested plan file, which must be outside both roots:
+Plan records each source SHA-256 and the current destination SHA-256 (or `null` for an absent file). It writes only the requested plan file, which must be outside both roots and must not replace the input manifest:
 
 ```sh
 python3 -m codex_devtools deploy plan deployment-manifest.json \
   --source-root /path/to/repository/release \
+  --destination-root /path/to/selected/device/library \
+  --out /tmp/example-plan.json
+```
+
+To run the CLI while staying in another project's directory, add the existing devtools checkout to `PYTHONPATH` rather than installing the package:
+
+```sh
+DEVTOOLS_CHECKOUT=/path/to/devtools
+PYTHONPATH="$DEVTOOLS_CHECKOUT${PYTHONPATH:+:$PYTHONPATH}" python3 -m codex_devtools deploy plan deployment-manifest.json \
+  --source-root ./release \
   --destination-root /path/to/selected/device/library \
   --out /tmp/example-plan.json
 ```

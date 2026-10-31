@@ -117,8 +117,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {len(result['files'])} file hashes to {args.out}")
             return 0
         if args.group == "deploy" and args.action == "plan":
-            result = make_plan(args.manifest, args.source_root, args.destination_root)
             output = args.out.resolve(strict=False)
+            if output == args.manifest.resolve(strict=False):
+                raise ValueError("plan output must not overwrite the deployment manifest")
+            result = make_plan(args.manifest, args.source_root, args.destination_root)
             for root_arg in (args.source_root.resolve(), args.destination_root.resolve(strict=False)):
                 try:
                     output.relative_to(root_arg)

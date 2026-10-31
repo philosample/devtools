@@ -271,11 +271,14 @@ def apply_plan(plan_path: Path, backup_root: Path) -> Path:
         receipt_written = True
         for (item, src, dest), entry in zip(targets, receipt["files"]):
             # Recheck immediately before replacement to catch edits during the batch.
-            if sha256(src.read_bytes()) != item["source_sha256"]:
+            source_bytes = src.read_bytes()
+            if sha256(source_bytes) != item["source_sha256"]:
                 raise ValueError(f"source changed during deployment: {item['path']}")
             if _digest_or_none(dest) != item["destination_sha256"]:
                 raise ValueError(f"destination changed during deployment: {item['path']}")
-            _atomic_write(dest, src.read_bytes())
+            # Write the exact bytes that passed the hash check; do not reopen a
+            # mutable source between validation and replacement.
+            _atomic_write(dest, source_bytes)
             entry["state"] = "applied"
             _atomic_json(receipt_path, receipt)
         receipt["status"] = "applied"
