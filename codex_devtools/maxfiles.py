@@ -92,8 +92,20 @@ def decode_file(data: bytes) -> tuple[str, list[dict], dict | None]:
         entries = parse_mxf(data)
         return "mxf", entries, _patch_from_entries(entries)
     if data[:4] == b"ampf":
-        if len(data) < 32 or data[24:28] != b"ptch":
-            raise ValueError("unsupported AMXD header (expected meta/ptch layout)")
+        # The observed wrapper uses aaaa (audio), iiii (instrument), or
+        # mmmm (MIDI) as its four-byte device tag. Keep the following meta
+        # value opaque: inspected devices use both 1 and 7.
+        if (len(data) < 32
+                or data[4:8] != b"\x04\x00\x00\x00"
+                or data[12:16] != b"meta"
+                or data[16:20] != b"\x04\x00\x00\x00"):
+            raise ValueError("unsupported AMXD header (expected fixed-size ampf/meta wrapper fields)")
+        if data[8:12] not in (b"aaaa", b"iiii", b"mmmm"):
+            raise ValueError(f"unsupported AMXD device tag {data[8:12]!r}")
+        if data[24:28] == b"ciph":
+            raise ValueError("unsupported encrypted AMXD ciph payload")
+        if data[24:28] != b"ptch":
+            raise ValueError(f"unsupported AMXD payload chunk {data[24:28]!r} (expected ptch)")
         body_size = struct.unpack_from("<I", data, 28)[0]
         if body_size != len(data) - 32:
             raise ValueError("AMXD ptch size does not match file size")
@@ -203,7 +215,10 @@ def inventory(path: Path) -> dict:
     fmt, entries, patch = decode_file(raw)
     archive = [{"name": entry["name"], "bytes": len(entry["data"]), "sha256": sha256(entry["data"])} for entry in entries]
     graph = graph_report(patch) if patch is not None else None
-    return {"path": str(path), "format": fmt, "bytes": len(raw), "sha256": sha256(raw), "entries": archive, "entry_count": len(archive), "graph": graph}
+    return {"path": str(path), "format": fmt, "wrapper_valid": True,
+            "graph_valid": None if graph is None else not graph["errors"],
+            "bytes": len(raw), "sha256": sha256(raw), "entries": archive,
+            "entry_count": len(archive), "graph": graph}
 
 
 def extract_archive(path: Path, out: Path) -> list[dict]:
