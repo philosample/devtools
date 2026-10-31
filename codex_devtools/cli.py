@@ -88,12 +88,27 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--out", required=True, type=Path, help="new run directory; refuses existing paths")
     capture.add_argument("--seconds", required=True, type=float)
     capture.add_argument("--max-events", type=int, default=100000)
+    runtime = commands.add_parser("runtime", help="discover existing local runtimes")
+    runtime_sub = runtime.add_subparsers(dest="action", required=True)
+    node = runtime_sub.add_parser("node", help="locate and verify an existing Node.js executable")
+    node.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    node.add_argument("--app", type=Path, help="Ableton Live.app or Max.app bundle to check after PATH")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.group == "runtime" and args.action == "node":
+            from .runtime import discover_node
+            result = discover_node(args.app)
+            if args.json:
+                _json_out(result)
+            elif result["available"]:
+                print(f"Node {result['version']}: {result['path']} ({result['provenance']})")
+            else:
+                print(result["error"], file=sys.stderr)
+            return 0 if result["available"] else 2
         if args.group == "midi":
             from .midi_monitor import parse_document, write_json, write_csv
             if args.action in ("endpoints", "template"):
