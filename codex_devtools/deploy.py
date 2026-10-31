@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 
@@ -161,8 +161,14 @@ def _digest_or_none(path: Path) -> str | None:
 def _validate_plan(plan: dict[str, Any]) -> tuple[Path, Path, list[dict[str, Any]]]:
     if plan.get("format") != PLAN_FORMAT:
         raise ValueError(f"plan format must be {PLAN_FORMAT}")
-    source = Path(plan.get("source_root", "")).resolve(strict=False)
-    destination = Path(plan.get("destination_root", "")).resolve(strict=False)
+    source_value = plan.get("source_root")
+    destination_value = plan.get("destination_root")
+    if not isinstance(source_value, str) or not source_value:
+        raise ValueError("plan source_root must be a non-empty path")
+    if not isinstance(destination_value, str) or not destination_value:
+        raise ValueError("plan destination_root must be a non-empty path")
+    source = Path(source_value).resolve(strict=False)
+    destination = Path(destination_value).resolve(strict=False)
     raw = plan.get("files")
     if not isinstance(raw, list) or not raw:
         raise ValueError("plan files must be a non-empty array")
@@ -176,6 +182,56 @@ def _validate_plan(plan: dict[str, Any]) -> tuple[Path, Path, list[dict[str, Any
             raise ValueError(f"invalid destination hash for {item['path']}")
     _roots_disjoint(source, destination)
     return source, destination, raw
+
+
+def verify_plan(plan_path: Path) -> dict[str, Any]:
+    """Read a plan and report whether each source is deployed at its destination."""
+    plan = _json_file(plan_path)
+    source, destination, files = _validate_plan(plan)
+    results = []
+    counts = {"match": 0, "drift": 0, "missing": 0}
+    for item in files:
+        relative = item["path"]
+        source_path = _check_no_symlinks(source, relative, allow_missing=True)
+        destination_path = _check_no_symlinks(destination, relative, allow_missing=True)
+        source_hash = _digest_or_none(source_path)
+        destination_hash = _digest_or_none(destination_path)
+
+        if source_hash is None or destination_hash is None:
+            status = "missing"
+            if source_hash is None:
+                detail = "source_missing"
+            else:
+                detail = "destination_missing"
+        elif source_hash != item["source_sha256"]:
+            status = "drift"
+            detail = "source_drift"
+        elif destination_hash != item["source_sha256"]:
+            status = "drift"
+            detail = "destination_drift"
+        else:
+            status = "match"
+            detail = "deployed_bytes_match_planned_source"
+
+        counts[status] += 1
+        results.append(
+            {
+                "path": relative,
+                "status": status,
+                "detail": detail,
+                "expected_source_sha256": item["source_sha256"],
+                "current_source_sha256": source_hash,
+                "current_destination_sha256": destination_hash,
+            }
+        )
+
+    return {
+        "format": "codex-devtools-deployment-verification-v1",
+        "plan": str(plan_path),
+        "passed": counts["drift"] == 0 and counts["missing"] == 0,
+        "counts": {**counts, "total": len(results)},
+        "files": results,
+    }
 
 
 def _rollback_entries(receipt: dict[str, Any], receipt_path: Path) -> None:

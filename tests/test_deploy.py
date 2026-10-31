@@ -1,3 +1,4 @@
+import io
 import json
 import sys
 import tempfile
@@ -35,13 +36,153 @@ class DeploymentTests(unittest.TestCase):
         ]), 0)
         return json.loads(self.out.read_text())
 
+    def verify(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            result = main(["deploy", "verify", str(self.out)])
+            report = json.loads(output.getvalue())
+        return result, report
+
     def test_plan_is_destination_read_only_and_records_both_hashes(self):
         (self.source / "device.amxd").write_bytes(b"source\0\xff\n")
         (self.destination / "device.amxd").write_bytes(b"old\r\n")
         plan = self.plan(["device.amxd"])
         self.assertEqual((self.destination / "device.amxd").read_bytes(), b"old\r\n")
-        self.assertEqual(plan["files"][0]["source_sha256"], deploy.sha256(b"source\0\xff\n"))
-        self.assertEqual(plan["files"][0]["destination_sha256"], deploy.sha256(b"old\r\n"))
+        self.assertEqual(
+            plan["files"][0]["source_sha256"], deploy.sha256(b"source\0\xff\n")
+        )
+        self.assertEqual(
+            plan["files"][0]["destination_sha256"], deploy.sha256(b"old\r\n")
+        )
+
+    def test_verify_matches_new_destination_bytes_not_original_destination_baseline(
+        self,
+    ):
+        source_bytes = b"planned new bytes"
+        (self.source / "device.amxd").write_bytes(source_bytes)
+        (self.destination / "device.amxd").write_bytes(b"old destination bytes")
+        plan = self.plan(["device.amxd"])
+        self.assertNotEqual(
+            plan["files"][0]["destination_sha256"], plan["files"][0]["source_sha256"]
+        )
+        (self.destination / "device.amxd").write_bytes(source_bytes)
+        original_plan = self.out.read_bytes()
+        before = {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in (
+                self.source / "device.amxd",
+                self.destination / "device.amxd",
+                self.out,
+            )
+        }
+        directories_before = {
+            path: (
+                sorted(child.name for child in path.iterdir()),
+                path.stat().st_mtime_ns,
+            )
+            for path in (self.root, self.source, self.destination)
+        }
+
+        result, report = self.verify()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(report["passed"])
+        self.assertEqual(
+            report["counts"], {"drift": 0, "match": 1, "missing": 0, "total": 1}
+        )
+        self.assertEqual(report["files"][0]["status"], "match")
+        self.assertEqual(
+            report["files"][0]["current_destination_sha256"],
+            report["files"][0]["expected_source_sha256"],
+        )
+        self.assertEqual(self.out.read_bytes(), original_plan)
+        self.assertEqual(
+            before,
+            {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before},
+        )
+        self.assertEqual(
+            directories_before,
+            {
+                path: (
+                    sorted(child.name for child in path.iterdir()),
+                    path.stat().st_mtime_ns,
+                )
+                for path in directories_before
+            },
+        )
+
+    def test_verify_reports_source_and_destination_drift(self):
+        (self.source / "a").write_bytes(b"planned")
+        (self.destination / "a").write_bytes(b"planned")
+        self.plan(["a"])
+        (self.source / "a").write_bytes(b"source edit")
+        result, report = self.verify()
+        self.assertEqual(result, 1)
+        self.assertEqual(report["files"][0]["status"], "drift")
+        self.assertEqual(report["files"][0]["detail"], "source_drift")
+
+        (self.source / "a").write_bytes(b"planned")
+        (self.destination / "a").write_bytes(b"destination edit")
+        result, report = self.verify()
+        self.assertEqual(result, 1)
+        self.assertEqual(report["files"][0]["status"], "drift")
+        self.assertEqual(report["files"][0]["detail"], "destination_drift")
+
+    def test_verify_reports_missing_source_or_destination(self):
+        (self.source / "a").write_bytes(b"planned")
+        self.plan(["a"])
+        result, report = self.verify()
+        self.assertEqual(result, 1)
+        self.assertEqual(report["files"][0]["status"], "missing")
+        self.assertEqual(report["files"][0]["detail"], "destination_missing")
+
+        (self.source / "a").unlink()
+        (self.destination / "a").write_bytes(b"planned")
+        result, report = self.verify()
+        self.assertEqual(result, 1)
+        self.assertEqual(report["files"][0]["status"], "missing")
+        self.assertEqual(report["files"][0]["detail"], "source_missing")
+
+    def test_verify_rejects_symlink_paths_and_empty_or_malformed_plans(self):
+        (self.source / "real").write_bytes(b"planned")
+        (self.destination / "real").write_bytes(b"planned")
+        self.plan(["real"])
+        (self.source / "real").unlink()
+        outside = self.root / "outside"
+        outside.write_bytes(b"planned")
+        try:
+            (self.source / "real").symlink_to(outside)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            deploy.verify_plan(self.out)
+
+        (self.source / "real").unlink()
+        (self.source / "real").write_bytes(b"planned")
+        (self.destination / "real").unlink()
+        (self.destination / "real").symlink_to(outside)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            deploy.verify_plan(self.out)
+
+        plan = json.loads(self.out.read_text())
+        plan["files"] = []
+        self.out.write_text(json.dumps(plan))
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            deploy.verify_plan(self.out)
+        self.out.write_text("not json")
+        with self.assertRaisesRegex(ValueError, "cannot read JSON"):
+            deploy.verify_plan(self.out)
+
+        malformed = {
+            "format": deploy.PLAN_FORMAT,
+            "source_root": [],
+            "destination_root": str(self.destination),
+            "files": [
+                {"path": "a", "source_sha256": "0" * 64, "destination_sha256": None}
+            ],
+        }
+        self.out.write_text(json.dumps(malformed))
+        with self.assertRaisesRegex(ValueError, "source_root"):
+            deploy.verify_plan(self.out)
 
     def test_plan_output_must_remain_outside_source_and_destination_roots(self):
         (self.source / "device.amxd").write_bytes(b"source")

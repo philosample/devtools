@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
+from .deploy import apply_plan, make_plan, rollback, verify_plan
 from .maxfiles import decode_file, extract_archive, graph_report, inventory, sha256
-from .deploy import apply_plan, make_plan, rollback
 
 
 EXCLUDED_DIRS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "outputs", "work"}
@@ -67,7 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     manifest = hash_sub.add_parser("manifest", help="write a deterministic source-file hash manifest")
     manifest.add_argument("path", type=Path)
     manifest.add_argument("--out", required=True, type=Path)
-    deploy = commands.add_parser("deploy", help="plan, apply, or roll back listed artifact deployment")
+    deploy = commands.add_parser(
+        "deploy", help="plan, apply, verify, or roll back listed artifact deployment"
+    )
     deploy_sub = deploy.add_subparsers(dest="action", required=True)
     plan = deploy_sub.add_parser("plan", help="hash listed sources and current destinations without writing to destinations")
     plan.add_argument("manifest", type=Path)
@@ -77,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
     apply = deploy_sub.add_parser("apply", help="apply an unchanged plan and preserve overwritten files")
     apply.add_argument("plan", type=Path)
     apply.add_argument("--backup-root", required=True, type=Path)
+    verify = deploy_sub.add_parser(
+        "verify",
+        help="check planned source and deployed destination hashes without writing",
+    )
+    verify.add_argument("plan", type=Path)
     undo = deploy_sub.add_parser("rollback", help="restore files from an apply receipt")
     undo.add_argument("receipt", type=Path)
     midi = commands.add_parser("midi", help="capture MIDI Monitor input or inspect/run isolated transport checks")
@@ -255,6 +262,10 @@ def main(argv: list[str] | None = None) -> int:
             receipt = apply_plan(args.plan, args.backup_root)
             print(f"applied {args.plan}; receipt: {receipt}")
             return 0
+        if args.group == "deploy" and args.action == "verify":
+            result = verify_plan(args.plan)
+            _json_out(result)
+            return 0 if result["passed"] else 1
         if args.group == "deploy" and args.action == "rollback":
             rollback(args.receipt)
             print(f"rolled back deployment: {args.receipt}")
