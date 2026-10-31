@@ -60,3 +60,9 @@ Cycling ’74 documents separate Max/M4L licenses and restrictions on saving dev
 Canonical Git repos are under ~/Code; each agent works in its own worktree. Keep Ableton library paths stable and deploy only a reviewed file manifest with source/destination hashes, backup receipt and rollback. Max validation must include an actual Live-host device load/save/reopen and dependency check; standalone execution or offline AMXD packaging alone does not prove M4L compatibility.
 
 Sources: https://support.cycling74.com/hc/en-us/articles/360049845974-Common-questions-about-Max-for-Live and https://www.ableton.com/en/manual/max-for-live/ .
+
+## Existing controllers and reuse research
+
+Before implementing a substantial new controller/sequencing module, inspect user-selected local assets and run a bounded GitHub/Max-community survey. Read actual source, license and dependency information for promising candidates; record specific reusable patterns and M4L-only authoring limits. A forum post or repository title is a lead, not proof of compatibility. Do not install or execute unknown code merely to survey it.
+
+An existing AMXD is already a device-format candidate: its problem may be bridge/Set routing, unresolved references or host-version compatibility rather than a file-format conversion. Inspect saved Set MIDI-to/from routes and explicit remote mappings separately. `MidiControllerRange` fields can describe clip data and are not proof of a global learned controller mapping. Preserve the original and test a separately named migration copy in Live.
