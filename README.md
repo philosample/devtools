@@ -51,3 +51,6 @@ python3 -m unittest discover -s tests -v
 - Hash source files deterministically by sorted relative path; do not include timestamps, generated caches, `.git`, or the output manifest itself.
 - Keep hardware mappings, device-specific Markov regressions, and runtime harness fixtures in their owning project. Promote only demonstrably reusable inspection and validation mechanics.
 - Do not add application binaries, audio payloads, user presets/Sets, credentials, personal Codex configuration, or installed-environment data to this repository.
+# MIDI capture
+
+Timed Snoize MIDI Monitor capture, CoreMIDI endpoint inventory, JSON/CSV export and offline assertions are available under `python3 -m codex_devtools midi`. See [capture setup and evidence limits](docs/MIDI-CAPTURE.md).
