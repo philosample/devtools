@@ -1,10 +1,13 @@
 import sys
+import hashlib
+import json
 import unittest
 from pathlib import Path
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from codex_devtools.midi_assertions import analyze, check_expectations
+from codex_devtools.midi_assertions import analyze, check_expectations, verify_capture_receipt
 
 
 def event(kind, **kwargs):
@@ -72,11 +75,60 @@ class MidiAssertionsTests(unittest.TestCase):
             {"expectations": [{"channel": 17, "min_count": 1}]},
             {"expectations": [{"type": "clock", "min_count": 3, "max_count": 2}]},
             {"unexpected": [], "expectations": []},
+            {"expectations": []},
             [],
         )
         for document in bad:
             with self.subTest(document=document), self.assertRaises(ValueError):
                 check_expectations(self.events, document)
+
+    def test_receipt_verification_checks_exact_document_bytes_and_sources(self):
+        source = {"portInputStream": [{"uniqueID": 123, "name": "Capture"}]}
+        with tempfile.TemporaryDirectory() as folder:
+            run = Path(folder)
+            capture = run / "capture-run.mmon"
+            capture.write_bytes(b"exact saved document")
+            document = {"document_sha256": hashlib.sha256(capture.read_bytes()).hexdigest(),
+                        "settings": {"streamSettings": source}, "events": [{"type": "clock"}]}
+            receipt_path = run / "receipt.json"
+            receipt = {
+                "schema": "devtools-midi-capture-v1", "status": "captured",
+                "capture_file": capture.name,
+                "capture_sha256": hashlib.sha256(capture.read_bytes()).hexdigest(),
+                "configured_settings": {"streamSettings": source},
+                "resolved_settings": {"streamSettings": source}, "event_count": 1,
+                "template_sha256": "template-hash", "adapter_sha256": "adapter-hash",
+            }
+            receipt_path.write_text(json.dumps(receipt))
+            result = verify_capture_receipt(capture, document, receipt_path)
+            self.assertEqual(result["source_identity"], {"portInputStream": [123]})
+            self.assertTrue(result["verified"])
+
+            receipt["capture_sha256"] = "0" * 64
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+            receipt["capture_sha256"] = hashlib.sha256(capture.read_bytes()).hexdigest()
+            receipt["resolved_settings"] = {"streamSettings": {"portInputStream": [{"uniqueID": 456}]}}
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "source identity"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+            receipt["resolved_settings"] = {"streamSettings": {"portInputStream": "bogus"}}
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "endpoint objects"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+            receipt["resolved_settings"] = {"streamSettings": {"portOutputStream": [{"uniqueID": 123}]}}
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "at least one valid portInputStream"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+            receipt["resolved_settings"] = {"streamSettings": {"portInputStream": [{"uniqueID": True}]}}
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "integer uniqueID"):
+                verify_capture_receipt(capture, document, receipt_path)
 
 
 if __name__ == "__main__":

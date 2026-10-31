@@ -20,14 +20,20 @@ def source_identity(settings: dict) -> dict:
         raise ValueError("streamSettings must be a dictionary")
     result = {}
     for key, value in settings.items():
-        if not value:
-            continue
-        if isinstance(value, list):
-            if any(not isinstance(s, dict) or not isinstance(s.get("uniqueID"), int) for s in value):
-                raise ValueError("source entries must contain integer uniqueID values")
-            result[key] = sorted(s["uniqueID"] for s in value)
-        else:
-            result[key] = value
+        if not isinstance(key, str) or not isinstance(value, list):
+            raise ValueError("source stream settings must be lists of endpoint objects")
+        if any(not isinstance(source, dict)
+               or not isinstance(source.get("uniqueID"), int)
+               or isinstance(source.get("uniqueID"), bool)
+               for source in value):
+            raise ValueError("source entries must contain integer uniqueID values")
+        identifiers = [source["uniqueID"] for source in value]
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError(f"{key} contains duplicate endpoint uniqueID values")
+        if identifiers or key == "portInputStream":
+            result[key] = sorted(identifiers)
+    if not result.get("portInputStream"):
+        raise ValueError("streamSettings must contain at least one valid portInputStream source")
     return result
 
 
@@ -83,6 +89,7 @@ def capture(template: Path, out: Path, seconds: float, max_events: int = 100000)
         "template_sha256": hashlib.sha256(template.read_bytes()).hexdigest(),
         "adapter_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
         "configured_settings": settings,
+        "configured_source_identity": source_identity(settings.get("streamSettings", {})),
         "capture_file": name,
         "timing_note": "UI-controlled capture; disconnecting inputs adds boundary uncertainty",
     }
@@ -115,6 +122,9 @@ def capture(template: Path, out: Path, seconds: float, max_events: int = 100000)
         receipt["event_count"] = len(parsed["events"])
         receipt["possible_truncation"] = len(parsed["events"]) >= max_events
         receipt["capture_sha256"] = hashlib.sha256(document.read_bytes()).hexdigest()
+        receipt["preflight_sha256"] = hashlib.sha256((out / "preflight.mmon").read_bytes()).hexdigest()
+        receipt["events_json_sha256"] = hashlib.sha256((out / "events.json").read_bytes()).hexdigest()
+        receipt["events_csv_sha256"] = hashlib.sha256((out / "events.csv").read_bytes()).hexdigest()
         receipt["status"] = "inconclusive" if receipt["possible_truncation"] else "captured"
         return receipt
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -123,4 +133,13 @@ def capture(template: Path, out: Path, seconds: float, max_events: int = 100000)
         raise ValueError(f"{exc}; partial evidence retained at {out}") from exc
     finally:
         receipt["elapsed_seconds"] = time.monotonic() - started
+        # Preserve hashes for any partial artifacts if automation or parsing fails.
+        for key, artifact in (
+            ("capture_sha256", document),
+            ("preflight_sha256", out / "preflight.mmon"),
+            ("events_json_sha256", out / "events.json"),
+            ("events_csv_sha256", out / "events.csv"),
+        ):
+            if artifact.is_file():
+                receipt[key] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         save()

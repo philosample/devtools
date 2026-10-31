@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
+import hashlib
+from pathlib import Path
 from statistics import fmean
 from typing import Any
 
@@ -132,6 +134,8 @@ def _validate_expectations(expectations: Any) -> list[dict[str, Any]]:
     entries = expectations.get("expectations")
     if not isinstance(entries, list):
         raise ValueError("expectations must contain an array named 'expectations'")
+    if not entries:
+        raise ValueError("expectations must contain at least one explicit success condition")
     validated = []
     for index, entry in enumerate(entries):
         label = f"expectations[{index}]"
@@ -186,3 +190,68 @@ def check_expectations(events: Sequence[Mapping[str, Any]], expectations: Any) -
                        "min_count": rule.get("min_count"), "max_count": rule.get("max_count"),
                        "passed": passed})
     return {"passed": all(check["passed"] for check in checks), "checks": checks}
+
+
+def verify_capture_receipt(document_path: str | Path, document: Mapping[str, Any], receipt_path: str | Path) -> dict[str, Any]:
+    """Verify that a saved capture and its receipt describe the same exact run.
+
+    Receipt verification is intentionally offline. It checks the source identity
+    before/after resolution and the saved .mmon bytes; it does not establish that
+    captured events meet behavioral expectations.
+    """
+    import json
+
+    path = Path(document_path).resolve()
+    receipt_file = Path(receipt_path)
+    receipt = json.loads(receipt_file.read_text(encoding="utf-8"))
+    if not isinstance(receipt, Mapping):
+        raise ValueError("capture receipt must be a JSON object")
+    if receipt.get("schema") != "devtools-midi-capture-v1":
+        raise ValueError("unsupported MIDI capture receipt schema")
+    if receipt.get("status") not in ("captured", "inconclusive"):
+        raise ValueError(f"capture receipt status is not usable: {receipt.get('status')!r}")
+    capture_file = receipt.get("capture_file")
+    if not isinstance(capture_file, str) or not capture_file or Path(capture_file).name != capture_file:
+        raise ValueError("capture receipt has an invalid capture_file")
+    if path != (receipt_file.resolve().parent / capture_file).resolve():
+        raise ValueError("capture document path does not match receipt capture_file")
+
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    if document.get("document_sha256") != digest:
+        raise ValueError("capture document changed after parsing")
+    if receipt.get("capture_sha256") != digest:
+        raise ValueError("capture document SHA-256 does not match receipt")
+    settings = document.get("settings")
+    if not isinstance(settings, Mapping):
+        raise ValueError("capture document has no settings")
+    current = settings.get("streamSettings")
+    configured = receipt.get("configured_settings")
+    resolved = receipt.get("resolved_settings")
+    if not all(isinstance(item, Mapping) for item in (current, configured, resolved)):
+        raise ValueError("receipt or capture document is missing source settings")
+
+    # Import lazily: this helper is also used by the strictly offline CLI.
+    from .midi_capture import source_identity
+
+    configured_sources = source_identity(configured.get("streamSettings", {}))
+    resolved_sources = source_identity(resolved.get("streamSettings", {}))
+    saved_sources = source_identity(current)
+    if not configured_sources:
+        raise ValueError("receipt contains no explicitly configured input source")
+    if configured_sources != resolved_sources or configured_sources != saved_sources:
+        raise ValueError("capture source identity differs from configured/resolved receipt sources")
+    events = document.get("events")
+    if not isinstance(events, list) or receipt.get("event_count") != len(events):
+        raise ValueError("capture event count does not match receipt")
+
+    return {
+        "verified": True,
+        "status": receipt["status"],
+        "capture_file": capture_file,
+        "capture_sha256": digest,
+        "source_identity": configured_sources,
+        "event_count": len(events),
+        "template_sha256": receipt.get("template_sha256"),
+        "adapter_sha256": receipt.get("adapter_sha256"),
+        "midi_monitor_version": receipt.get("midi_monitor_version"),
+    }

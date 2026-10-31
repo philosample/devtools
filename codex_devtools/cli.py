@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     report = midi_sub.add_parser("report", help="summarize a saved capture and optionally assert event counts")
     report.add_argument("path", type=Path)
     report.add_argument("--expect", type=Path)
+    report.add_argument("--receipt", type=Path, help="verify the matching capture receipt and exact source identity")
     export = midi_sub.add_parser("export", help="decode a saved capture without opening any app")
     export.add_argument("path", type=Path)
     export.add_argument("--out", required=True, type=Path)
@@ -116,11 +117,26 @@ def main(argv: list[str] | None = None) -> int:
                 _json_out(endpoints() if args.action == "endpoints" else make_template(args.out, args.source))
                 return 0
             if args.action == "report":
-                from .midi_assertions import analyze, check_expectations
+                from .midi_assertions import analyze, check_expectations, verify_capture_receipt
                 document = parse_document(args.path)
-                result = {"analysis": analyze(document["events"])}
+                result = {
+                    "provenance": {
+                        "document": str(args.path),
+                        "sha256": document["document_sha256"],
+                        "parser_sha256": sha256(Path(__file__).with_name("midi_monitor.py").read_bytes()),
+                        "midi_monitor_document_version": document["version"],
+                        "event_count": len(document["events"]),
+                    },
+                    "analysis": analyze(document["events"]),
+                }
+                if args.receipt:
+                    result["provenance"]["receipt"] = verify_capture_receipt(args.path, document, args.receipt)
                 if args.expect:
                     result["assertions"] = check_expectations(document["events"], json.loads(args.expect.read_text()))
+                if result["provenance"].get("receipt", {}).get("status") == "inconclusive":
+                    result["provenance"]["capture_gate"] = "inconclusive: event buffer reached its configured limit"
+                    result.setdefault("assertions", {"passed": False, "checks": []})
+                    result["assertions"]["passed"] = False
                 _json_out(result)
                 return 0 if result.get("assertions", {}).get("passed", True) else 1
             if args.action == "export":
