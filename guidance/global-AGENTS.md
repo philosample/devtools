@@ -8,6 +8,7 @@ Optimize for correct completed work and total token use, including child agents 
 - Give each child an objective, relevant paths, ownership, constraints, acceptance check, and concise return format. Prefer a fresh context with a self-contained brief when supported. Keep dependent decisions and integration in the parent.
 - Assign disjoint file ownership. Use one active operator for a shared desktop or browser session; hand it off explicitly. Prefer APIs or CLI tools when they accomplish the task reliably.
 - Load only needed skills and references. Request evidence and short conclusions rather than copied logs. Verify the integrated result with checks appropriate to the change.
+- Limit child-to-coordinator reports to review-ready PRs with a frozen head and consolidated evidence, major decisions, or new actionable blockers. Keep routine evidence in issues/PRs; avoid per-check pings, unchanged status, repeated review reminders, and metadata-only updates.
 
 - Model routing: prefer GPT-6.1 Sol at medium effort for orchestration and GPT-6 Luna at high for bounded child tasks. Escalate to Sol medium/high when ambiguity, failures, or verification needs justify it. Explicit user/session model choices take precedence.
 - Delegate substantial, routine computer-control sequences to a Luna high child when tools are available and handoff is worthwhile. Keep complex visual judgment or ambiguous UI recovery with Sol; keep brief interactions direct. Preserve single-operator ownership.

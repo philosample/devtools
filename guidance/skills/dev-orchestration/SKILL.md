@@ -39,6 +39,8 @@ Treat shared workspaces as shared: children must preserve others' edits. Assign 
 
 ## Coordinate and integrate
 
+Limit cross-chat reports to review-ready PRs with a frozen head and consolidated evidence, major decisions, or new actionable blockers. Keep ordinary test evidence in issues/PRs; do not send per-check pings, repeated reminders or unchanged status. This does not suppress required progress commentary within the working chat.
+
 The parent continues useful complementary work instead of repeating the child's task. Send changed assumptions promptly; reuse an existing child for related follow-up. Wait through the available completion tools with bounded waits instead of polling repeatedly. Stop obsolete work.
 
 Check returned evidence and the actual diff, resolve interface mismatches, then run the relevant integrated checks. Re-run child checks only if integration changed their assumptions or results are uncertain. Report what passed and any remaining limitation. A child saying “done” is not verification.
