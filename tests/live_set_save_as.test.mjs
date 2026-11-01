@@ -240,6 +240,41 @@ await test('a Save click exception is possible egress and is never retried or cl
     assert.ok(!f.actions.some(row => ['Cancel', 'Escape', 'super+w', 'super+s'].includes(row[1])));
   });
 });
+await test('arbitrary Save exceptions retain uncertainty without reading hostile messages', async () => {
+  let messageReads = 0, coercions = 0;
+  const hostile = Object.defineProperties({}, {
+    message: {get() { messageReads++; throw Error('message getter must not run'); }},
+    toString: {value() { coercions++; throw Error('object coercion must not run'); }},
+  });
+  const uninspectable = new Proxy({}, {getOwnPropertyDescriptor() { throw Error('descriptor unavailable'); }});
+  for (const cause of [null, undefined, 'raw native failure', Symbol('native failure'), hostile, uninspectable]) {
+    await withFixture({}, async f => {
+      f.app.click = async id => { f.actions.push(['click', id]); throw cause; };
+      await assert.rejects(preserveLiveSetAs(f.app, f.options), error => {
+        assert.ok(error instanceof LiveSaveAsGuardError);
+        assert.equal(error.phase, 'save-once');
+        assert.equal(error.saveAttempted, true);
+        assert.equal(error.effect, 'save_effect_unknown');
+        assert.equal(error.cause, cause);
+        assert.equal(error.destinationDirectory, f.directory);
+        assert.equal(typeof error.message, 'string');
+        return true;
+      });
+      assert.equal(f.actions.filter(a => a[0] === 'click').length, 1);
+      assert.ok((await fs.stat(f.directory)).isDirectory());
+      assert.equal(await fs.readFile(f.source, 'utf8'), 'synthetic source bytes; never opened in Live');
+      assert.ok(!f.actions.some(row => ['Cancel', 'Escape', 'super+w', 'super+s'].includes(row[1])));
+    });
+  }
+  assert.equal(messageReads, 0); assert.equal(coercions, 0);
+});
+await test('an arbitrary exception before Save preserves the no-Save classification', async () => {
+  await withFixture({}, async f => {
+    f.app.getAXState = async () => { throw null; };
+    await rejected(f, /source-preflight/, false);
+    assert.deepEqual(f.actions, []);
+  });
+});
 await test('missing/zero/symlink final files and changed source metadata cannot claim success', async () => {
   for (const variant of ['missing', 'zero', 'symlink', 'source']) await withFixture({edit: async ({text, state, source, final}) => {
     if (state === 'final') {

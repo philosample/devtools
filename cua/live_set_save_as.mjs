@@ -171,9 +171,23 @@ function config(options) {
   return {source, final, directory, filename};
 }
 
+function causeMessage(cause) {
+  if (typeof cause === 'string') return cause.slice(0, 256);
+  if (cause !== null && (typeof cause === 'object' || typeof cause === 'function')) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(cause, 'message');
+      if (descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'string') {
+        return descriptor.value.slice(0, 256);
+      }
+    } catch { /* Uninspectable errors must retain their operation classification. */ }
+  }
+  return 'native operation failed';
+}
+
 export class LiveSaveAsGuardError extends Error {
   constructor(cause, phase, saveAttempted, destinationDirectory) {
-    super(`${phase}: ${cause.message}`, {cause});
+    // Do not invoke accessors or coerce thrown objects while reporting uncertainty.
+    super(`${phase}: ${causeMessage(cause)}`, {cause});
     this.name = 'LiveSaveAsGuardError';
     this.phase = phase;
     this.saveAttempted = saveAttempted;
