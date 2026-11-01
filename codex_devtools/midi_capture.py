@@ -14,6 +14,10 @@ from pathlib import Path
 
 from .midi_monitor import parse_document, write_csv, write_json
 
+_CAPTURE_SAVE_TIMEOUT_SECONDS = 30.0
+_CAPTURE_SAVE_STABLE_SECONDS = 0.5
+_CAPTURE_SAVE_POLL_SECONDS = 0.1
+
 
 def source_identity(settings: dict, *, require_source: bool = True) -> dict:
     """Return validated endpoint IDs, requiring an input source by default.
@@ -95,6 +99,82 @@ def make_template(destination: Path, source_name: str) -> dict:
     return {"source": source, "template": str(destination)}
 
 
+def _saved_stream_settings(parsed: dict) -> dict:
+    settings = parsed.get("settings")
+    if not isinstance(settings, dict):
+        raise ValueError("capture settings must be a dictionary")  # noqa: TRY004 -- malformed saved settings are capture validation failures
+    streams = settings.get("streamSettings")
+    if not isinstance(streams, dict):
+        raise ValueError("capture streamSettings must be a dictionary")  # noqa: TRY004 -- malformed saved settings are capture validation failures
+    if "portInputStream" not in streams or not isinstance(
+        streams["portInputStream"], list
+    ):
+        raise ValueError("capture streamSettings must contain a portInputStream list")
+    source_identity(streams, require_source=False)
+    return streams
+
+
+def _wait_for_final_capture(
+    document: Path,
+    *,
+    timeout: float = _CAPTURE_SAVE_TIMEOUT_SECONDS,
+    stable_for: float = _CAPTURE_SAVE_STABLE_SECONDS,
+    poll_interval: float = _CAPTURE_SAVE_POLL_SECONDS,
+) -> tuple[dict, str]:
+    """Wait for MIDI Monitor's final save to be parseable and stable.
+
+    A saved document with connected streams is not accepted, even if its bytes
+    are otherwise parseable: that can be the pre-disconnect version still on
+    disk while MIDI Monitor finishes saving the final document.
+    """
+    deadline = time.monotonic() + timeout
+    candidate_hash = None
+    stable_since = None
+    last_error = None
+    saw_connected = False
+    while True:
+        try:
+            parsed = parse_document(document)
+            current_hash = hashlib.sha256(document.read_bytes()).hexdigest()
+            if parsed["document_sha256"] != current_hash:
+                raise ValueError("capture changed while it was being parsed")
+            streams = _saved_stream_settings(parsed)
+            if any(streams.values()):
+                saw_connected = True
+                candidate_hash = None
+                stable_since = None
+            elif current_hash != candidate_hash:
+                candidate_hash = current_hash
+                stable_since = time.monotonic()
+            elif time.monotonic() - stable_since >= stable_for:
+                # Re-parse at the end of the stability window and return the
+                # exact digest associated with that parse.
+                final = parse_document(document)
+                final_hash = hashlib.sha256(document.read_bytes()).hexdigest()
+                final_streams = _saved_stream_settings(final)
+                if final["document_sha256"] == final_hash == candidate_hash and not any(
+                    final_streams.values()
+                ):
+                    return final, final_hash
+                candidate_hash = None
+                stable_since = None
+        except (OSError, ValueError) as exc:
+            last_error = exc
+            candidate_hash = None
+            stable_since = None
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            if saw_connected:
+                reason = "capture inputs were not disconnected before save settled"
+            elif last_error:
+                reason = f"capture did not become parseable and stable: {last_error}"
+            else:
+                reason = "capture did not become parseable and stable before timeout"
+            raise ValueError(reason)
+        time.sleep(min(poll_interval, remaining))
+
+
 def capture(
     template: Path, out: Path, seconds: float, max_events: int = 100000
 ) -> dict:
@@ -172,16 +252,14 @@ def capture(
             raise ValueError(
                 "resolved MIDI sources differ from template (missing or auto-added endpoints)"
             )
-        parsed = parse_document(document)
-        if any(parsed["settings"].get("streamSettings", {}).values()):
-            raise ValueError(
-                "capture inputs were not disconnected; capture boundary is unverified"
-            )
+        parsed, capture_hash = _wait_for_final_capture(document)
         write_json(parsed, out / "events.json")
         write_csv(parsed, out / "events.csv")
         receipt["event_count"] = len(parsed["events"])
         receipt["possible_truncation"] = len(parsed["events"]) >= max_events
-        receipt["capture_sha256"] = hashlib.sha256(document.read_bytes()).hexdigest()
+        if hashlib.sha256(document.read_bytes()).hexdigest() != capture_hash:
+            raise ValueError("capture changed after final save validation")
+        receipt["capture_sha256"] = capture_hash
         receipt["preflight_sha256"] = hashlib.sha256(
             (out / "preflight.mmon").read_bytes()
         ).hexdigest()
@@ -208,6 +286,6 @@ def capture(
             ("events_json_sha256", out / "events.json"),
             ("events_csv_sha256", out / "events.csv"),
         ):
-            if artifact.is_file():
+            if artifact.is_file() and key not in receipt:
                 receipt[key] = hashlib.sha256(artifact.read_bytes()).hexdigest()
         save()
