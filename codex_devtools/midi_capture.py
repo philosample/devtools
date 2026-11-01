@@ -1,39 +1,50 @@
 """Explicit, isolated GUI capture adapter; offline inspection has no UI effects."""
+
 from __future__ import annotations
 
 import hashlib
 import json
 import math
-from pathlib import Path
 import plistlib
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-from .midi_monitor import parse_document, write_json, write_csv
+from .midi_monitor import parse_document, write_csv, write_json
 
 
-def source_identity(settings: dict) -> dict:
+def source_identity(settings: dict, *, require_source: bool = True) -> dict:
+    """Return validated endpoint IDs, requiring an input source by default.
+
+    Saved captures can use ``require_source=False`` after MIDI Monitor
+    disconnects every stream before saving; all stream entries are still
+    validated, including endpoint shapes and duplicate IDs.
+    """
     # Snoize rewrites saved display names on load and adds empty stream arrays.
     if not isinstance(settings, dict):
-        raise ValueError("streamSettings must be a dictionary")
+        raise ValueError("streamSettings must be a dictionary")  # noqa: TRY004 -- preserve source_identity's ValueError contract
     result = {}
     for key, value in settings.items():
         if not isinstance(key, str) or not isinstance(value, list):
-            raise ValueError("source stream settings must be lists of endpoint objects")
-        if any(not isinstance(source, dict)
-               or not isinstance(source.get("uniqueID"), int)
-               or isinstance(source.get("uniqueID"), bool)
-               for source in value):
+            raise ValueError("source stream settings must be lists of endpoint objects")  # noqa: TRY004 -- preserve source_identity's ValueError contract
+        if any(
+            not isinstance(source, dict)
+            or not isinstance(source.get("uniqueID"), int)
+            or isinstance(source.get("uniqueID"), bool)
+            for source in value
+        ):
             raise ValueError("source entries must contain integer uniqueID values")
         identifiers = [source["uniqueID"] for source in value]
         if len(set(identifiers)) != len(identifiers):
             raise ValueError(f"{key} contains duplicate endpoint uniqueID values")
         if identifiers or key == "portInputStream":
             result[key] = sorted(identifiers)
-    if not result.get("portInputStream"):
-        raise ValueError("streamSettings must contain at least one valid portInputStream source")
+    if require_source and not result.get("portInputStream"):
+        raise ValueError(
+            "streamSettings must contain at least one valid portInputStream source"
+        )
     return result
 
 
@@ -41,9 +52,18 @@ def endpoints() -> list:
     if sys.platform != "darwin":
         raise ValueError("CoreMIDI inventory requires macOS")
     script = Path(__file__).with_name("midi_endpoints.swift")
-    result = subprocess.run(["/usr/bin/swift", str(script)], capture_output=True, text=True, timeout=60)
+    result = subprocess.run(
+        ["/usr/bin/swift", str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
     if result.returncode:
-        raise ValueError("CoreMIDI inventory failed (Swift developer tools required): " + result.stderr.strip())
+        raise ValueError(
+            "CoreMIDI inventory failed (Swift developer tools required): "
+            + result.stderr.strip()
+        )
     return json.loads(result.stdout)
 
 
@@ -51,19 +71,33 @@ def make_template(destination: Path, source_name: str) -> dict:
     """Resolve exactly one online CoreMIDI input endpoint; never invent IDs."""
     if destination.exists():
         raise ValueError("template output already exists")
-    matches = [s for s in endpoints() if s["direction"] == "source" and not s["offline"]
-               and source_name in (s["name"], s["displayName"])]
+    matches = [
+        s
+        for s in endpoints()
+        if s["direction"] == "source"
+        and not s["offline"]
+        and source_name in (s["name"], s["displayName"])
+    ]
     if len(matches) != 1:
-        raise ValueError("source name must match exactly one online MIDI input endpoint")
+        raise ValueError(
+            "source name must match exactly one online MIDI input endpoint"
+        )
     source = {"uniqueID": matches[0]["uniqueID"], "name": matches[0]["displayName"]}
-    document = {"version": 2, "streamSettings": {"portInputStream": [source]},
-                "filterMask": 0xFFFFFFFF, "areSourcesShown": True, "isFilterShown": True}
+    document = {
+        "version": 2,
+        "streamSettings": {"portInputStream": [source]},
+        "filterMask": 0xFFFFFFFF,
+        "areSourcesShown": True,
+        "isFilterShown": True,
+    }
     with destination.open("xb") as f:
         plistlib.dump(document, f)
     return {"source": source, "template": str(destination)}
 
 
-def capture(template: Path, out: Path, seconds: float, max_events: int = 100000) -> dict:
+def capture(
+    template: Path, out: Path, seconds: float, max_events: int = 100000
+) -> dict:
     if sys.platform != "darwin":
         raise ValueError("GUI capture requires macOS")
     if not math.isfinite(seconds) or not 0 < seconds <= 3600:
@@ -83,49 +117,83 @@ def capture(template: Path, out: Path, seconds: float, max_events: int = 100000)
     document.write_bytes(plistlib.dumps(data))
     script = Path(__file__).with_name("midi_capture.applescript")
     receipt = {
-        "schema": "devtools-midi-capture-v1", "status": "running",
+        "schema": "devtools-midi-capture-v1",
+        "status": "running",
         "started_utc": datetime.now(timezone.utc).isoformat(),
-        "requested_seconds": seconds, "max_events": max_events,
+        "requested_seconds": seconds,
+        "max_events": max_events,
         "template_sha256": hashlib.sha256(template.read_bytes()).hexdigest(),
         "adapter_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
         "configured_settings": settings,
-        "configured_source_identity": source_identity(settings.get("streamSettings", {})),
+        "configured_source_identity": source_identity(
+            settings.get("streamSettings", {})
+        ),
         "capture_file": name,
         "timing_note": "UI-controlled capture; disconnecting inputs adds boundary uncertainty",
     }
     info = Path("/Applications/MIDI Monitor.app/Contents/Info.plist")
     if info.exists():
-        receipt["midi_monitor_version"] = plistlib.loads(info.read_bytes()).get("CFBundleShortVersionString")
+        receipt["midi_monitor_version"] = plistlib.loads(info.read_bytes()).get(
+            "CFBundleShortVersionString"
+        )
     receipt_path = out / "receipt.json"
+
     def save():
         receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
+
     save()
     started = time.monotonic()
     try:
-        result = subprocess.run([
-            "/usr/bin/osascript", str(script), str(document),
-            str(out / "preflight.mmon"), name, str(seconds), str(max_events), document.as_uri(),
-        ], capture_output=True, text=True, timeout=seconds + 60)
+        result = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                str(script),
+                str(document),
+                str(out / "preflight.mmon"),
+                name,
+                str(seconds),
+                str(max_events),
+                document.as_uri(),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=seconds + 60,
+        )
         receipt["adapter_stdout"] = result.stdout.strip()
         if result.returncode:
             raise ValueError("MIDI Monitor automation failed: " + result.stderr.strip())
         preflight = parse_document(out / "preflight.mmon")
         resolved = preflight["settings"].get("streamSettings", {})
         receipt["resolved_settings"] = preflight["settings"]
-        if source_identity(resolved) != source_identity(settings.get("streamSettings", {})):
-            raise ValueError("resolved MIDI sources differ from template (missing or auto-added endpoints)")
+        if source_identity(resolved) != source_identity(
+            settings.get("streamSettings", {})
+        ):
+            raise ValueError(
+                "resolved MIDI sources differ from template (missing or auto-added endpoints)"
+            )
         parsed = parse_document(document)
         if any(parsed["settings"].get("streamSettings", {}).values()):
-            raise ValueError("capture inputs were not disconnected; capture boundary is unverified")
+            raise ValueError(
+                "capture inputs were not disconnected; capture boundary is unverified"
+            )
         write_json(parsed, out / "events.json")
         write_csv(parsed, out / "events.csv")
         receipt["event_count"] = len(parsed["events"])
         receipt["possible_truncation"] = len(parsed["events"]) >= max_events
         receipt["capture_sha256"] = hashlib.sha256(document.read_bytes()).hexdigest()
-        receipt["preflight_sha256"] = hashlib.sha256((out / "preflight.mmon").read_bytes()).hexdigest()
-        receipt["events_json_sha256"] = hashlib.sha256((out / "events.json").read_bytes()).hexdigest()
-        receipt["events_csv_sha256"] = hashlib.sha256((out / "events.csv").read_bytes()).hexdigest()
-        receipt["status"] = "inconclusive" if receipt["possible_truncation"] else "captured"
+        receipt["preflight_sha256"] = hashlib.sha256(
+            (out / "preflight.mmon").read_bytes()
+        ).hexdigest()
+        receipt["events_json_sha256"] = hashlib.sha256(
+            (out / "events.json").read_bytes()
+        ).hexdigest()
+        receipt["events_csv_sha256"] = hashlib.sha256(
+            (out / "events.csv").read_bytes()
+        ).hexdigest()
+        receipt["status"] = (
+            "inconclusive" if receipt["possible_truncation"] else "captured"
+        )
         return receipt
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         receipt["status"] = "failed"
