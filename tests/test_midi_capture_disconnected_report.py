@@ -120,7 +120,7 @@ class DisconnectedCaptureReceiptTests(unittest.TestCase):
                         "spyingInputStream": [],
                         "otherInputStream": [{"uniqueID": 456}],
                     },
-                    "source identity differs",
+                    "not disconnected",
                 ),
                 (
                     {
@@ -192,7 +192,12 @@ class DisconnectedCaptureReceiptTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "event count"):
                 verify_capture_receipt(capture, document, receipt_path)
 
-    def test_saved_capture_with_different_connected_input_is_rejected(self):
+            receipt["event_count"] = True
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "event count"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+    def test_saved_capture_with_connected_input_is_rejected(self):
         source = {"portInputStream": [{"uniqueID": 123, "name": "Capture"}]}
         with tempfile.TemporaryDirectory() as folder:
             capture = Path(folder) / "capture.mmon"
@@ -216,8 +221,13 @@ class DisconnectedCaptureReceiptTests(unittest.TestCase):
             receipt_path = Path(folder) / "receipt.json"
             receipt_path.write_text(json.dumps(receipt))
 
-            with self.assertRaisesRegex(ValueError, "source identity differs"):
-                verify_capture_receipt(capture, document, receipt_path)
+            for saved in (source, other_source):
+                document["settings"]["streamSettings"] = saved
+                with (
+                    self.subTest(saved=saved),
+                    self.assertRaisesRegex(ValueError, "not disconnected"),
+                ):
+                    verify_capture_receipt(capture, document, receipt_path)
 
 
 if __name__ == "__main__":
