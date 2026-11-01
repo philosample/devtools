@@ -76,3 +76,5 @@ For JavaScript tests, `python3 -m codex_devtools runtime node --json` discovers 
 `python3 -m codex_devtools.quality bootstrap` installs the pinned Ruff `0.17.3` and Lefthook `2.2.2` tools with a local rollback receipt. See [Python quality tooling](docs/QUALITY.md) for hook activation, staged-file behavior, manual and CI commands, and rollback.
 
 Opt-in test harnesses can publish a local command mailbox for repeatable scripted control through their own existing driver inlet. See [HARNESS-CONTROL.md](docs/HARNESS-CONTROL.md) for exact-instance/pin selection, explicit completion, timeout fencing and real cross-process tests. This transport provides no general Max, Live or MIDI control.
+
+For native CUA sessions, the explicit app-handle [Live Set Save As helper](docs/CUA-LIVE-SAVE-AS.md) guards a fresh preservation copy, exact source/final URLs, stopped transport and a single Save attempt. It is not a CLI command; its Node fake-app checks do not establish native Live behavior. Run `node tests/live_set_save_as.test.mjs` with an existing runtime.
