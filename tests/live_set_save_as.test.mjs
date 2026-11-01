@@ -9,7 +9,7 @@ let count = 0;
 async function test(name, run) { await run(); count++; console.log('PASS ' + name); }
 const url = filename => pathToFileURL(filename).href;
 
-async function fixture({nested = false, edit, filename = 'Copy With Spaces.als'} = {}) {
+async function fixture({nested = false, goToSheet = false, edit, filename = 'Copy With Spaces.als'} = {}) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'devtools-save-as-test-')));
   const source = path.join(base, 'Original Source.als');
   await fs.writeFile(source, 'synthetic source bytes; never opened in Live');
@@ -26,7 +26,8 @@ async function fixture({nested = false, edit, filename = 'Copy With Spaces.als'}
     async getAXState(args) {
       assert.deepEqual(args, {emit: false, disableDiffing: true});
       observations++;
-      const text = state === 'source' ? normal(source) : state === 'final' ? normal(final) : save();
+      const text = state === 'source' ? normal(source) : state === 'final' ? normal(final) :
+        state === 'path' && goToSheet ? `0 sheet ID: GoToWindow, Secondary Actions: Raise\n  1 button Description: Close, ID: CloseButton\n  35 text field (settable) Value: ${folder}, ID: PathTextField\n  36 list (disabled) Description: path, ID: suggestion` : save();
       return edit ? await edit({text, state, observations, base, source, directory, final, actions, app}) : text;
     },
     async performSecondaryAction(id, action) { freshAction(); actions.push(['raise', id, action]); assert.equal(state, 'source'); assert.equal(id, 0); assert.equal(action, 'Raise'); },
@@ -85,6 +86,28 @@ await test('a Save panel may hide the modal source subtree while visible state i
     await preserveLiveSetAs(f.app, f.options); assert.equal(f.actions.filter(a => a[0] === 'click').length, 1);
   });
   await withFixture({edit: ({text, observations}) => observations === 5 ? text.replace('Value: 0, ID: Transport.Play', 'Value: 1, ID: Transport.Play') : text}, f => rejected(f, /stopped/));
+});
+await test('the native GoToWindow sheet hides Save fields but preserves the exact path gate', async () => {
+  await withFixture({goToSheet: true, nested: true}, async f => {
+    const result = await preserveLiveSetAs(f.app, f.options);
+    assert.equal(result.destinationURL, f.options.expectedFinalURL);
+    assert.equal(result.saveAttempts, 1);
+    assert.equal(f.actions.filter(a => a[0] === 'click').length, 1);
+  });
+});
+await test('unrecognized or ambiguous Go To Folder sheets cannot reach Save', async () => {
+  for (const variant of ['wrong_id', 'wrong_role', 'extra_modal', 'missing_path', 'duplicate_path', 'foreign_source', 'replace']) {
+    await withFixture({goToSheet: true, edit: ({text, state}) => {
+      if (state !== 'path') return text;
+      if (variant === 'wrong_id') return text.replace('ID: GoToWindow,', 'ID: GoToWindowBackup,');
+      if (variant === 'wrong_role') return text.replace('0 sheet', '0 dialog');
+      if (variant === 'extra_modal') return text + '\n90 dialog Save';
+      if (variant === 'missing_path') return text.replace('ID: PathTextField', 'ID: other');
+      if (variant === 'duplicate_path') return text + '\n90 text field Value: other, ID: PathTextField';
+      if (variant === 'foreign_source') return text + '\n90 standard window Other, URL: file:///private/tmp/Other.als';
+      return text + '\n90 button Replace, ID: overwrite';
+    }}, f => rejected(f, /dialog structure|exactly one|source Set|prompt/, false));
+  }
 });
 await test('Set URL parser compares exact decoded file identity and rejects misleading forms', async () => {
   assert.equal(setURL('file:///private/tmp/A%20Set.als').path, '/private/tmp/A Set.als');

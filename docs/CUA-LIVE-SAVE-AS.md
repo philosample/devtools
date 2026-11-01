@@ -63,7 +63,14 @@ subtree; if either is visible, it must still match the source/stopped state.
 The final observation requires the expected destination URL and stopped transport.
 This is a sequence of observations, not continuous transport/liveness proof.
 
-Only the single English `dialog Save` AX shape modeled by these tests is accepted.
+The English `dialog Save` shape is required for Save decisions. During the two
+Go To Folder decisions only, the separately observed macOS `sheet ID: GoToWindow`
+is also accepted, with one unique `PathTextField`. That sheet can hide the entire
+Save/source/transport subtree; the preceding filename and source checks still
+apply. Unknown sheets, extra modals and wrong/missing/duplicate path fields stop
+the operation. The first persisted-module native attempt reached this sheet and
+stopped before Save; the pending copy was then completed manually. This observed
+shape correction does not by itself establish a successful full module run.
 Controls must have unique numeric IDs and exact identifiers/roles. Native `(disabled)` flags
 immediately after a targeted role are rejected, including already-correct
 filename/path text fields; literal `(disabled)` text inside a filename is not a
