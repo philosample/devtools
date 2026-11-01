@@ -51,6 +51,17 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid pins"):
             self.launch(pins=too_many)
 
+    def test_component_pin_limit_is_inclusive(self):
+        pins = {
+            "artifact_sha256": "a" * 64,
+            "components": {f"component_{i:02d}": "b" * 64 for i in range(64)},
+        }
+        _, descriptor = self.launch(pins=pins)
+        self.assertEqual(json.loads(descriptor.read_text())["pins"], pins)
+        self.assertEqual(
+            client.submit(descriptor, pins, "arm", {"value": 1})["status"], "completed"
+        )
+
     def launch(
         self,
         mode="complete",
