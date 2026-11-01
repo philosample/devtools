@@ -1,5 +1,7 @@
 import hashlib
+import json
 import plistlib
+import subprocess
 import tempfile
 import threading
 import time
@@ -9,6 +11,7 @@ from unittest.mock import patch
 
 from codex_devtools.midi_capture import (
     _wait_for_final_capture,
+    capture,
     make_template,
     source_identity,
 )
@@ -123,6 +126,75 @@ class CaptureSaveSettlementTests(unittest.TestCase):
                     path, timeout=0.06, stable_for=0.02, poll_interval=0.01
                 )
             self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_missing_or_malformed_saved_stream_settings_fail_closed(self):
+        malformed_documents = {
+            "missing streamSettings": {"version": 2},
+            "non-mapping streamSettings": {
+                "version": 2,
+                "streamSettings": [],
+            },
+            "missing portInputStream": {"version": 2, "streamSettings": {}},
+            "non-list portInputStream": {
+                "version": 2,
+                "streamSettings": {"portInputStream": "bogus"},
+            },
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "capture.mmon"
+            for label, document in malformed_documents.items():
+                with self.subTest(label=label):
+                    path.write_bytes(plistlib.dumps(document, fmt=plistlib.FMT_BINARY))
+                    with self.assertRaisesRegex(
+                        ValueError, "did not become parseable and stable"
+                    ):
+                        _wait_for_final_capture(
+                            path, timeout=0.01, stable_for=0.005, poll_interval=0.002
+                        )
+
+    def test_malformed_saved_settings_write_failed_receipt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            template = root / "template.mmon"
+            template_bytes = self.document(connected=True)
+            template.write_bytes(template_bytes)
+            out = root / "capture-run"
+
+            def automation(command, **kwargs):
+                Path(command[2]).write_bytes(
+                    plistlib.dumps({"version": 2}, fmt=plistlib.FMT_BINARY)
+                )
+                Path(command[3]).write_bytes(template_bytes)
+                return subprocess.CompletedProcess(command, 0, "closed", "")
+
+            real_wait = _wait_for_final_capture
+
+            def bounded_wait(path):
+                return real_wait(
+                    path, timeout=0.02, stable_for=0.005, poll_interval=0.002
+                )
+
+            with (
+                patch("codex_devtools.midi_capture.sys.platform", "darwin"),
+                patch(
+                    "codex_devtools.midi_capture.subprocess.run", side_effect=automation
+                ),
+                patch(
+                    "codex_devtools.midi_capture._wait_for_final_capture",
+                    side_effect=bounded_wait,
+                ),
+                self.assertRaisesRegex(ValueError, "partial evidence retained"),
+            ):
+                capture(template, out, seconds=1)
+
+            receipt = json.loads((out / "receipt.json").read_text())
+            saved_capture = out / receipt["capture_file"]
+            self.assertEqual(receipt["status"], "failed")
+            self.assertIn("streamSettings must be a dictionary", receipt["error"])
+            self.assertEqual(
+                receipt["capture_sha256"],
+                hashlib.sha256(saved_capture.read_bytes()).hexdigest(),
+            )
 
 
 if __name__ == "__main__":

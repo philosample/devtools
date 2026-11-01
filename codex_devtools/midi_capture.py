@@ -99,6 +99,21 @@ def make_template(destination: Path, source_name: str) -> dict:
     return {"source": source, "template": str(destination)}
 
 
+def _saved_stream_settings(parsed: dict) -> dict:
+    settings = parsed.get("settings")
+    if not isinstance(settings, dict):
+        raise ValueError("capture settings must be a dictionary")  # noqa: TRY004 -- malformed saved settings are capture validation failures
+    streams = settings.get("streamSettings")
+    if not isinstance(streams, dict):
+        raise ValueError("capture streamSettings must be a dictionary")  # noqa: TRY004 -- malformed saved settings are capture validation failures
+    if "portInputStream" not in streams or not isinstance(
+        streams["portInputStream"], list
+    ):
+        raise ValueError("capture streamSettings must contain a portInputStream list")
+    source_identity(streams, require_source=False)
+    return streams
+
+
 def _wait_for_final_capture(
     document: Path,
     *,
@@ -123,7 +138,7 @@ def _wait_for_final_capture(
             current_hash = hashlib.sha256(document.read_bytes()).hexdigest()
             if parsed["document_sha256"] != current_hash:
                 raise ValueError("capture changed while it was being parsed")
-            streams = parsed["settings"].get("streamSettings", {})
+            streams = _saved_stream_settings(parsed)
             if any(streams.values()):
                 saw_connected = True
                 candidate_hash = None
@@ -136,7 +151,7 @@ def _wait_for_final_capture(
                 # exact digest associated with that parse.
                 final = parse_document(document)
                 final_hash = hashlib.sha256(document.read_bytes()).hexdigest()
-                final_streams = final["settings"].get("streamSettings", {})
+                final_streams = _saved_stream_settings(final)
                 if final["document_sha256"] == final_hash == candidate_hash and not any(
                     final_streams.values()
                 ):
