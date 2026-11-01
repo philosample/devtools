@@ -39,6 +39,39 @@ IAC proves the Live output path. A physical device's MIDI output can provide str
 
 ## Runtime evidence and next improvements
 
+### Live playback isolation and restoration
+
+No Output on test tracks does not disable Live's global output Sync switches.
+Before a playback test, inspect the complete applicable output inventory in
+Tempo & MIDI Settings. Preserve exact port names and original Sync values.
+If authorized, disable only the enabled Sync outputs and verify all applicable
+outputs are off before starting. Keep the test tracks isolated separately.
+Stop transport before restoring the exact original values; verify restoration
+even if the test fails. Do not infer current isolation from an earlier run.
+This procedure does not disable control-surface scripts or prove MIDI silence.
+
+The read-only saved-AX verifier avoids rewriting the comparison logic:
+
+```sh
+python3 -m codex_devtools.live_sync_ax before.txt isolated.txt restored.txt \
+  --expected-output-count 25
+```
+
+Supply the actual independently inspected inventory count, not this example's
+25. It rejects missing, duplicate, renamed or unsupported rows, requires every
+isolated Sync value off, compares restoration exactly and hashes all three
+UTF-8 snapshots. Full AX rows and `+`/`~` diff rows are accepted only when the
+explicit count and exact identities agree; a partial diff normally fails.
+Exit 0 means saved values match the declared inventory/checks, 1 means isolation
+or restoration differs, and 2 means invalid input. It does not discover ports,
+drive CUA, change settings, authorize playback or prove complete inventory,
+current Live state or wire behavior. Keep machine-specific snapshots local.
+
+R39 on Live 12.4.16/macOS verified this workflow with 25 enumerated outputs and
+six temporarily disabled/restored Sync switches; original values matched after
+stopping. Studio-control PR242 records the exact native observation receipt.
+That single-host result is not a portable preference API or a timing guarantee.
+
 ### Native isolated CoreMIDI loopback
 
 `midi loopback` compiles a small Swift program with the installed Apple toolchain and runs a bounded, same-process transport check. It creates one ephemeral CoreMIDI client, a uniquely named MIDI 1.0 virtual destination, and an output port. It sends a fixed note-on, note-off, CC, and realtime clock fixture only to the `MIDIEndpointRef` returned directly by that destination creation call. It never enumerates existing destinations, selects an endpoint by name, publishes a virtual source, or calls `MIDIReceivedEventList`. The destination callback records its received MIDI bytes in order and captures `DispatchTime.uptimeNanoseconds` separately from each CoreMIDI event's scheduled timestamp. All created resources are disposed before the result is returned. The command writes a JSON receipt locally and refuses to overwrite an existing path. Compilation and process execution have hard bounds; the callback wait defaults to 3 seconds and accepts 0.05–30 seconds.
