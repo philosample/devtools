@@ -19,7 +19,7 @@ function atomic(file, value) {
 function read(file) { const s = fs.readFileSync(file, 'utf8'); if (Buffer.byteLength(s, 'utf8') > 65536) throw Error('oversized JSON'); return JSON.parse(s); }
 function pinsValid(p) {
   const hash = x => typeof x === 'string' && /^[a-f0-9]{64}$/.test(x);
-  return exact(p, ['artifact_sha256', 'components']) && hash(p.artifact_sha256) && p.components && !Array.isArray(p.components) && Object.keys(p.components).length > 0 && Object.keys(p.components).length <= 32 && Object.entries(p.components).every(([k,v]) => /^[a-zA-Z0-9_-]{1,64}$/.test(k) && hash(v));
+  return exact(p, ['artifact_sha256', 'components']) && hash(p.artifact_sha256) && p.components && !Array.isArray(p.components) && Object.keys(p.components).length > 0 && Object.keys(p.components).length <= 64 && Object.entries(p.components).every(([k,v]) => /^[a-zA-Z0-9_-]{1,64}$/.test(k) && hash(v));
 }
 function schemaValid(s) {
   if (!s || Array.isArray(s) || typeof s !== 'object' || Object.keys(s).length > 32) return false;

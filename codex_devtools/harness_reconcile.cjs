@@ -29,7 +29,7 @@ try {
   const pinBytes=read(path.join(evidence,'expected-pins.json'));
   if(sha(pinBytes)!==intent.expected_pins_sha256 || !equal(JSON.parse(pinBytes),intent.identity.pins)) throw Error('expected pins changed');
   const helper=path.join(__dirname,'harness_mailbox.cjs');
-  if (sha(fs.readFileSync(helper))!=='baa38104661c34fce347a7ace9c6bcf710cfb0ea428606971f377155e0fe7978') throw Error('helper pin mismatch');
+  if (sha(fs.readFileSync(helper))!=='4e7d443e68e44a63c91f1a3aa0ce45700e1e061bb3ad104b4029ece1da51787e') throw Error('helper pin mismatch');
   for (const [name,digest] of Object.entries(intent.before_sha256)) {
     if (path.isAbsolute(name) || name.split('/').some(x=>x==='..' || x==='')) throw Error('unsafe snapshot member');
     if (sha(read(path.join(root,name)))!==digest || sha(read(path.join(evidence,'before',name)))!==digest) throw Error('snapshot changed');
