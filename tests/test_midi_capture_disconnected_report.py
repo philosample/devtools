@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from codex_devtools.midi_assertions import verify_capture_receipt
+from codex_devtools.midi_capture import source_identity
 
 
 class DisconnectedCaptureReceiptTests(unittest.TestCase):
@@ -18,7 +19,12 @@ class DisconnectedCaptureReceiptTests(unittest.TestCase):
             digest = hashlib.sha256(capture.read_bytes()).hexdigest()
             document = {
                 "document_sha256": digest,
-                "settings": {"streamSettings": {"portInputStream": []}},
+                "settings": {
+                    "streamSettings": {
+                        "portInputStream": [],
+                        "spyingInputStream": [],
+                    }
+                },
                 "events": [{"type": "clock"}],
             }
             receipt = {
@@ -38,6 +44,14 @@ class DisconnectedCaptureReceiptTests(unittest.TestCase):
             self.assertTrue(result["verified"])
             self.assertEqual(result["source_identity"], {"portInputStream": [123]})
 
+    def test_source_identity_stays_strict_by_default(self):
+        with self.assertRaisesRegex(ValueError, "at least one valid portInputStream"):
+            source_identity({"portInputStream": []})
+        self.assertEqual(
+            source_identity({"portInputStream": []}, require_source=False),
+            {"portInputStream": []},
+        )
+
     def test_disconnected_capture_rejects_mismatched_configured_and_resolved_sources(
         self,
     ):
@@ -49,7 +63,12 @@ class DisconnectedCaptureReceiptTests(unittest.TestCase):
             digest = hashlib.sha256(capture.read_bytes()).hexdigest()
             document = {
                 "document_sha256": digest,
-                "settings": {"streamSettings": {"portInputStream": []}},
+                "settings": {
+                    "streamSettings": {
+                        "portInputStream": [],
+                        "spyingInputStream": [],
+                    }
+                },
                 "events": [],
             }
             receipt = {
@@ -65,6 +84,112 @@ class DisconnectedCaptureReceiptTests(unittest.TestCase):
             receipt_path.write_text(json.dumps(receipt))
 
             with self.assertRaisesRegex(ValueError, "configured/resolved"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+    def test_disconnected_capture_validates_every_saved_stream(self):
+        source = {"portInputStream": [{"uniqueID": 123, "name": "Capture"}]}
+        with tempfile.TemporaryDirectory() as folder:
+            capture = Path(folder) / "capture.mmon"
+            capture.write_bytes(b"saved capture with inputs disconnected")
+            digest = hashlib.sha256(capture.read_bytes()).hexdigest()
+            document = {
+                "document_sha256": digest,
+                "settings": {"streamSettings": {}},
+                "events": [],
+            }
+            receipt = {
+                "schema": "devtools-midi-capture-v1",
+                "status": "captured",
+                "capture_file": capture.name,
+                "capture_sha256": digest,
+                "configured_settings": {"streamSettings": source},
+                "resolved_settings": {"streamSettings": source},
+                "event_count": 0,
+            }
+            receipt_path = Path(folder) / "receipt.json"
+            receipt_path.write_text(json.dumps(receipt))
+
+            cases = (
+                (
+                    {"spyingInputStream": []},
+                    "no portInputStream setting",
+                ),
+                (
+                    {
+                        "portInputStream": [],
+                        "spyingInputStream": [],
+                        "otherInputStream": [{"uniqueID": 456}],
+                    },
+                    "source identity differs",
+                ),
+                (
+                    {
+                        "portInputStream": [],
+                        "spyingInputStream": [],
+                        "otherInputStream": "bogus",
+                    },
+                    "source stream settings must be lists",
+                ),
+                (
+                    {
+                        "portInputStream": [],
+                        "spyingInputStream": [],
+                        "otherInputStream": [{"uniqueID": 456}, {"uniqueID": 456}],
+                    },
+                    "duplicate endpoint uniqueID",
+                ),
+                (
+                    {
+                        "portInputStream": [],
+                        "spyingInputStream": [],
+                        "otherInputStream": [{"uniqueID": True}],
+                    },
+                    "integer uniqueID",
+                ),
+            )
+            for streams, message in cases:
+                with (
+                    self.subTest(streams=streams),
+                    self.assertRaisesRegex(ValueError, message),
+                ):
+                    document["settings"]["streamSettings"] = streams
+                    verify_capture_receipt(capture, document, receipt_path)
+
+    def test_disconnected_capture_still_rejects_hash_and_event_count_mismatch(self):
+        source = {"portInputStream": [{"uniqueID": 123, "name": "Capture"}]}
+        with tempfile.TemporaryDirectory() as folder:
+            capture = Path(folder) / "capture.mmon"
+            capture.write_bytes(b"saved capture with inputs disconnected")
+            digest = hashlib.sha256(capture.read_bytes()).hexdigest()
+            document = {
+                "document_sha256": digest,
+                "settings": {
+                    "streamSettings": {
+                        "portInputStream": [],
+                        "spyingInputStream": [],
+                    }
+                },
+                "events": [{"type": "clock"}],
+            }
+            receipt = {
+                "schema": "devtools-midi-capture-v1",
+                "status": "captured",
+                "capture_file": capture.name,
+                "capture_sha256": "0" * 64,
+                "configured_settings": {"streamSettings": source},
+                "resolved_settings": {"streamSettings": source},
+                "event_count": 1,
+            }
+            receipt_path = Path(folder) / "receipt.json"
+            receipt_path.write_text(json.dumps(receipt))
+
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                verify_capture_receipt(capture, document, receipt_path)
+
+            receipt["capture_sha256"] = digest
+            receipt["event_count"] = 2
+            receipt_path.write_text(json.dumps(receipt))
+            with self.assertRaisesRegex(ValueError, "event count"):
                 verify_capture_receipt(capture, document, receipt_path)
 
     def test_saved_capture_with_different_connected_input_is_rejected(self):

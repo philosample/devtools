@@ -297,15 +297,13 @@ def verify_capture_receipt(
         raise ValueError(
             "capture source identity differs from configured/resolved receipt sources"
         )
-    if (
-        current.get("portInputStream") != []
-        or current.get("spyingInputStream", []) != []
-    ):
-        saved_sources = source_identity(current)
-        if saved_sources != configured_sources:
-            raise ValueError(
-                "capture source identity differs from configured/resolved receipt sources"
-            )
+    saved_sources = source_identity(current, require_source=False)
+    if "portInputStream" not in saved_sources:
+        raise ValueError("capture document has no portInputStream setting")
+    if any(saved_sources.values()) and saved_sources != configured_sources:
+        raise ValueError(
+            "capture source identity differs from configured/resolved receipt sources"
+        )
     events = document.get("events")
     if not isinstance(events, list) or receipt.get("event_count") != len(events):
         raise ValueError("capture event count does not match receipt")
