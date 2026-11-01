@@ -73,3 +73,84 @@ python3 -m unittest discover -s tests -p test_harness_control.py -v
 ```
 
 Tests require an actual discovered Node executable (absence is a failing prerequisite, not a skip). They launch the real CommonJS helper and Python CLI in separate processes with private temporary mailboxes, using a stub callback that counts real dispatches. Positive cases assert exact positive counts; two simultaneous Python processes produce one callback. Tests cover explicit asynchronous completion, ACK retention, pins/nonces/mixed instances, replay, invalid commands/arguments, stale/crashed ownership, manual reconciliation, callback exceptions, wall discontinuity and both asynchronous and synchronously blocked timeout fencing. A retained-callback regression completes 33 requests, reuses the first UUID after pruning, and verifies that only the current admission can release its actor. Exact 65,536/65,537-byte descriptor boundary checks verify readable registration and rejection before file side effects. These checks do not run Max/Live, open MIDI ports or establish native musical behavior.
+
+## Explicit audited retirement after operator unload
+
+`harness reconcile` retires exactly one **fenced** local harness owner after an
+operator asserts that its target has actually been unloaded. It is an opt-in
+administrative action, not a harness capability, automatic recovery, cancellation,
+or retry. It does not unload a target, inspect process liveness, operate a host,
+launch a musical consumer, or send MIDI. Lease expiry alone never authorizes it.
+Keep the unload witness and obtain the applicable review/authorization before
+running it against a real root.
+
+```sh
+python3 -m codex_devtools harness reconcile \
+  --descriptor /private/local/mailbox/EXACT-OLD-INSTANCE/descriptor.json \
+  --expected-pins /private/local/evidence/old-expected-pins.json \
+  --assert-target-unloaded \
+  --reason 'The selected diagnostic device was unloaded by the operator' \
+  --operator-evidence 'Exact saved unload witness or review reference' \
+  --evidence-output /private/local/evidence/NEW-retirement-attempt
+```
+
+Use the **old** instance's independently established pins, including its full
+component map. Descriptor, mailbox directories, owner/actor records, expected-pin
+file and evidence must be current-user owned and private (directories `0700`,
+files `0600` are suitable), outside Git, with no symlink ancestors. The evidence
+parent must already exist and be private; the new output directory must not exist
+and must be outside the mailbox root. Outputs are exclusive and never overwrite
+an earlier attempt. A missing assertion, reason, witness, wrong pins/nonce/owner,
+ready/pending/closed descriptor, or unsafe path is refused. This command does not
+create an assertion from an expired lease or a PID.
+
+The CLI exclusively creates `ROOT/reconciliation-actor` and preserves the old
+root-owner bytes plus every selected instance descriptor, command, actor identity
+and retained ACK. `intent.json` records exact identity/pins, source hashes, Node
+runtime, operator UID, reason and witness. `before/` contains exact old bytes;
+`expected-pins.json` preserves the supplied pin bytes. It then rechecks identity,
+file hashes and inventory in Python and again in actual Node immediately before
+mutation. The reviewed `harness_mailbox.cjs` remains byte-for-byte unchanged,
+SHA-256 `baa38104661c34fce347a7ace9c6bcf710cfb0ea428606971f377155e0fe7978`.
+
+The runner uses that helper's existing `reconciliation: 'target-unloaded'` option
+to make one inert marker registration with the **old pins** and a single empty
+`retirement_marker` capability. Its handler throws if called. Registration and
+`close()` execute on the same synchronous JavaScript stack before any timer poll;
+no command is submitted and callback count remains zero. The closed marker
+identity/descriptor and `runner.json` remain as evidence. `outcome.json` records
+retirement and post-operation hashes; the old fenced instance, pending command,
+actor and unknown-effect ACK are left unchanged. Retirement declares **no** old
+command completed or canceled. A later legitimate registration is a separate,
+explicit action and must satisfy its own consumer/host gates.
+
+The reconciliation actor serializes cooperative CLI operators. It does not change
+the helper protocol, and generic/manual registrations do not honor that actor.
+This is not a transaction against uncooperative same-user filesystem changes or
+manual reconciliation. An operator assertion is not proof of actual unload,
+domain state, liveness, native timing, MIDI behavior or hardware response.
+
+After admission, uncertain errors retain the reconciliation actor and all saved
+evidence; inspect `outcome.json` (and `failure.json` if final actor release failed)
+and do not automatically retry or remove it. If an uncertain runner left root
+ownership absent, the CLI/runner attempts exclusive creation of an old-identity
+ownership fence; it never displaces an existing owner. This is conservative
+unknown-state containment, not a restored receiver. Process death or power loss
+can interrupt this nontransactional sequence; no automatic recovery is promised.
+There is no force-unlock, TTL cleanup, actor-reuse, rearm, target restart, or
+reconciliation-actor clearing command. An unresolved attempt needs separate
+operator review of target state and preserved files. The next operator must not
+infer permission from an absent PID or a complete-looking saved receipt.
+
+Focused checks use actual discovered Node and separate Python processes:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_harness*.py' -v
+```
+
+They preserve unknown-effect command evidence, check exact identities/pins and
+private/symlink/Git paths, reject concurrent actors and competing CLI operators,
+exercise pre-mutation rechecks and uncertain owner gaps, verify zero marker
+callbacks and a fresh legitimate registration after retirement. Only test-owned
+inert receiver processes are started/stopped. No real harness root, Max, Live or
+MIDI is involved.
