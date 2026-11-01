@@ -1,0 +1,7 @@
+{
+  "format": "codex-devtools-deployment-manifest-v1",
+  "files": [
+    "max-midi-device-development/SKILL.md",
+    "max-midi-device-development/references/live-runtime-console.md"
+  ]
+}
