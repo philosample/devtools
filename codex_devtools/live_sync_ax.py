@@ -18,9 +18,8 @@ def parse_sync_rows(text: str, expected_count: int) -> dict[str, int]:
         raise ValueError("expected output count must be positive")
     rows = {}
     for line in text.splitlines():
-        if (
-            not re.match(r"^[ \t]*[+~]?[ \t]*\d+ ", line)
-            or "MIDI Output: Sync" not in line
+        if "MIDI Output: Sync" not in line or (
+            "Description:" not in line and not re.match(r"^[ \t]*[+~]?[ \t]*\d+ ", line)
         ):
             continue
         match = ROW.fullmatch(line)
