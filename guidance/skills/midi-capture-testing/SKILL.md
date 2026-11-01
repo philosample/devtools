@@ -20,6 +20,8 @@ The AppleScript adapter requires macOS Accessibility access for its runner. If b
 
 For Studio Capture IAC tests, verify Live input Track/Sync/Remote are off before any synthetic send; enable only the required output Track or explicit Sync case, with one clock authority. Do not infer isolation from bus existence. Preserve existing Sets and monitor windows. Never toggle a mixed source category to disconnect: it can enable unrelated inputs; use the reviewed adapter and verify resolved/final source settings.
 
+Before Live playback tests, inspect global output Sync separately from test-track No Output. Follow the reviewed checkout's `docs/MIDI-CAPTURE.md` playback-isolation procedure; preserve original settings, temporarily change only authorized switches, stop transport before exact restoration and verify it even after failure. Reuse `python3 -m codex_devtools.live_sync_ax` for saved before/isolated/restored AX comparisons with an independently verified output count. Its saved-value report does not establish current isolation, complete inventory or MIDI silence; control-surface scripts remain separate.
+
 Separate output-path capture, MIDI Thru echo, documented device acknowledgement/readback and verified applied device state. A hardware return is useful evidence only for what its documented semantics establish. Do not invent response decoders. All new musical devices must remain M4L-compatible under the user's M4L-only license.
 
 For a repeatable failure, add a focused regression at the owning layer. Run the focused check first, then required integration checks once. Reuse saved evidence until the source, artifact, environment or unresolved concern changes; don't rerun every unrelated suite or drive the UI for checks the logs can answer.
