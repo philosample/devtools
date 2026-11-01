@@ -37,6 +37,8 @@ class LiveSyncAXTests(unittest.TestCase):
             snapshot([("Synth", 0), ("Synth", 0)]),
             valid.replace("Value: 0", "Value: 2"),
             valid.replace("checkbox Description", "checkbox (disabled) Description"),
+            valid
+            + "\n3 switch Description: Hidden: MIDI Output: Sync, Value: 1, Help: MIDI Output: Sync",
         ]
         for text in invalid:
             with self.subTest(text=text), self.assertRaises(ValueError):

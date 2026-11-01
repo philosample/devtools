@@ -18,7 +18,10 @@ def parse_sync_rows(text: str, expected_count: int) -> dict[str, int]:
         raise ValueError("expected output count must be positive")
     rows = {}
     for line in text.splitlines():
-        if "checkbox" not in line or "MIDI Output: Sync" not in line:
+        if (
+            not re.match(r"^[ \t]*[+~]?[ \t]*\d+ ", line)
+            or "MIDI Output: Sync" not in line
+        ):
             continue
         match = ROW.fullmatch(line)
         if not match:
