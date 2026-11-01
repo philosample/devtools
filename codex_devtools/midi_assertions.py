@@ -300,12 +300,18 @@ def verify_capture_receipt(
     saved_sources = source_identity(current, require_source=False)
     if "portInputStream" not in saved_sources:
         raise ValueError("capture document has no portInputStream setting")
-    if any(saved_sources.values()) and saved_sources != configured_sources:
+    if saved_sources != {"portInputStream": []}:
         raise ValueError(
-            "capture source identity differs from configured/resolved receipt sources"
+            "capture inputs were not disconnected; capture boundary is unverified"
         )
     events = document.get("events")
-    if not isinstance(events, list) or receipt.get("event_count") != len(events):
+    count = receipt.get("event_count")
+    if (
+        not isinstance(events, list)
+        or not isinstance(count, int)
+        or isinstance(count, bool)
+        or count != len(events)
+    ):
         raise ValueError("capture event count does not match receipt")
 
     return {
