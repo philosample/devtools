@@ -243,6 +243,7 @@ process.on('SIGTERM',()=>process.exit(0));
         _, descriptor = self.launch()
         first = client.submit(descriptor, PINS, "arm", {"value": 1}, wait=2)
         self.assertEqual(first["status"], "completed")
+        self.await_ready(descriptor)
         ack = descriptor.parent / f"ack.{first['request']}.json"
         original = ack.read_bytes()
         envelope = self.envelope(descriptor)
