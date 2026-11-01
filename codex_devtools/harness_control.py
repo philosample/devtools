@@ -209,6 +209,15 @@ def register_cli(commands) -> None:
     send.add_argument("--command", required=True)
     send.add_argument("--args", required=True, help="JSON object of bounded arguments")
     send.add_argument("--wait", type=float, default=5)
+    retire = actions.add_parser(
+        "reconcile", help="audit explicit unloaded-target retirement"
+    )
+    retire.add_argument("--descriptor", required=True, type=Path)
+    retire.add_argument("--expected-pins", required=True, type=Path)
+    retire.add_argument("--assert-target-unloaded", action="store_true", required=True)
+    retire.add_argument("--reason", required=True)
+    retire.add_argument("--operator-evidence", required=True)
+    retire.add_argument("--evidence-output", required=True, type=Path)
 
 
 def run_cli(args) -> tuple[object, int]:
@@ -216,6 +225,17 @@ def run_cli(args) -> tuple[object, int]:
         return discover(args.root), 0
     if args.action == "status":
         return status(args.descriptor), 0
+    if args.action == "reconcile":
+        from .harness_reconcile import reconcile
+
+        return reconcile(
+            args.descriptor,
+            args.expected_pins,
+            args.evidence_output,
+            assert_target_unloaded=args.assert_target_unloaded,
+            reason=args.reason,
+            operator_evidence=args.operator_evidence,
+        ), 0
     result = submit(
         args.descriptor,
         _read(args.expected_pins),
