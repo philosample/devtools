@@ -12,8 +12,15 @@ in preservation runs R24/R25/R26. Issue [#31](https://github.com/philosample/dev
 records R24 on Live 12.4.16: one approximately six-second CUA call, with external
 SHA/XML checks of the resulting Set references. That is provenance for the
 mechanic, not a native validation of this persisted module or its added guards.
-The new module has only fake-app/temporary-file tests until an explicitly
-coordinated native run. Other Live versions, locales and AX shapes are unverified.
+The corrected module at `181d859` (JS SHA-256
+`5e4221b820551c8bfe98e57187201f4d08aa01af35af217b8db9e56b0680c272`)
+was then imported into CUA and completed one native preservation on Live12.4.16
+in about7.5seconds. Separate hash/FileRef checks found the source unchanged and
+the destination byte-identical, retaining both expected AMXD references. This
+verifies one observed host/AX sequence, not other versions, locales, crash
+durability, unsaved-state combinations or recall. Native evidence belongs in
+[issue31](https://github.com/philosample/devtools/issues/31); simulated guard
+checks remain separate evidence.
 
 Use it from an initialized CUA runtime that supports local ES modules and Node's
 standard filesystem/path/URL modules. Select the app using the runtime's documented
@@ -63,7 +70,14 @@ subtree; if either is visible, it must still match the source/stopped state.
 The final observation requires the expected destination URL and stopped transport.
 This is a sequence of observations, not continuous transport/liveness proof.
 
-Only the single English `dialog Save` AX shape modeled by these tests is accepted.
+The English `dialog Save` shape is required for Save decisions. During the two
+Go To Folder decisions only, the separately observed macOS `sheet ID: GoToWindow`
+is also accepted, with one unique `PathTextField`. That sheet can hide the entire
+Save/source/transport subtree; the preceding filename and source checks still
+apply. Unknown sheets, extra modals and wrong/missing/duplicate path fields stop
+the operation. The first persisted-module native attempt reached this sheet and
+stopped before Save; the pending copy was then completed manually. The later
+corrected full module run is qualified separately above.
 Controls must have unique numeric IDs and exact identifiers/roles. Native `(disabled)` flags
 immediately after a targeted role are rejected, including already-correct
 filename/path text fields; literal `(disabled)` text inside a filename is not a

@@ -109,7 +109,9 @@ function normalState(rows, expectedURL) {
 function saveState(rows, expectedSource, pathEntry = false) {
   rejectDanger(rows);
   const dialogs = rows.filter(row => /^(?:dialog|sheet|alert)(?: |,|$)/.test(row.body));
-  requireGuard(dialogs.length === 1 && /^dialog Save(?:,|$)/.test(dialogs[0].body), 'unexpected Save dialog structure');
+  const expectedModal = dialogs.length === 1 && (/^dialog Save(?:,|$)/.test(dialogs[0].body) ||
+    (pathEntry && /^sheet ID: GoToWindow(?:, Secondary Actions: Raise)?$/.test(dialogs[0].body)));
+  requireGuard(expectedModal, 'unexpected Save dialog structure');
   // Save panels may hide the Set/transport tree. Any visible identity must match.
   const windows = rows.filter(row => row.body.startsWith('standard window '));
   requireGuard(windows.length <= 1, 'ambiguous Set window during Save');
