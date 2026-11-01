@@ -9,12 +9,11 @@ let count = 0;
 async function test(name, run) { await run(); count++; console.log('PASS ' + name); }
 const url = filename => pathToFileURL(filename).href;
 
-async function fixture({nested = false, edit} = {}) {
+async function fixture({nested = false, edit, filename = 'Copy With Spaces.als'} = {}) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'devtools-save-as-test-')));
   const source = path.join(base, 'Original Source.als');
   await fs.writeFile(source, 'synthetic source bytes; never opened in Live');
   const directory = path.join(base, 'fresh preservation');
-  const filename = 'Copy With Spaces.als';
   const final = nested ? path.join(directory, 'Copy With Spaces Project', filename) : path.join(directory, filename);
   const options = {expectedSourceURL: url(source), expectedFinalURL: url(final), destinationDirectory: directory, destinationFilename: filename};
   let state = 'source', name = 'Untitled.als', folder = '', observations = 0;
@@ -165,6 +164,27 @@ await test('missing or disabled controls are never clicked', async () => {
     if (variant === 'save') return text.replace('button Save, ID: OKButton', 'button Cancel, ID: cancel2');
     return text.replace('button Save, ID: OKButton', 'button Save, ID: OKButton, Enabled: false');
   }}, f => rejected(f, /exactly one|disabled/));
+});
+await test('native (disabled) AX role flags reject already-correct fields before actions', async () => {
+  for (const target of ['name', 'path', 'window', 'where']) await withFixture({edit: ({text, observations, directory}) => {
+    if (target === 'name' && observations === 4) return text.replace('text field Value: Untitled.als, ID: saveAsNameTextField',
+      'text field (disabled) Value: Copy With Spaces.als, ID: saveAsNameTextField');
+    if (target === 'path' && observations === 6) return text.replace('text field Value: , ID: PathTextField',
+      `text field (disabled) Value: ${directory}, ID: PathTextField`);
+    if (target === 'window' && observations === 1) return text.replace('standard window Name', 'standard window (disabled) Name');
+    if (target === 'where' && observations === 8) return text.replace('pop up button Where:', 'pop up button (disabled) Where:');
+    return text;
+  }}, async f => {
+    await rejected(f, /disabled/);
+    if (target === 'name') assert.deepEqual(f.actions, [['raise', 0, 'Raise'], ['key', 'super+shift+s']], 'correct filename does not authorize a disabled field');
+    if (target === 'path') assert.ok(!f.actions.some(row => row[0] === 'set' && row[1] === 35), 'correct path does not authorize a disabled field');
+    if (target === 'window') assert.deepEqual(f.actions, []);
+  });
+});
+await test('literal (disabled) filename text is not an AX role flag', async () => {
+  await withFixture({filename: 'Copy (disabled) With Spaces.als'}, async f => {
+    const result = await preserveLiveSetAs(f.app, f.options); assert.equal(result.destinationFilename, f.filename);
+  });
 });
 await test('existing destination directory/file is not reused or overwritten', async () => {
   await withFixture({}, async f => {

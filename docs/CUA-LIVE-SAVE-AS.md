@@ -63,11 +63,14 @@ subtree; if either is visible, it must still match the source/stopped state.
 The final observation requires the expected destination URL and stopped transport.
 This is a sequence of observations, not continuous transport/liveness proof.
 
-Only the single English `dialog Save` AX shape modeled by these tests is accepted. Controls must
-have unique numeric IDs and exact identifiers/roles. Filename `setValue` is
-verified before opening Go To Folder and again before Save. The full folder path
-is verified in `PathTextField` before Return; the exact `Where:` popup leaf and filename
-are then checked before the Save click. The fresh directory must still be empty,
+Only the single English `dialog Save` AX shape modeled by these tests is accepted.
+Controls must have unique numeric IDs and exact identifiers/roles. Native `(disabled)` flags
+immediately after a targeted role are rejected, including already-correct
+filename/path text fields; literal `(disabled)` text inside a filename is not a
+role flag. This is guard grammar coverage, not a new native execution claim.
+Filename `setValue` is verified before opening Go To Folder and again before Save. The full folder path
+is verified in `PathTextField` before Return; the exact `Where:` popup leaf
+and filename are then checked before the Save click. The fresh directory must still be empty,
 unchanged and outside Git before that final observation. The new Set must appear
 as a nonempty regular file at the exact expected path, and the original source
 file's identity/size/modification time must remain unchanged.

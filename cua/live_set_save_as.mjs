@@ -51,7 +51,9 @@ export function parseAX(text) {
 function unique(rows, predicate, label) {
   const matches = rows.filter(predicate);
   requireGuard(matches.length === 1, `expected exactly one ${label}`);
-  requireGuard(!/(?:Enabled: (?:false|0)|\[disabled\])(?:,|$)/.test(matches[0].body), `${label} is disabled`);
+  const body = matches[0].body;
+  const disabledRole = /^(?:standard window|text field|button|pop up button) \(disabled\)(?: |,|$)/.test(body);
+  requireGuard(!disabledRole && !/(?:Enabled: (?:false|0)|\[disabled\])(?:,|$)/.test(body), `${label} is disabled`);
   return matches[0];
 }
 
