@@ -251,6 +251,26 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertLess(path_window, return_key)
         self.assertLess(path_focus, return_key)
 
+    def test_go_to_folder_uses_one_frontmost_session_chord_with_consistent_flags(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        post_key = native_source[
+            native_source.index("func postKey(") : native_source.index(
+                "func waitForWindow("
+            )
+        ]
+        self.assertIn("frontmostApplication?.processIdentifier == pid", post_key)
+        self.assertIn("event.post(tap: .cgSessionEventTap)", post_key)
+        self.assertNotIn("postToPid", post_key)
+        chord = post_key[post_key.index("func postChord(") :]
+        self.assertIn("let modifiers: CGEventFlags = [.maskCommand, .maskShift]", chord)
+        self.assertIn("down: true, flags: modifiers", chord)
+        self.assertIn("down: false, flags: modifiers", chord)
+        self.assertNotIn("flags: []", chord)
+
     def test_swift_skips_stale_save_panel_rows_but_keeps_exact_control_uniqueness(self):
         native_source = (
             Path(__file__).resolve().parents[1]

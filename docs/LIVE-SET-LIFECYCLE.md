@@ -55,11 +55,15 @@ execution, it returns a `stopped` receipt with every action marked
 `outcome_unknown` and requires manual inspection.
 
 AX menu items are acted on only when the observed element is uniquely identified,
-enabled and exposes `AXPress`. The Go To Folder chord and Return use
-`CGEvent.postToPid` for the already verified PID; no CUA bridge or global
-coordinate input is used. Save fields use `AXUIElementSetAttributeValue` and
-exact readback. Save and quit are marked outcome-unknown as soon as their
-respective actions are attempted. A stop receipt includes the phase and whether
+enabled and exposes `AXPress`. The Go To Folder chord and Return use one
+`CGEvent.post(tap: .cgSessionEventTap)` route after rechecking the exact Live
+PID is frontmost; the chord carries Command and Shift flags on both key-down
+and key-up events. The Save window and focused field are checked immediately
+before each key sequence. There is no alternate event route or blind retry.
+No CUA bridge or coordinate input is used. Save fields use
+`AXUIElementSetAttributeValue` and exact readback. Save and quit are marked
+outcome-unknown as soon as their respective actions are attempted. A stop
+receipt includes the phase and whether
 manual inspection is required. After a Save attempt, never repeat the command
 until the current UI and destination are inspected.
 
@@ -94,6 +98,8 @@ localizations remain unverified and fail closed.
 Apple API references: [`AXUIElementCopyActionNames`](https://developer.apple.com/documentation/applicationservices/1462053-axuielementcopyactionnames),
 [`AXUIElementPerformAction`](https://developer.apple.com/documentation/applicationservices/1462091-axuielementperformaction),
 [`kAXPressAction`](https://developer.apple.com/documentation/applicationservices/kaxpressaction),
-[`CGEvent.postToPid`](https://developer.apple.com/documentation/coregraphics/cgevent),
+[`CGEvent.post(tap:)`](https://developer.apple.com/documentation/coregraphics/cgevent/post%28tap%3A%29),
+[`CGEventTapLocation.cgSessionEventTap`](https://developer.apple.com/documentation/coregraphics/cgeventtaplocation/cgsessioneventtap),
+[`CGEventFlags`](https://developer.apple.com/documentation/coregraphics/cgeventflags),
 [`NSRunningApplication.terminated`](https://developer.apple.com/documentation/appkit/nsrunningapplication/isterminated),
 and [`NSWorkspace.open`](https://developer.apple.com/documentation/AppKit/NSWorkspace/open%28_%3AwithApplicationAt%3Aconfiguration%3AcompletionHandler%3A%29).

@@ -458,19 +458,22 @@ func activateExactTarget(_ process: NSRunningApplication, app: AXUIElement, sour
     focusVerified = true
 }
 
-// Cocoa Save panels expose Go To Folder by keyboard shortcut; route only this
-// chord/confirm to the verified PID, never through CUA or the global event stream.
+// Cocoa Save panels expose Go To Folder by keyboard shortcut. Use the normal
+// session event stream only while the exact target PID is verified frontmost.
 func postKey(pid: pid_t, code: CGKeyCode, down: Bool, flags: CGEventFlags = []) throws {
+    try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, "exact Live PID lost foreground before keyboard event")
     guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else {
-        throw LifecycleFailure(phase: phase, message: "could not create targeted keyboard event")
+        throw LifecycleFailure(phase: phase, message: "could not create session keyboard event")
     }
     event.flags = flags
-    event.postToPid(pid)
+    event.post(tap: .cgSessionEventTap)
 }
 
 func postChord(pid: pid_t, key: CGKeyCode) throws {
-    try postKey(pid: pid, code: key, down: true, flags: [.maskCommand, .maskShift])
-    try postKey(pid: pid, code: key, down: false)
+    // Modifier flags describe modifier state at each event, including key-up.
+    let modifiers: CGEventFlags = [.maskCommand, .maskShift]
+    try postKey(pid: pid, code: key, down: true, flags: modifiers)
+    try postKey(pid: pid, code: key, down: false, flags: modifiers)
 }
 
 func waitForWindow(_ app: AXUIElement, title expectedTitle: String, seconds: TimeInterval = 5) throws -> AXUIElement {
