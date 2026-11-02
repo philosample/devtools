@@ -81,6 +81,39 @@ class WorktreeTests(unittest.TestCase):
         worktrees.update(self.worktree, "chat-1")
         self.assertTrue(worktrees.release(self.worktree, "chat-1")["released"])
 
+    def test_no_pr_read_only_worktree_can_be_released_but_not_cleaned_up(self) -> None:
+        self.start()
+        with self.assertRaisesRegex(ValueError, "owner chat"):
+            worktrees.release(self.worktree, "chat-2")
+        self.assertTrue(worktrees.release(self.worktree, "chat-1")["released"])
+        with self.assertRaisesRegex(ValueError, "numeric GitHub PR"):
+            worktrees.cleanup(self.worktree, "chat-1")
+        self.assertTrue(self.worktree.exists())
+
+    def test_no_pr_release_rejects_untracked_changes(self) -> None:
+        self.start()
+        (self.worktree / "untracked.txt").write_text("keep\n")
+        with self.assertRaisesRegex(ValueError, "must be clean"):
+            worktrees.release(self.worktree, "chat-1")
+        self.assertFalse(worktrees.audit()[0]["released"])
+
+    def test_malformed_pr_cannot_bypass_clean_no_pr_release(self) -> None:
+        self.start()
+        worktrees.update(self.worktree, "chat-1", pr="not-a-pr")
+        (self.worktree / "untracked.txt").write_text("keep\n")
+        with self.assertRaisesRegex(ValueError, "must be clean"):
+            worktrees.release(self.worktree, "chat-1")
+        self.assertFalse(worktrees.audit()[0]["released"])
+
+    def test_no_pr_release_rejects_changed_head(self) -> None:
+        self.start()
+        (self.worktree / "committed.txt").write_text("new\n")
+        git("add", "committed.txt", cwd=self.worktree)
+        git("commit", "-m", "advance", cwd=self.worktree)
+        with self.assertRaisesRegex(ValueError, "changed"):
+            worktrees.release(self.worktree, "chat-1")
+        self.assertFalse(worktrees.audit()[0]["released"])
+
     def test_malformed_registry_is_preserved(self) -> None:
         self.registry.parent.mkdir()
         self.registry.write_text("{broken")
