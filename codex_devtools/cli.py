@@ -257,6 +257,27 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="perform guarded Save As, Quit and LaunchServices reopen; default only inspects",
     )
+    midi_sync = ax_sub.add_parser(
+        "live-midi-sync",
+        help="inspect or explicitly isolate and restore exact MIDI Output Sync controls",
+    )
+    midi_sync.add_argument("--pid", type=int, required=True)
+    midi_sync.add_argument("--expected-bundle-id", required=True)
+    midi_sync.add_argument("--expected-count", type=int, required=True)
+    midi_sync.add_argument("--baseline", type=Path)
+    midi_sync.add_argument(
+        "--out", type=Path, help="new baseline JSON path in inspect mode"
+    )
+    midi_sync.add_argument(
+        "--receipt", type=Path, help="new structured receipt path in execute mode"
+    )
+    midi_sync.add_argument("--action", dest="operation", choices=("isolate", "restore"))
+    midi_sync.add_argument(
+        "--execute",
+        action="store_true",
+        help="allow the selected isolate/restore action",
+    )
+    midi_sync.add_argument("--max-baseline-age-seconds", type=float, default=300.0)
     runtime = commands.add_parser("runtime", help="discover existing local runtimes")
     runtime_sub = runtime.add_subparsers(dest="action", required=True)
     node = runtime_sub.add_parser(
@@ -390,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
                 expected_amxd_sha256=args.expect_amxd_sha256,
             )
             _json_out(result)
-            return 1 if result["status"] == "stopped" else 0
+            return 0
         if args.group == "ax" and args.action == "snapshot":
             from .ax_snapshot import snapshot
 
@@ -425,6 +446,31 @@ def main(argv: list[str] | None = None) -> int:
                 destination_set=args.destination_set,
                 app_bundle=args.app,
                 execute=args.execute,
+            )
+            _json_out(result)
+            return 1 if result["status"] == "stopped" else 0
+        if args.group == "ax" and args.action == "live-midi-sync":
+            from .live_midi_sync_control import run_live_midi_sync
+
+            if args.execute and args.out is not None:
+                raise ValueError(
+                    "--out is for inspect mode; use --receipt with --execute"
+                )
+            if not args.execute and (
+                args.operation is not None
+                or args.baseline is not None
+                or args.receipt is not None
+            ):
+                raise ValueError("--action, --baseline and --receipt require --execute")
+            result = run_live_midi_sync(
+                args.pid,
+                expected_bundle_id=args.expected_bundle_id,
+                expected_count=args.expected_count,
+                action=args.operation,
+                baseline_path=args.baseline,
+                output_path=args.receipt if args.execute else args.out,
+                execute=args.execute,
+                max_baseline_age_seconds=args.max_baseline_age_seconds,
             )
             _json_out(result)
             return 1 if result["status"] == "stopped" else 0

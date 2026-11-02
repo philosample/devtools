@@ -50,6 +50,11 @@ Stop transport before restoring the exact original values; verify restoration
 even if the test fails. Do not infer current isolation from an earlier run.
 This procedure does not disable control-surface scripts or prove MIDI silence.
 
+For an exact native AX inspection and explicit guarded isolate/restore of these
+Sync checkboxes, see [Live MIDI Output Sync control](LIVE-MIDI-SYNC-CONTROL.md).
+It uses the caller's fresh baseline and independently supplied full output
+count; its receipt establishes only observed Settings checkbox state.
+
 The read-only saved-AX verifier avoids rewriting the comparison logic:
 
 ```sh
