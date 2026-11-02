@@ -60,6 +60,7 @@ def _read(path: Path) -> dict:
             or not isinstance(entry, dict)
             or entry.get("worktree") != key
             or any(not isinstance(entry.get(field), str) for field in required)
+            or any(not entry[field].strip() for field in required if field != "pr")
             or not isinstance(entry.get("released"), bool)
             or not re.fullmatch(r"[0-9a-f]{40}", entry["head"])
         ):

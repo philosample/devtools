@@ -98,6 +98,16 @@ class WorktreeTests(unittest.TestCase):
             worktrees.cleanup(self.worktree, "chat-1")
         self.assertTrue(self.worktree.exists())
 
+    def test_blank_owner_cannot_enable_cleanup(self) -> None:
+        self.start()
+        data = json.loads(self.registry.read_text())
+        data["entries"][str(self.worktree.resolve())]["owner_chat"] = ""
+        data["entries"][str(self.worktree.resolve())]["released"] = True
+        self.registry.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "invalid worktree registry entry"):
+            worktrees.cleanup(self.worktree, "")
+        self.assertTrue(self.worktree.exists())
+
     def test_start_preflights_registry_before_creating_worktree(self) -> None:
         self.registry.parent.mkdir()
         self.registry.write_text("{broken")
