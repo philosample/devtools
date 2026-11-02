@@ -59,8 +59,12 @@ enabled and exposes `AXPress`. The Go To Folder chord and Return use one
 `CGEvent.post(tap: .cgSessionEventTap)` route after rechecking the exact Live
 PID is frontmost; the chord carries Command and Shift flags on both key-down
 and key-up events. The Save window and focused field are checked immediately
-before each key sequence. There is no alternate event route or blind retry.
-No CUA bridge or coordinate input is used. Save fields use
+before each key sequence. A matching key-up is deferred immediately after each
+key-down so it is posted before any later focus-loss error is reported. The
+session event stream is not PID-exclusive: foreground can change between the
+check and delivery, so that race remains and requires manual inspection if the
+post-stroke check detects focus loss. There is no alternate event route or
+blind retry. No CUA bridge or coordinate input is used. Save fields use
 `AXUIElementSetAttributeValue` and exact readback. Save and quit are marked
 outcome-unknown as soon as their respective actions are attempted. A stop
 receipt includes the phase and whether

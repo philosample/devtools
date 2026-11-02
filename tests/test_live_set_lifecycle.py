@@ -236,7 +236,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertNotIn("press(", focus_helper)
 
         return_key = native_source.index(
-            "try postKey(pid: options.pid, code: 36, down: true)"
+            "try postKeyStroke(pid: options.pid, code: 36)"
         )
         path_focus = native_source.rindex(
             "focusedIs(appElement, pathField)", 0, return_key
@@ -257,19 +257,25 @@ class LiveSetLifecycleTests(unittest.TestCase):
             / "codex_devtools"
             / "live_set_lifecycle.swift"
         ).read_text()
-        post_key = native_source[
-            native_source.index("func postKey(") : native_source.index(
+        event_stroke = native_source[
+            native_source.index("func postKeyStroke(") : native_source.index(
                 "func waitForWindow("
             )
         ]
-        self.assertIn("frontmostApplication?.processIdentifier == pid", post_key)
-        self.assertIn("event.post(tap: .cgSessionEventTap)", post_key)
-        self.assertNotIn("postToPid", post_key)
-        chord = post_key[post_key.index("func postChord(") :]
+        self.assertIn("frontmostApplication?.processIdentifier == pid", event_stroke)
+        self.assertIn("keyDown.post(tap: .cgSessionEventTap)", event_stroke)
+        self.assertIn("defer { keyUp.post(tap: .cgSessionEventTap) }", event_stroke)
+        self.assertNotIn("postToPid", event_stroke)
+        down = event_stroke.index("keyDown.post(tap: .cgSessionEventTap)")
+        release = event_stroke.index("defer { keyUp.post(tap: .cgSessionEventTap) }")
+        foreground_check = event_stroke.index(
+            'try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, "foreground changed during keyboard stroke'
+        )
+        self.assertLess(release, down)
+        self.assertLess(down, foreground_check)
+        chord = event_stroke[event_stroke.index("func postChord(") :]
         self.assertIn("let modifiers: CGEventFlags = [.maskCommand, .maskShift]", chord)
-        self.assertIn("down: true, flags: modifiers", chord)
-        self.assertIn("down: false, flags: modifiers", chord)
-        self.assertNotIn("flags: []", chord)
+        self.assertIn("postKeyStroke(pid: pid, code: key, flags: modifiers)", chord)
 
     def test_swift_skips_stale_save_panel_rows_but_keeps_exact_control_uniqueness(self):
         native_source = (

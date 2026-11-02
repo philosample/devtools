@@ -460,20 +460,27 @@ func activateExactTarget(_ process: NSRunningApplication, app: AXUIElement, sour
 
 // Cocoa Save panels expose Go To Folder by keyboard shortcut. Use the normal
 // session event stream only while the exact target PID is verified frontmost.
-func postKey(pid: pid_t, code: CGKeyCode, down: Bool, flags: CGEventFlags = []) throws {
-    try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, "exact Live PID lost foreground before keyboard event")
+func makeKeyEvent(code: CGKeyCode, down: Bool, flags: CGEventFlags) throws -> CGEvent {
     guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else {
         throw LifecycleFailure(phase: phase, message: "could not create session keyboard event")
     }
     event.flags = flags
-    event.post(tap: .cgSessionEventTap)
+    return event
+}
+
+func postKeyStroke(pid: pid_t, code: CGKeyCode, flags: CGEventFlags = []) throws {
+    let keyDown = try makeKeyEvent(code: code, down: true, flags: flags)
+    let keyUp = try makeKeyEvent(code: code, down: false, flags: flags)
+    try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, "exact Live PID lost foreground before keyboard stroke")
+    defer { keyUp.post(tap: .cgSessionEventTap) }
+    keyDown.post(tap: .cgSessionEventTap)
+    try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, "foreground changed during keyboard stroke; matching key-up was posted")
 }
 
 func postChord(pid: pid_t, key: CGKeyCode) throws {
     // Modifier flags describe modifier state at each event, including key-up.
     let modifiers: CGEventFlags = [.maskCommand, .maskShift]
-    try postKey(pid: pid, code: key, down: true, flags: modifiers)
-    try postKey(pid: pid, code: key, down: false, flags: modifiers)
+    try postKeyStroke(pid: pid, code: key, flags: modifiers)
 }
 
 func waitForWindow(_ app: AXUIElement, title expectedTitle: String, seconds: TimeInterval = 5) throws -> AXUIElement {
@@ -582,8 +589,7 @@ func run(_ options: Options) throws -> [String: Any] {
     try waitForFrontmost(pid: options.pid)
     try require(focusedWindowIs(appElement, saveWindow), "Save panel is not the focused AX window before path confirmation")
     try require(focusedIs(appElement, pathField), "Go To Folder path field is not the focused element")
-    try postKey(pid: options.pid, code: 36, down: true)
-    try postKey(pid: options.pid, code: 36, down: false)
+    try postKeyStroke(pid: options.pid, code: 36)
 
     phase = "verify-save-dialog"
     let refreshedWindow = try waitForWindow(appElement, title: "Save")
