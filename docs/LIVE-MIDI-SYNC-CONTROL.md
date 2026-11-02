@@ -34,10 +34,15 @@ python3 -m codex_devtools ax live-midi-sync \
   --receipt /private/tmp/live-midi-sync-restore.json
 ```
 
-Before the first press, the native helper re-enumerates Settings and requires
-every output name, description, enabled checkbox state, and value to match the
-baseline. It isolates only baseline-on rows, pressing each once and reading it
-back. Restore requires every current row to be either its original value or a
+Immediately before each press, the native helper re-enumerates the complete
+bounded Settings tree and requires the same Settings window and output controls,
+with every name, description, enabled checkbox state, AX element identity, and
+current value still matching. It uses the freshly observed target element for
+that press. The helper also rechecks the caller-selected baseline age limit
+(default five minutes) before every press, so time spent starting the helper or
+completing earlier actions cannot make a stale baseline authorize a later one.
+It isolates only baseline-on rows, pressing each once and reading it back.
+Restore requires every current row to be either its original value or a
 partially isolated zero; it restores only original-on rows and never changes
 original-off rows. The target Live process and Settings window must remain the
 frontmost/focused target. Any unexpected state or uncertain press stops further

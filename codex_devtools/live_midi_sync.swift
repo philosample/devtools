@@ -17,6 +17,7 @@ struct Options {
     var operation = ""
     var baselinePath = ""
     var baselineHash = ""
+    var maximumBaselineAgeSeconds = 300.0
 }
 
 struct SyncFailure: Error {
@@ -53,13 +54,19 @@ func parseOptions() throws -> Options {
         case "--operation": result.operation = value
         case "--baseline": result.baselinePath = value
         case "--baseline-sha256": result.baselineHash = value
+        case "--max-baseline-age-seconds":
+            guard let parsed = Double(value), parsed.isFinite, parsed > 0, parsed <= 300 else {
+                throw SyncFailure(message: "maximum baseline age must be positive and at most 300 seconds")
+            }
+            result.maximumBaselineAgeSeconds = parsed
         default: throw SyncFailure(message: "unknown option: \(key)")
         }
         index += 2
     }
     guard result.pid > 0, !result.bundleID.isEmpty, result.expectedCount > 0,
           ["isolate", "restore"].contains(result.operation),
-          !result.baselinePath.isEmpty, result.baselineHash.count == 64 else {
+          !result.baselinePath.isEmpty, result.baselineHash.count == 64,
+          result.maximumBaselineAgeSeconds > 0 else {
         throw SyncFailure(message: "incomplete native MIDI Sync arguments")
     }
     return result
@@ -171,7 +178,14 @@ func matchingOutputs(_ app: AXUIElement) throws -> (AXUIElement, [String: Output
     return (settings, controls, visited, windows.count)
 }
 
-func readBaseline() throws -> (Data, [String: Any], [String: Int], [String: String]) {
+func validateBaselineFreshness(_ date: Date, now: Date = Date()) throws {
+    let age = now.timeIntervalSince(date)
+    guard age >= -5, age <= options.maximumBaselineAgeSeconds else {
+        throw SyncFailure(message: "baseline is stale or from the future")
+    }
+}
+
+func readBaseline() throws -> (Data, [String: Any], [String: Int], [String: String], Date) {
     phase = "baseline-read"
     let url = URL(fileURLWithPath: options.baselinePath)
     let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
@@ -215,8 +229,7 @@ func readBaseline() throws -> (Data, [String: Any], [String: Int], [String: Stri
     guard let date = timestampParser.date(from: observedAt) else {
         throw SyncFailure(message: "baseline observation timestamp is invalid")
     }
-    let age = Date().timeIntervalSince(date)
-    guard age >= -5, age <= 300 else { throw SyncFailure(message: "baseline is stale or from the future") }
+    try validateBaselineFreshness(date)
     var original: [String: Int] = [:]
     var descriptions: [String: String] = [:]
     for row in rows {
@@ -233,15 +246,25 @@ func readBaseline() throws -> (Data, [String: Any], [String: Int], [String: Stri
         descriptions[name] = description
     }
     guard original.count == options.expectedCount else { throw SyncFailure(message: "baseline output count is inconsistent") }
-    return (data, root, original, descriptions)
+    return (data, root, original, descriptions, date)
 }
 
-func setAction(_ index: Int, attempted: Any, outcome: String, actual: Any, error: String? = nil) {
+func setAction(
+    _ index: Int,
+    attempted: Any,
+    outcome: String,
+    actual: Any,
+    error: String? = nil,
+    prepressElements: Int? = nil,
+    prepressWindows: Int? = nil
+) {
     guard var current = receipt, var actions = current["actions"] as? [[String: Any]], actions.indices.contains(index) else { return }
     actions[index]["attempted"] = attempted
     actions[index]["outcome"] = outcome
     actions[index]["actual_value"] = actual
     if let error { actions[index]["error"] = error }
+    if let prepressElements { actions[index]["prepress_elements"] = prepressElements }
+    if let prepressWindows { actions[index]["prepress_windows"] = prepressWindows }
     current["actions"] = actions
     receipt = current
 }
@@ -274,7 +297,7 @@ func targetCheck(_ pid: pid_t, bundleID: String) throws -> NSRunningApplication 
 
 func run() throws -> [String: Any] {
     phase = "baseline-read"
-    let (_, baseline, original, descriptions) = try readBaseline()
+    let (_, baseline, original, descriptions, baselineDate) = try readBaseline()
     let baselineTarget = baseline["target"] as! [String: Any]
     let processName = baselineTarget["process_name"] as! String
     let baselineHash = options.baselineHash
@@ -358,27 +381,60 @@ func run() throws -> [String: Any] {
               try focusedSettingsWindow(app, expected: settings) else {
             throw SyncFailure(message: "target focus or process identity changed before \(name)")
         }
-        for (rowName, control) in controls {
-            let observed = try checkboxValue(control.element)
-            guard observed == current[rowName] else {
-                throw SyncFailure(message: "output Sync state changed during operation: \(rowName)")
+        let (freshSettings, freshControls, freshElementCount, freshWindowCount) = try matchingOutputs(app)
+        guard CFEqual(freshSettings, settings),
+              freshControls.count == options.expectedCount,
+              freshElementCount == observedElements,
+              freshWindowCount == observedWindows,
+              Set(freshControls.keys) == Set(original.keys) else {
+            throw SyncFailure(message: "complete Settings output inventory changed before \(name)")
+        }
+        for rowName in original.keys {
+            guard let previous = controls[rowName], let fresh = freshControls[rowName],
+                  CFEqual(fresh.element, previous.element),
+                  fresh.description == descriptions[rowName],
+                  fresh.value == current[rowName] else {
+                throw SyncFailure(message: "output Sync control identity or value changed before \(name): \(rowName)")
             }
         }
-        guard try checkboxValue(controls[name]!.element) == current[name] else {
+        let freshControl = freshControls[name]!
+        guard try hasPressAction(freshControl.element) else {
+            throw SyncFailure(message: "required AXPress action is unavailable before \(name)")
+        }
+        for rowName in original.keys {
+            let observed = try checkboxValue(freshControls[rowName]!.element)
+            guard observed == current[rowName] else {
+                throw SyncFailure(message: "output Sync state changed during prepress validation: \(rowName)")
+            }
+        }
+        guard try targetCheck(options.pid, bundleID: options.bundleID).isActive,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
+              try focusedSettingsWindow(app, expected: freshSettings) else {
+            throw SyncFailure(message: "target focus or process identity changed before pressing \(name)")
+        }
+        try validateBaselineFreshness(baselineDate)
+        guard try checkboxValue(freshControl.element) == current[name] else {
             throw SyncFailure(message: "output Sync value changed before press: \(name)")
         }
         let index = baseRows.firstIndex { ($0["name"] as? String) == name }!
-        setAction(index, attempted: true, outcome: "unknown", actual: NSNull())
+        setAction(
+            index,
+            attempted: true,
+            outcome: "unknown",
+            actual: NSNull(),
+            prepressElements: freshElementCount,
+            prepressWindows: freshWindowCount
+        )
         phase = "press:\(name)"
-        AXUIElementSetMessagingTimeout(controls[name]!.element, 2.0)
-        let pressError = AXUIElementPerformAction(controls[name]!.element, kAXPressAction as CFString)
+        AXUIElementSetMessagingTimeout(freshControl.element, 2.0)
+        let pressError = AXUIElementPerformAction(freshControl.element, kAXPressAction as CFString)
         if pressError != .success {
             setAction(index, attempted: true, outcome: "unknown", actual: NSNull(), error: "AXPress failed (\(pressError.rawValue)); it may have taken effect")
             throw SyncFailure(message: "AXPress outcome is unknown for \(name)")
         }
         let actual: Int
         do {
-            actual = try checkboxValue(controls[name]!.element)
+            actual = try checkboxValue(freshControl.element)
         } catch {
             setAction(index, attempted: true, outcome: "unknown", actual: NSNull(), error: String(describing: error))
             throw error

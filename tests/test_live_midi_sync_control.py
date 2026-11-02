@@ -278,6 +278,8 @@ class LiveMidiSyncControlTests(unittest.TestCase):
                     "attempted": True,
                     "outcome": "known",
                     "actual_value": 0,
+                    "prepress_elements": 240,
+                    "prepress_windows": 2,
                 },
                 {
                     "name": "B (Port 1)",
@@ -296,6 +298,8 @@ class LiveMidiSyncControlTests(unittest.TestCase):
                     "attempted": True,
                     "outcome": "known",
                     "actual_value": 0,
+                    "prepress_elements": 240,
+                    "prepress_windows": 2,
                 },
             ],
         }
@@ -309,6 +313,17 @@ class LiveMidiSyncControlTests(unittest.TestCase):
             )
         )
         report["actions"][0]["actual_value"] = 1
+        self.assertFalse(
+            _native_receipt_valid(
+                report,
+                operation="isolate",
+                baseline=observed,
+                baseline_hash=hash_value,
+                returncode=0,
+            )
+        )
+        report["actions"][0]["actual_value"] = 0
+        report["actions"][0].pop("prepress_elements")
         self.assertFalse(
             _native_receipt_valid(
                 report,
@@ -342,6 +357,72 @@ class LiveMidiSyncControlTests(unittest.TestCase):
         self.assertEqual(saved["status"], "stopped")
         self.assertFalse(saved["manual_inspection_required"])
         self.assertEqual(saved["actions"], [])
+
+    def test_execute_passes_selected_baseline_age_to_native_helper(self):
+        observed = baseline()
+        with tempfile.TemporaryDirectory() as temporary:
+            baseline_path = Path(temporary) / "baseline.json"
+            receipt_path = Path(temporary) / "receipt.json"
+            baseline_path.write_text(json.dumps(observed), encoding="utf-8")
+            native_result = subprocess.CompletedProcess(
+                args=["swift"], returncode=1, stdout="not JSON", stderr=""
+            )
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_midi_sync_control.subprocess.run",
+                    return_value=native_result,
+                ) as native_run,
+            ):
+                report = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="isolate",
+                    baseline_path=baseline_path,
+                    output_path=receipt_path,
+                    execute=True,
+                    max_baseline_age_seconds=27.5,
+                )
+            command = native_run.call_args.args[0]
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertIn("--max-baseline-age-seconds", command)
+        flag_index = command.index("--max-baseline-age-seconds")
+        self.assertEqual(command[flag_index + 1], "27.5")
+        self.assertEqual(report, saved)
+        self.assertTrue(saved["manual_inspection_required"])
+
+    def test_swift_reenumerates_exact_inventory_and_checks_age_before_every_press(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_midi_sync.swift"
+        ).read_text(encoding="utf-8")
+        action_loop = source.split("for name in candidates {", 1)[1].split(
+            'phase = "final-readback"', 1
+        )[0]
+        inventory = source.split("func matchingOutputs", 1)[1].split(
+            "func validateBaselineFreshness", 1
+        )[0]
+        self.assertIn("role == (kAXCheckBoxRole as String)", inventory)
+        self.assertIn("try enabled(element)", inventory)
+        self.assertIn("try checkboxValue(element)", inventory)
+        self.assertIn("matchingOutputs(app)", action_loop)
+        self.assertIn("Set(freshControls.keys) == Set(original.keys)", action_loop)
+        self.assertIn("CFEqual(fresh.element, previous.element)", action_loop)
+        self.assertIn("fresh.description == descriptions[rowName]", action_loop)
+        self.assertIn("fresh.value == current[rowName]", action_loop)
+        self.assertIn("checkboxValue(freshControls[rowName]!.element)", action_loop)
+        self.assertIn("validateBaselineFreshness(baselineDate)", action_loop)
+        press_index = action_loop.index("AXUIElementPerformAction(freshControl.element")
+        self.assertLess(
+            action_loop.rindex("validateBaselineFreshness(baselineDate)"), press_index
+        )
+        self.assertIn("result.maximumBaselineAgeSeconds = parsed", source)
+        self.assertIn("try validateBaselineFreshness(date)", source)
 
     def test_cli_keeps_subcommand_and_operation_arguments_distinct(self):
         args = build_parser().parse_args(

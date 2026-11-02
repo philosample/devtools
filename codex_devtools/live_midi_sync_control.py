@@ -550,6 +550,15 @@ def _native_receipt_valid(
                 and actual is not None
                 and (type(actual) is not int or actual not in (0, 1))
             )
+            or (
+                attempted is True
+                and (
+                    type(row.get("prepress_elements")) is not int
+                    or not 1 <= row["prepress_elements"] <= MAX_ELEMENTS
+                    or type(row.get("prepress_windows")) is not int
+                    or not 1 <= row["prepress_windows"] <= MAX_WINDOWS
+                )
+            )
         ):
             return False
         indexed[name] = row
@@ -697,6 +706,8 @@ def run_live_midi_sync(
         str(baseline_path),
         "--baseline-sha256",
         baseline_hash,
+        "--max-baseline-age-seconds",
+        str(max_baseline_age_seconds),
     ]
     try:
         result = subprocess.run(
