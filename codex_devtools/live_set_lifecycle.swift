@@ -392,6 +392,19 @@ func setString(_ element: AXUIElement, value: String, identifier expectedID: Str
     try require(stringValue(element) == value, "AX text-field readback mismatch")
 }
 
+func focusSaveNameField(_ element: AXUIElement, app: AXUIElement) throws {
+    let fieldRole = try role(element)
+    try require(fieldRole == (kAXTextFieldRole as String) && identifier(element) == "saveAsNameTextField", "unexpected Save As filename field identity")
+    var settable = DarwinBoolean(false)
+    let checkError = AXUIElementIsAttributeSettable(element, kAXFocusedAttribute as CFString, &settable)
+    try require(checkError == .success && settable.boolValue, "Save As filename field is not focus-settable")
+    let setError = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    try require(setError == .success, "setting Save As filename focus failed (\(setError.rawValue))")
+    let focused = try ax(element, kAXFocusedAttribute as String) as? NSNumber
+    try require(focused?.boolValue == true, "Save As filename focus readback mismatch")
+    try require(focusedIs(app, element), "Save As filename is not the focused AX element")
+}
+
 func focusedIs(_ app: AXUIElement, _ expected: AXUIElement) -> Bool {
     guard let value = optionalAX(app, kAXFocusedUIElementAttribute as String),
           CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
@@ -548,7 +561,9 @@ func run(_ options: Options) throws -> [String: Any] {
     try require(!saveRows.contains { ["Replace", "Allow", "Allow Anyway", "Discard", "Don't Save", "Don’t Save"].contains(title($0) ?? "") }, "unexpected overwrite/security/discard prompt")
     let nameField = try uniqueSavePanelElement(saveRows, role: kAXTextFieldRole as String, title: nil, identifier: "saveAsNameTextField")
     try setString(nameField, value: destination.lastPathComponent, identifier: "saveAsNameTextField")
-    try press(nameField)
+    try focusSaveNameField(nameField, app: appElement)
+    try waitForFrontmost(pid: options.pid)
+    try require(focusedWindowIs(appElement, saveWindow), "Save panel is not the focused AX window before Go To Folder")
     try require(focusedIs(appElement, nameField), "Save panel filename field did not receive focus")
     phase = "set-save-folder"
     guard let focusValue = optionalAX(appElement, kAXFocusedUIElementAttribute as String) else {
@@ -561,6 +576,8 @@ func run(_ options: Options) throws -> [String: Any] {
     let pathField = try waitForControl(appElement, windowTitle: "Save", role: kAXTextFieldRole as String, identifier: "PathTextField")
     try require(focusedIs(appElement, pathField), "Go To Folder path field is not focused before setValue")
     try setString(pathField, value: destination.deletingLastPathComponent().path, identifier: "PathTextField")
+    try waitForFrontmost(pid: options.pid)
+    try require(focusedWindowIs(appElement, saveWindow), "Save panel is not the focused AX window before path confirmation")
     try require(focusedIs(appElement, pathField), "Go To Folder path field is not the focused element")
     try postKey(pid: options.pid, code: 36, down: true)
     try postKey(pid: options.pid, code: 36, down: false)

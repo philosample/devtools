@@ -209,17 +209,47 @@ class LiveSetLifecycleTests(unittest.TestCase):
         save_window_focus = native_source.index(
             "focusWindow(appElement, pid: options.pid, window: saveWindow)"
         )
-        field_press = native_source.index("try press(nameField)", save_window_focus)
+        field_focus = native_source.index(
+            "try focusSaveNameField(nameField, app: appElement)", save_window_focus
+        )
         field_check = native_source.index(
-            "focusedIs(appElement, nameField)", field_press
+            "focusedIs(appElement, nameField)", field_focus
         )
         shortcut = native_source.index(
             "postChord(pid: options.pid, key: 5)", field_check
         )
         self.assertLess(activation, menu)
-        self.assertLess(save_window_focus, field_press)
-        self.assertLess(field_press, field_check)
+        self.assertLess(save_window_focus, field_focus)
+        self.assertLess(field_focus, field_check)
         self.assertLess(field_check, shortcut)
+        focus_helper = native_source[
+            native_source.index("func focusSaveNameField(") : native_source.index(
+                "func focusedIs("
+            )
+        ]
+        self.assertIn("AXUIElementIsAttributeSettable", focus_helper)
+        self.assertIn(
+            "AXUIElementSetAttributeValue(element, kAXFocusedAttribute", focus_helper
+        )
+        self.assertIn("kCFBooleanTrue", focus_helper)
+        self.assertIn("kAXFocusedAttribute as String", focus_helper)
+        self.assertNotIn("press(", focus_helper)
+
+        return_key = native_source.index(
+            "try postKey(pid: options.pid, code: 36, down: true)"
+        )
+        path_focus = native_source.rindex(
+            "focusedIs(appElement, pathField)", 0, return_key
+        )
+        path_window = native_source.rindex(
+            "focusedWindowIs(appElement, saveWindow)", 0, return_key
+        )
+        path_frontmost = native_source.rindex(
+            "waitForFrontmost(pid: options.pid)", 0, return_key
+        )
+        self.assertLess(path_frontmost, return_key)
+        self.assertLess(path_window, return_key)
+        self.assertLess(path_focus, return_key)
 
     def test_swift_skips_stale_save_panel_rows_but_keeps_exact_control_uniqueness(self):
         native_source = (

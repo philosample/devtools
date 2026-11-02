@@ -39,9 +39,11 @@ fresh absence of the destination immediately before one Save click. A late
 Replace/security/discard prompt, missing or duplicate control, changed source
 URL, unexpected dialog, or failed readback stops the operation. No prompt is
 accepted and no action is retried automatically.
-Before sending Go To Folder, it raises the exact Save window if needed, presses
-the observed filename field, and requires that field to be the focused AX
-element while the selected Live PID remains frontmost.
+Before sending Go To Folder, it raises the exact Save window if needed, sets
+`AXFocused=true` on the observed filename field, and verifies both the field's
+focus value and the app's focused-element/window identity. It rechecks the
+focused Path field and window before Return; it uses no `AXPress` fallback for
+the filename field.
 During Save panel scans, AX elements that have become invalid are skipped as
 stale file-list rows; each required control must still match exactly once, and
 other AX errors or traversal-bound violations stop the operation.
