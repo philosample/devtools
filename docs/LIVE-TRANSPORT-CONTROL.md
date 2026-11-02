@@ -46,6 +46,20 @@ on. Stop is a verified no-op if Play is already off. Receipts are new
 files and report each action as not attempted, known, or unknown. A receipt
 requiring manual inspection must be inspected before another action.
 
+## Recorded native findings
+
+On 2026-11-02, a read-only inspection of the exact R71 Set in Live PID 58198
+reported Play, Link, Arrangement Record, and Session Record off. An explicit
+idle Stop stopped in preflight with “exact Live PID did not become frontmost”;
+the receipt recorded all actions not attempted and manual inspection false, so
+no transport or preference action was issued. A separate fresh Swift process
+immediately reported `com.ableton.live` PID 58198 as frontmost. This is
+consistent with a stale foreground observation in the helper after activation,
+but does not prove the cause. The helper now pumps the current run loop during
+bounded activation/focus waits and while waiting for the monotonic Stop
+deadline. It does not change Spaces. This source correction still needs a
+reviewed native retest before relying on it.
+
 This is a bounded Accessibility control for the current English Live UI and
 macOS behavior. It establishes only the observed transport and preference
 states of the exact Live Set. It does not prove MIDI packets, audible output,

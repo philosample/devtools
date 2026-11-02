@@ -726,7 +726,7 @@ class LiveTransportControlTests(unittest.TestCase):
             / "live_transport.swift"
         ).read_text(encoding="utf-8")
         self.assertIn("DispatchTime.now().uptimeNanoseconds", source)
-        self.assertIn("Thread.sleep(forTimeInterval:", source)
+        self.assertIn("RunLoop.current.run(", source)
         self.assertIn(
             'try press(beforeStop["Stop"]!.element, actionName: "stop")', source
         )
@@ -768,11 +768,31 @@ class LiveTransportControlTests(unittest.TestCase):
         )
         play_press = source.index('try press(playControl, actionName: "play")')
         self.assertLess(baseline_freshness, play_press)
-        deadline_wait = source.index("Thread.sleep(forTimeInterval:")
+        deadline_wait = source.index("pumpRunLoop(until: deadline)")
         timed_stop = source.index(
             'try press(beforeStop["Stop"]!.element, actionName: "stop")'
         )
         self.assertLess(deadline_wait, timed_stop)
+        self.assertIn(
+            "let deadline = start + UInt64(options.playForSeconds) * 1_000_000_000",
+            source,
+        )
+
+    def test_activation_and_deadline_waits_pump_run_loop_with_monotonic_bounds(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        wait_until = source.split("func waitUntil(", maxsplit=1)[1].split(
+            "func onscreenWindow(", maxsplit=1
+        )[0]
+        self.assertIn("DispatchTime.now().uptimeNanoseconds", wait_until)
+        self.assertIn("pumpRunLoopTurn(until: deadline)", wait_until)
+        self.assertNotIn("Thread.sleep", wait_until)
+        self.assertIn("func pumpRunLoop(until deadline: UInt64)", source)
+        self.assertIn("RunLoop.current.run(", source)
+        self.assertNotIn("Thread.sleep", source)
 
 
 if __name__ == "__main__":

@@ -385,11 +385,27 @@ func currentProcessMatches(_ pid: pid_t, bundleID: String) -> Bool {
     return current.bundleIdentifier == bundleID && !current.isTerminated
 }
 
+func pumpRunLoopTurn(until deadline: UInt64) {
+    let now = DispatchTime.now().uptimeNanoseconds
+    guard now < deadline else { return }
+    let remaining = Double(deadline - now) / 1_000_000_000
+    RunLoop.current.run(
+        mode: .default,
+        before: Date().addingTimeInterval(min(0.05, remaining))
+    )
+}
+
+func pumpRunLoop(until deadline: UInt64) {
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+        pumpRunLoopTurn(until: deadline)
+    }
+}
+
 func waitUntil(_ predicate: () -> Bool, seconds: TimeInterval) -> Bool {
     let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(seconds * 1_000_000_000)
     while DispatchTime.now().uptimeNanoseconds < deadline {
         if predicate() { return true }
-        Thread.sleep(forTimeInterval: 0.05)
+        pumpRunLoopTurn(until: deadline)
     }
     return predicate()
 }
@@ -697,7 +713,7 @@ func run() throws -> [String: Any] {
 
     let now = DispatchTime.now().uptimeNanoseconds
     if now < deadline {
-        Thread.sleep(forTimeInterval: Double(deadline - now) / 1_000_000_000)
+        pumpRunLoop(until: deadline)
     }
 
     phase = "timed-stop"
