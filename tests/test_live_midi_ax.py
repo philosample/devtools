@@ -123,6 +123,18 @@ class LiveMidiAxTests(unittest.TestCase):
         )
         self.assertIsNone(report["freshness_gate"]["passed"])
 
+    def test_no_value_children_errors_on_leaf_controls_remain_valid_metadata(self):
+        paths = self.write_triplet([VALUES, VALUES | {"input_track": 0}, VALUES])
+        for path in paths:
+            observed = json.loads(path.read_text(encoding="utf-8"))
+            for element in observed["trees"][0]["elements"]:
+                element["children_error"] = -25212
+            path.write_text(json.dumps(observed), encoding="utf-8")
+
+        report = self.verify(paths)
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["changed_during_isolation"], ["input_track"])
+
     def test_cli_emits_assertion_report(self):
         paths = self.write_triplet([VALUES, VALUES | {"input_track": 0}, VALUES])
         output = io.StringIO()
