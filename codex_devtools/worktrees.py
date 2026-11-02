@@ -259,8 +259,8 @@ def release(worktree: Path, owner_chat: str) -> dict:
         branch, head = _identity(Path(entry["repository"]), worktree)
         if branch != entry["branch"] or head != entry["head"]:
             raise ValueError("worktree changed since last registry update")
-        if not entry["pr"]:
-            raise ValueError("PR is required before releasing worktree")
+        if not entry["pr"] and _status(worktree):
+            raise ValueError("no-PR worktree must be clean before release")
         entry["released"] = True
         _write(path, data)
         return entry.copy()
