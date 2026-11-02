@@ -29,6 +29,23 @@ def native_result(pid: int) -> subprocess.CompletedProcess:
 
 
 class AxSnapshotTests(unittest.TestCase):
+    def test_no_value_from_children_attribute_is_classified_as_leaf(self):
+        source = (
+            Path(ax_snapshot.__file__)
+            .with_name("ax_snapshot.swift")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            "func childrenErrorIndicatesLeaf(_ error: Int32?) -> Bool {\n"
+            "    error == AXError.noValue.rawValue\n"
+            "}",
+            source,
+        )
+        self.assertIn(
+            "childrenError != nil && !childrenErrorIndicatesLeaf(childrenError)",
+            source,
+        )
+
     def test_cli_serializes_native_snapshot(self):
         expected = {
             "format": "codex-devtools-ax-snapshot-v1",

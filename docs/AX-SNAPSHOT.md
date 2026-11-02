@@ -48,6 +48,8 @@ Optional AX attributes are omitted when unavailable. AX errors appear under
 `attribute_errors` or `children_error`; strings omitted from the example can be
 truncated and are named in `truncated_attributes`. Element indexes are local to
 the one snapshot, with parent references expressed as `parent_index`.
+For `AXChildren`, `kAXErrorNoValue` is retained as `children_error` metadata and
+treated as a leaf. Other child-read errors leave the tree marked truncated.
 
 The command requires `AXIsProcessTrusted()` to already be true. It never calls
 the permission-prompting API. Each out-of-process AX message has a two-second

@@ -129,6 +129,10 @@ func children(_ element: AXUIElement) -> ([AXUIElement], Int32?) {
     return (array, nil)
 }
 
+func childrenErrorIndicatesLeaf(_ error: Int32?) -> Bool {
+    error == AXError.noValue.rawValue
+}
+
 func main() {
     let options = parseOptions()
     guard AXIsProcessTrusted() else {
@@ -177,11 +181,13 @@ func main() {
                     if total + queue.count >= options.maxElements { anyTruncated = true; break }
                     queue.append((child, index, depth + 1))
                 }
-                if childrenError != nil { anyTruncated = true }
+                if childrenError != nil && !childrenErrorIndicatesLeaf(childrenError) { anyTruncated = true }
             } else {
                 let (childElements, childrenError) = children(element)
                 if let childrenError { records[records.count - 1]["children_error"] = childrenError }
-                if !childElements.isEmpty || childrenError != nil { anyTruncated = true }
+                if !childElements.isEmpty || (childrenError != nil && !childrenErrorIndicatesLeaf(childrenError)) {
+                    anyTruncated = true
+                }
             }
         }
         if !queue.isEmpty { anyTruncated = true }
