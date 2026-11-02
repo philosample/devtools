@@ -26,6 +26,7 @@ def ready(source: Path, destination: Path | None) -> dict:
         "destination_set_url": destination.as_uri() if destination else None,
         "read_only": True,
         "actions": {
+            "focus": "not_attempted",
             "menu_navigation": "not_attempted",
             "save_as_menu": "not_attempted",
             "save": "not_attempted",
@@ -49,6 +50,7 @@ def reopened(source: Path, destination: Path) -> dict:
         "destination_set_url": destination.as_uri(),
         "read_only": False,
         "actions": {
+            "focus": "verified",
             "menu_navigation": "verified",
             "save_as_menu": "verified_panel",
             "save": "destination_observed",
@@ -196,6 +198,29 @@ class LiveSetLifecycleTests(unittest.TestCase):
         save_attempt = native_source.index("saveAttempted = true", save_boundary)
         self.assertLess(save_boundary, save_attempt)
 
+    def test_swift_activates_exact_live_and_verifies_focus_before_shortcut(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        activation = native_source.index("process.activate()")
+        menu = native_source.index('findMenuItem(app: appElement, menuTitle: "File"')
+        save_window_focus = native_source.index(
+            "focusWindow(appElement, pid: options.pid, window: saveWindow)"
+        )
+        field_press = native_source.index("try press(nameField)", save_window_focus)
+        field_check = native_source.index(
+            "focusedIs(appElement, nameField)", field_press
+        )
+        shortcut = native_source.index(
+            "postChord(pid: options.pid, key: 5)", field_check
+        )
+        self.assertLess(activation, menu)
+        self.assertLess(save_window_focus, field_press)
+        self.assertLess(field_press, field_check)
+        self.assertLess(field_check, shortcut)
+
     def test_outer_timeout_preserves_unknown_execute_outcomes(self):
         with (
             patch(
@@ -229,6 +254,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
             "phase": "save-dialog",
             "error": "expected exactly one AXTextField saveAsNameTextField",
             "actions": {
+                "focus": "verified",
                 "menu_navigation": "outcome_unknown",
                 "save_as_menu": "outcome_unknown",
                 "save": "not_attempted",
@@ -256,6 +282,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
             "phase": "verify-saved-set",
             "error": "Save outcome unknown",
             "actions": {
+                "focus": "verified",
                 "menu_navigation": "outcome_unknown",
                 "save_as_menu": "outcome_unknown",
                 "save": "outcome_unknown",
@@ -315,6 +342,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
             "phase": "save-dialog",
             "error": "ambiguous dialog",
             "actions": {
+                "focus": "not_attempted",
                 "menu_navigation": "not_attempted",
                 "save_as_menu": "not_attempted",
                 "save": "not_attempted",

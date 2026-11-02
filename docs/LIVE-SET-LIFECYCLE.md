@@ -30,7 +30,8 @@ python3 -m codex_devtools ax live-set-lifecycle \
 
 The destination must be a new sibling `.als` path in the source Set directory,
 outside Git, with no symlink path components. The tool refuses existing files.
-It changes only the selected Live app. It opens the exact File menu item
+It activates only the exact Live PID and verifies it is frontmost with the
+source Set window focused. It opens the exact File menu item
 `Save Live Set As...`, verifies the observed Save panel controls, uses the
 targeted Go To Folder shortcut to set and read back the absolute destination
 directory, then checks the filename, folder leaf, enabled Save control and
@@ -38,6 +39,9 @@ fresh absence of the destination immediately before one Save click. A late
 Replace/security/discard prompt, missing or duplicate control, changed source
 URL, unexpected dialog, or failed readback stops the operation. No prompt is
 accepted and no action is retried automatically.
+Before sending Go To Folder, it raises the exact Save window if needed, presses
+the observed filename field, and requires that field to be the focused AX
+element while the selected Live PID remains frontmost.
 
 The native helper bounds Save, Quit, LaunchServices completion, and reopen
 observation waits to a combined 180 seconds. The wrapper allows 240 seconds to

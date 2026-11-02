@@ -24,6 +24,8 @@ var saveAsMenuAttempted = false
 var quitAttempted = false
 var openAttempted = false
 var menuNavigationAttempted = false
+var focusAttempted = false
+var focusVerified = false
 var uiActionAttempted = false
 var initialPID: Int?
 var initialBundleID: String?
@@ -325,9 +327,56 @@ func setString(_ element: AXUIElement, value: String, identifier expectedID: Str
 }
 
 func focusedIs(_ app: AXUIElement, _ expected: AXUIElement) -> Bool {
-    guard let value = optionalAX(app, kAXFocusedUIElementAttribute as String) else { return false }
+    guard let value = optionalAX(app, kAXFocusedUIElementAttribute as String),
+          CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
     let focused = value as! AXUIElement
     return CFEqual(focused, expected)
+}
+
+func focusedWindowIs(_ app: AXUIElement, _ expected: AXUIElement) -> Bool {
+    guard let value = optionalAX(app, kAXFocusedWindowAttribute as String),
+          CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
+    let focused = value as! AXUIElement
+    return CFEqual(focused, expected)
+}
+
+func waitForFrontmost(pid: pid_t, seconds: TimeInterval = 5) throws {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid { return }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    throw LifecycleFailure(phase: phase, message: "exact Live PID did not become the frontmost application")
+}
+
+func focusWindow(_ app: AXUIElement, pid: pid_t, window: AXUIElement) throws {
+    try waitForFrontmost(pid: pid)
+    if !focusedWindowIs(app, window) {
+        let actions = try actionNames(window)
+        try require(actions.contains(kAXRaiseAction as String), "exact AX window does not support AXRaise")
+        uiActionAttempted = true
+        let error = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        try require(error == .success, "raising exact AX window failed (\(error.rawValue))")
+    }
+    let deadline = Date().addingTimeInterval(5)
+    while Date() < deadline {
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && focusedWindowIs(app, window) {
+            return
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    throw LifecycleFailure(phase: phase, message: "exact AX window did not become focused")
+}
+
+func activateExactTarget(_ process: NSRunningApplication, app: AXUIElement, sourceWindow: AXUIElement) throws {
+    phase = "activate-target"
+    uiActionAttempted = true
+    focusAttempted = true
+    let activated = process.activate()
+    try require(activated, "activation of exact Live process was refused")
+    try waitForFrontmost(pid: process.processIdentifier)
+    try focusWindow(app, pid: process.processIdentifier, window: sourceWindow)
+    focusVerified = true
 }
 
 // Cocoa Save panels expose Go To Folder by keyboard shortcut; route only this
@@ -409,7 +458,7 @@ func run(_ options: Options) throws -> [String: Any] {
                            "process_name": process.localizedName ?? ""],
                 "source_set_url": source.absoluteString,
                 "destination_set_url": destination?.absoluteString as Any? ?? NSNull(),
-                "read_only": true, "actions": ["menu_navigation": "not_attempted", "save_as_menu": "not_attempted", "save": "not_attempted", "quit": "not_attempted", "open": "not_attempted"]]
+                "read_only": true, "actions": ["focus": "not_attempted", "menu_navigation": "not_attempted", "save_as_menu": "not_attempted", "save": "not_attempted", "quit": "not_attempted", "open": "not_attempted"]]
     }
     guard let destination, let rawAppPath = options.appPath else {
         throw LifecycleFailure(phase: phase, message: "exact destination Set and Live.app path required")
@@ -421,6 +470,7 @@ func run(_ options: Options) throws -> [String: Any] {
     }
     try require(appBundleID == options.bundleID, "Live.app bundle ID differs from target bundle ID")
 
+    try activateExactTarget(process, app: appElement, sourceWindow: exactDocumentWindow(appElement, url: source))
     phase = "save-as-menu"
     let saveItem = try findMenuItem(app: appElement, menuTitle: "File", itemTitle: "Save Live Set As...")
     saveAsMenuAttempted = true
@@ -428,11 +478,14 @@ func run(_ options: Options) throws -> [String: Any] {
     phase = "save-dialog"
     let saveWindow = try waitForWindow(appElement, title: "Save")
     try ensureNoDialogs(appElement, except: "Save")
+    try focusWindow(appElement, pid: options.pid, window: saveWindow)
     _ = try exactDocumentWindow(appElement, url: source)
     let saveRows = try allElements([saveWindow])
     try require(!saveRows.contains { ["Replace", "Allow", "Allow Anyway", "Discard", "Don't Save", "Don’t Save"].contains(title($0) ?? "") }, "unexpected overwrite/security/discard prompt")
     let nameField = try uniqueElement(saveRows, role: kAXTextFieldRole as String, title: nil, identifier: "saveAsNameTextField")
     try setString(nameField, value: destination.lastPathComponent, identifier: "saveAsNameTextField")
+    try press(nameField)
+    try require(focusedIs(appElement, nameField), "Save panel filename field did not receive focus")
     phase = "set-save-folder"
     guard let focusValue = optionalAX(appElement, kAXFocusedUIElementAttribute as String) else {
         throw LifecycleFailure(phase: phase, message: "Save panel has no focused element")
@@ -542,7 +595,7 @@ func run(_ options: Options) throws -> [String: Any] {
                                 "process_name": reopened.localizedName ?? ""],
             "source_set_url": source.absoluteString, "destination_set_url": destination.absoluteString,
             "read_only": false,
-            "actions": ["menu_navigation": "verified", "save_as_menu": "verified_panel", "save": "destination_observed", "quit": "terminated", "open": "exact_set_window_observed"],
+            "actions": ["focus": "verified", "menu_navigation": "verified", "save_as_menu": "verified_panel", "save": "destination_observed", "quit": "terminated", "open": "exact_set_window_observed"],
             "evidence_limit": "AX document URL and nonempty regular-file observation; host LOM path and recall state require separate verification"]
 }
 
@@ -555,7 +608,8 @@ do {
     let result: [String: Any] = ["format": "codex-devtools-live-set-lifecycle-v1", "status": "stopped",
         "target": ["pid": initialPID ?? 0, "bundle_identifier": initialBundleID ?? ""],
         "phase": error.phase, "error": error.message,
-        "actions": ["menu_navigation": menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
+        "actions": ["focus": focusVerified ? "verified" : focusAttempted ? "outcome_unknown" : "not_attempted",
+                    "menu_navigation": menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
                     "save_as_menu": saveAsMenuAttempted ? "outcome_unknown" : "not_attempted",
                     "save": saveAttempted ? "outcome_unknown" : "not_attempted",
                     "quit": quitAttempted ? "outcome_unknown" : "not_attempted",
@@ -568,7 +622,8 @@ do {
     let result: [String: Any] = ["format": "codex-devtools-live-set-lifecycle-v1", "status": "stopped",
         "target": ["pid": initialPID ?? 0, "bundle_identifier": initialBundleID ?? ""],
         "phase": phase, "error": String(describing: error),
-        "actions": ["menu_navigation": menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
+        "actions": ["focus": focusVerified ? "verified" : focusAttempted ? "outcome_unknown" : "not_attempted",
+                    "menu_navigation": menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
                     "save_as_menu": saveAsMenuAttempted ? "outcome_unknown" : "not_attempted",
                     "save": saveAttempted ? "outcome_unknown" : "not_attempted",
                     "quit": quitAttempted ? "outcome_unknown" : "not_attempted",

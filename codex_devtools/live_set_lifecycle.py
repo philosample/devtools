@@ -133,6 +133,7 @@ def run_lifecycle(
         actions = {
             name: "outcome_unknown" if execute else "not_attempted"
             for name in (
+                "focus",
                 "menu_navigation",
                 "save_as_menu",
                 "save",
@@ -168,6 +169,7 @@ def run_lifecycle(
     if report.get("status") == "stopped":
         actions = report.get("actions")
         allowed_actions = {
+            "focus": {"not_attempted", "outcome_unknown", "verified"},
             "menu_navigation": {"not_attempted", "outcome_unknown"},
             "save_as_menu": {"not_attempted", "outcome_unknown"},
             "save": {"not_attempted", "outcome_unknown"},
@@ -228,6 +230,7 @@ def run_lifecycle(
         )
     if report.get("status") == "ready":
         if report.get("read_only") is not True or report.get("actions") != {
+            "focus": "not_attempted",
             "menu_navigation": "not_attempted",
             "save_as_menu": "not_attempted",
             "save": "not_attempted",
@@ -246,6 +249,7 @@ def run_lifecycle(
             or reopened.get("bundle_identifier") != expected_bundle_id
             or report.get("actions")
             != {
+                "focus": "verified",
                 "menu_navigation": "verified",
                 "save_as_menu": "verified_panel",
                 "save": "destination_observed",
