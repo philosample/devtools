@@ -244,6 +244,25 @@ class LiveSetLifecycleTests(unittest.TestCase):
             native_source,
         )
 
+    def test_stale_save_panel_rows_count_toward_element_bound(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        scanner = native_source[
+            native_source.index("func savePanelElements(") : native_source.index(
+                "func savePanelMatches("
+            )
+        ]
+        increment = scanner.index("visitedCount += 1")
+        bound = scanner.index("visitedCount <= maxElements")
+        stale_skip = scanner.index(
+            "guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil"
+        )
+        self.assertLess(increment, bound)
+        self.assertLess(bound, stale_skip)
+
     def test_outer_timeout_preserves_unknown_execute_outcomes(self):
         with (
             patch(

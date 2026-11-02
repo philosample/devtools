@@ -314,15 +314,17 @@ func savePanelElements(_ roots: [AXUIElement], maxDepth: Int = 24, maxElements: 
     var output: [AXUIElement] = []
     var queue = roots.map { ($0, 0) }
     var seen = Set<CFHashCode>()
+    var visitedCount = 0
     while !queue.isEmpty {
         let (element, depth) = queue.removeFirst()
         let hash = CFHash(element)
         guard seen.insert(hash).inserted else { continue }
+        visitedCount += 1
+        try require(visitedCount <= maxElements, "Save panel AX subtree exceeded element bound")
         guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil else {
             continue // A stale file-list row is unrelated to required panel controls.
         }
         output.append(element)
-        try require(output.count <= maxElements, "Save panel AX subtree exceeded element bound")
         guard let rawChildren = try savePanelAttribute(element, kAXChildrenAttribute as String) else {
             continue
         }
