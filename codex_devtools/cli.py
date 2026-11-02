@@ -241,6 +241,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="require all snapshots to be no older than this at verification time",
     )
+    lifecycle = ax_sub.add_parser(
+        "live-set-lifecycle",
+        help="inspect or explicitly save, quit and reopen one exact Live Set",
+    )
+    lifecycle.add_argument("--pid", required=True, type=int)
+    lifecycle.add_argument("--expected-bundle-id", required=True)
+    lifecycle.add_argument("--source-set", required=True, type=Path)
+    lifecycle.add_argument("--destination-set", type=Path)
+    lifecycle.add_argument(
+        "--app", type=Path, help="exact Live.app bundle URL for reopen"
+    )
+    lifecycle.add_argument(
+        "--execute",
+        action="store_true",
+        help="perform guarded Save As, Quit and LaunchServices reopen; default only inspects",
+    )
     runtime = commands.add_parser("runtime", help="discover existing local runtimes")
     runtime_sub = runtime.add_subparsers(dest="action", required=True)
     node = runtime_sub.add_parser(
@@ -374,7 +390,7 @@ def main(argv: list[str] | None = None) -> int:
                 expected_amxd_sha256=args.expect_amxd_sha256,
             )
             _json_out(result)
-            return 0
+            return 1 if result["status"] == "stopped" else 0
         if args.group == "ax" and args.action == "snapshot":
             from .ax_snapshot import snapshot
 
@@ -399,6 +415,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             _json_out(result)
             return 0 if result["valid"] else 1
+        if args.group == "ax" and args.action == "live-set-lifecycle":
+            from .live_set_lifecycle import run_lifecycle
+
+            result = run_lifecycle(
+                args.pid,
+                expected_bundle_id=args.expected_bundle_id,
+                source_set=args.source_set,
+                destination_set=args.destination_set,
+                app_bundle=args.app,
+                execute=args.execute,
+            )
+            _json_out(result)
+            return 1 if result["status"] == "stopped" else 0
         if args.group == "midi":
             from .midi_monitor import parse_document, write_csv, write_json
 
