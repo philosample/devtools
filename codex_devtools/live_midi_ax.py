@@ -26,6 +26,111 @@ EXPECTED = {
 }
 
 
+def _snapshot_tree(snapshot: dict, path: Path) -> list[dict]:
+    bounds = snapshot.get("bounds")
+    if not isinstance(bounds, dict):
+        raise ValueError(f"snapshot bounds are missing or invalid: {path}")  # noqa: TRY004 -- malformed input documents use CLI ValueError contract
+    required = {
+        "max_elements",
+        "max_depth",
+        "max_windows",
+        "windows_observed",
+        "window_count",
+        "windows_truncated",
+        "elements_observed",
+        "truncated",
+        "window_title_filter",
+    }
+    missing = sorted(required - set(bounds))
+    if missing:
+        raise ValueError(
+            f"snapshot v1 bounds are missing required fields: {', '.join(missing)}"
+        )
+    for name in (
+        "max_elements",
+        "max_depth",
+        "max_windows",
+        "windows_observed",
+        "window_count",
+        "elements_observed",
+    ):
+        if type(bounds[name]) is not int:
+            raise ValueError(f"snapshot bounds field must be an integer: {name}")
+    for name in ("windows_truncated", "truncated"):
+        if type(bounds[name]) is not bool:
+            raise ValueError(f"snapshot bounds field must be a boolean: {name}")
+    if not 1 <= bounds["max_elements"] <= 2048:
+        raise ValueError("snapshot max_elements is outside native v1 limits")
+    if not 0 <= bounds["max_depth"] <= 32:
+        raise ValueError("snapshot max_depth is outside native v1 limits")
+    if bounds["max_windows"] != 64:
+        raise ValueError("snapshot max_windows differs from native v1 limit")
+    if bounds["window_count"] < 1 or bounds["windows_observed"] < 1:
+        raise ValueError("snapshot must report at least one application window")
+    if bounds["windows_observed"] != min(bounds["window_count"], bounds["max_windows"]):
+        raise ValueError("snapshot window counts are inconsistent")
+    if bounds["windows_truncated"] != (bounds["window_count"] > bounds["max_windows"]):
+        raise ValueError("snapshot windows_truncated disagrees with window counts")
+    if bounds["window_title_filter"] != "Settings":
+        raise ValueError(
+            f"snapshot is not an exact Settings-window observation: {path}"
+        )
+    if bounds["windows_truncated"] or bounds["truncated"]:
+        raise ValueError(f"snapshot tree is truncated: {path}")
+    if (
+        bounds["elements_observed"] < 1
+        or bounds["elements_observed"] > bounds["max_elements"]
+    ):
+        raise ValueError("snapshot element count is outside native v1 bounds")
+
+    windows = snapshot.get("windows")
+    if not isinstance(windows, list) or len(windows) != bounds["windows_observed"]:
+        raise ValueError("snapshot windows array disagrees with windows_observed")
+    window_indices = []
+    for window in windows:
+        if (
+            not isinstance(window, dict)
+            or type(window.get("index")) is not int
+            or not isinstance(window.get("title"), str)
+        ):
+            raise ValueError("snapshot windows array has an invalid row")
+        window_indices.append(window["index"])
+    if len(set(window_indices)) != len(window_indices):
+        raise ValueError("snapshot windows array contains duplicate indices")
+    if sorted(window_indices) != list(range(bounds["windows_observed"])):
+        raise ValueError("snapshot window indices disagree with windows_observed")
+
+    trees = snapshot.get("trees")
+    if not isinstance(trees, list) or len(trees) != 1 or not isinstance(trees[0], dict):
+        raise ValueError(f"snapshot must contain one filtered window tree: {path}")
+    tree = trees[0]
+    if (
+        type(tree.get("window_index")) is not int
+        or tree["window_index"] not in window_indices
+        or not any(
+            window["index"] == tree["window_index"] and window["title"] == "Settings"
+            for window in windows
+        )
+    ):
+        raise ValueError("snapshot tree does not identify its Settings window")
+    elements = tree.get("elements")
+    if not isinstance(elements, list) or len(elements) != bounds["elements_observed"]:
+        raise ValueError("snapshot elements array disagrees with elements_observed")
+    element_indices = []
+    for element in elements:
+        if (
+            not isinstance(element, dict)
+            or type(element.get("index")) is not int
+            or type(element.get("depth")) is not int
+            or not 0 <= element["depth"] <= bounds["max_depth"]
+        ):
+            raise ValueError("snapshot element is inconsistent with native v1 bounds")
+        element_indices.append(element["index"])
+    if sorted(element_indices) != list(range(bounds["elements_observed"])):
+        raise ValueError("snapshot element indices disagree with elements_observed")
+    return elements
+
+
 def _read_snapshot(path: Path) -> tuple[dict, dict[str, int], str, str]:
     try:
         raw = path.read_bytes()
@@ -50,16 +155,7 @@ def _read_snapshot(path: Path) -> tuple[dict, dict[str, int], str, str]:
         or not target["bundle_identifier"]
     ):
         raise ValueError(f"snapshot target identity is incomplete: {path}")
-    bounds = snapshot.get("bounds")
-    if (
-        not isinstance(bounds, dict)
-        or bounds.get("truncated") is not False
-        or bounds.get("windows_truncated", False) is not False
-        or bounds.get("window_title_filter") != "Settings"
-    ):
-        raise ValueError(
-            f"snapshot must be an untruncated Settings-window observation: {path}"
-        )
+    elements = _snapshot_tree(snapshot, path)
     try:
         observed = datetime.fromisoformat(
             snapshot["observed_at_utc"].replace("Z", "+00:00")
@@ -73,35 +169,24 @@ def _read_snapshot(path: Path) -> tuple[dict, dict[str, int], str, str]:
 
     identities = {description: name for name, description in ROWS.items()}
     values: dict[str, int] = {}
-    trees = snapshot.get("trees")
-    if not isinstance(trees, list) or not trees:
-        raise ValueError(f"snapshot has no inspected window tree: {path}")
-    for tree in trees:
-        if not isinstance(tree, dict) or not isinstance(tree.get("elements"), list):
-            raise ValueError(f"snapshot tree schema is invalid: {path}")  # noqa: TRY004 -- input document validation uses CLI ValueError contract
-        for element in tree["elements"]:
-            if not isinstance(element, dict):
-                raise ValueError(f"snapshot element schema is invalid: {path}")  # noqa: TRY004 -- input document validation uses CLI ValueError contract
-            description = element.get("description")
-            name = identities.get(description)
-            if name is None:
-                continue
-            if name in values:
-                raise ValueError(f"duplicate AX row for {description}: {path}")
-            if (
-                element.get("role") != "AXCheckBox"
-                or element.get("enabled") is not True
-            ):
-                raise ValueError(
-                    f"AX row has unexpected role or disabled state: {description}"
-                )
-            value = element.get("value")
-            if isinstance(value, bool):
-                values[name] = int(value)
-            elif type(value) is int and value in (0, 1):
-                values[name] = value
-            else:
-                raise ValueError(f"AX row value must be 0 or 1: {description}")
+    for element in elements:
+        description = element.get("description")
+        name = identities.get(description)
+        if name is None:
+            continue
+        if name in values:
+            raise ValueError(f"duplicate AX row for {description}: {path}")
+        if element.get("role") != "AXCheckBox" or element.get("enabled") is not True:
+            raise ValueError(
+                f"AX row has unexpected role or disabled state: {description}"
+            )
+        value = element.get("value")
+        if isinstance(value, bool):
+            values[name] = int(value)
+        elif type(value) is int and value in (0, 1):
+            values[name] = value
+        else:
+            raise ValueError(f"AX row value must be 0 or 1: {description}")
     missing = sorted(set(ROWS) - set(values))
     if missing:
         raise ValueError(

@@ -20,6 +20,17 @@ VALUES = {
     "output_sync": 0,
     "output_remote": 0,
 }
+BOUNDS_FIELDS = (
+    "max_elements",
+    "max_depth",
+    "max_windows",
+    "windows_observed",
+    "window_count",
+    "windows_truncated",
+    "elements_observed",
+    "truncated",
+    "window_title_filter",
+)
 
 
 def snapshot(values: dict[str, int], observed_at: datetime) -> dict:
@@ -34,21 +45,35 @@ def snapshot(values: dict[str, int], observed_at: datetime) -> dict:
             "bundle_identifier": "com.ableton.live",
         },
         "bounds": {
-            "window_title_filter": "Settings",
-            "truncated": False,
+            "max_elements": 500,
+            "max_depth": 10,
+            "max_windows": 64,
+            "windows_observed": 3,
+            "window_count": 3,
             "windows_truncated": False,
+            "elements_observed": len(values),
+            "truncated": False,
+            "window_title_filter": "Settings",
         },
+        "windows": [
+            {"index": 0, "title": "Settings"},
+            {"index": 1, "title": "Other window"},
+            {"index": 2, "title": "Another window"},
+        ],
         "trees": [
             {
+                "window_index": 0,
                 "elements": [
                     {
+                        "index": index,
+                        "depth": 0,
                         "role": "AXCheckBox",
                         "description": ROWS[name],
                         "value": value,
                         "enabled": True,
                     }
-                    for name, value in values.items()
-                ]
+                    for index, (name, value) in enumerate(values.items())
+                ],
             }
         ],
     }
@@ -132,14 +157,18 @@ class LiveMidiAxTests(unittest.TestCase):
     def test_duplicate_or_missing_exact_rows_are_rejected(self):
         duplicate_path = self.root / "duplicate.json"
         duplicate = snapshot(VALUES, self.times[0])
-        duplicate["trees"][0]["elements"].append(duplicate["trees"][0]["elements"][0])
+        duplicate_row = duplicate["trees"][0]["elements"][0].copy()
+        duplicate_row["index"] = len(VALUES)
+        duplicate["trees"][0]["elements"].append(duplicate_row)
+        duplicate["bounds"]["elements_observed"] += 1
         duplicate_path.write_text(json.dumps(duplicate), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "duplicate AX row"):
             self.verify([duplicate_path, *self.write_triplet([VALUES] * 3)[1:]])
 
         missing_path = self.root / "missing.json"
         missing = snapshot(VALUES, self.times[0])
-        missing["trees"][0]["elements"] = missing["trees"][0]["elements"][1:]
+        missing["trees"][0]["elements"].pop()
+        missing["bounds"]["elements_observed"] -= 1
         missing_path.write_text(json.dumps(missing), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "missing Studio Capture"):
             self.verify([missing_path, *self.write_triplet([VALUES] * 3)[1:]])
@@ -149,7 +178,7 @@ class LiveMidiAxTests(unittest.TestCase):
         truncated = snapshot(VALUES, self.times[0])
         truncated["bounds"]["truncated"] = True
         truncated_path.write_text(json.dumps(truncated), encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "untruncated"):
+        with self.assertRaisesRegex(ValueError, "tree is truncated"):
             self.verify([truncated_path, *self.write_triplet([VALUES] * 3)[1:]])
 
         wrong_target_paths = self.write_triplet([VALUES] * 3)
@@ -165,6 +194,60 @@ class LiveMidiAxTests(unittest.TestCase):
         wrong_control_path.write_text(json.dumps(wrong_control), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "unexpected role"):
             self.verify([wrong_control_path, *self.write_triplet([VALUES] * 3)[1:]])
+
+    def test_every_required_v1_bounds_field_must_be_present(self):
+        for field in BOUNDS_FIELDS:
+            path = self.root / f"missing-{field}.json"
+            malformed = snapshot(VALUES, self.times[0])
+            del malformed["bounds"][field]
+            path.write_text(json.dumps(malformed), encoding="utf-8")
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(ValueError, "missing required fields"),
+            ):
+                self.verify([path, *self.write_triplet([VALUES] * 3)[1:]])
+
+    def test_v1_bound_types_and_window_element_counts_must_agree(self):
+        mutations = (
+            ("windows_observed", 2),
+            ("window_count", 4),
+            ("elements_observed", 7),
+            ("windows_truncated", True),
+        )
+        for field, value in mutations:
+            path = self.root / f"invalid-{field}.json"
+            malformed = snapshot(VALUES, self.times[0])
+            malformed["bounds"][field] = value
+            path.write_text(json.dumps(malformed), encoding="utf-8")
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.verify([path, *self.write_triplet([VALUES] * 3)[1:]])
+
+        windows_path = self.root / "short-windows.json"
+        malformed = snapshot(VALUES, self.times[0])
+        malformed["windows"].pop()
+        windows_path.write_text(json.dumps(malformed), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "windows array disagrees"):
+            self.verify([windows_path, *self.write_triplet([VALUES] * 3)[1:]])
+
+    def test_every_v1_bounds_field_requires_its_declared_type(self):
+        wrong_values = {
+            "max_elements": True,
+            "max_depth": "10",
+            "max_windows": 64.0,
+            "windows_observed": True,
+            "window_count": "3",
+            "windows_truncated": 0,
+            "elements_observed": False,
+            "truncated": 0,
+            "window_title_filter": 1,
+        }
+        for field, value in wrong_values.items():
+            path = self.root / f"wrong-type-{field}.json"
+            malformed = snapshot(VALUES, self.times[0])
+            malformed["bounds"][field] = value
+            path.write_text(json.dumps(malformed), encoding="utf-8")
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.verify([path, *self.write_triplet([VALUES] * 3)[1:]])
 
     def test_optional_freshness_gate_rejects_stale_snapshots(self):
         paths = self.write_triplet([VALUES, VALUES | {"input_track": 0}, VALUES])
