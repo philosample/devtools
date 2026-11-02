@@ -40,6 +40,7 @@ var phase = "arguments"
 var actions: [String: [String: Any]] = [:]
 var receipt: [String: Any] = [:]
 var manualInspectionRequired = false
+var canonicalSetURL: URL?
 
 func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
     if try !condition() { throw TransportFailure(phase: phase, message: message) }
@@ -573,6 +574,7 @@ func run() throws -> [String: Any] {
         throw TransportFailure(phase: phase, message: "Accessibility is not trusted; no permission prompt was requested")
     }
     let pathURL = try setURL()
+    canonicalSetURL = pathURL
     guard let process = NSRunningApplication(processIdentifier: options.pid),
           process.bundleIdentifier == options.bundleID, !process.isTerminated else {
         throw TransportFailure(phase: phase, message: "exact Live PID or bundle identity is unavailable")
@@ -729,7 +731,8 @@ func run() throws -> [String: Any] {
         let arrangementAfterStop = try checkboxValue(controls["Arrangement Record"]!.element)
         let sessionAfterStop = try checkboxValue(controls["Session Record"]!.element)
         setAction("stop", outcome: "known")
-        if linkAfterStop != 0 || arrangementAfterStop != 0 || sessionAfterStop != 0 {
+        if linkAtStop != 0 || arrangementAtStop != 0 || sessionAtStop != 0
+            || linkAfterStop != 0 || arrangementAfterStop != 0 || sessionAfterStop != 0 {
             manualInspectionRequired = true
         }
         receipt["transport"] = [
@@ -765,6 +768,7 @@ func run() throws -> [String: Any] {
 
 do {
     options = try parseOptions()
+    canonicalSetURL = URL(fileURLWithPath: options.setPath)
     if options.execute {
         actions = [
             "settings_close": ["attempted": false, "outcome": "not_attempted"],
@@ -790,7 +794,7 @@ do {
     result["action"] = options.action
     result["read_only"] = !options.execute
     result["target"] = ["pid": options.pid, "bundle_identifier": options.bundleID]
-    result["set_url"] = options.setPath
+    result["set_url"] = canonicalSetURL?.absoluteString ?? options.setPath
     result["actions"] = actions
     result["manual_inspection_required"] = manualInspectionRequired
     result["error"] = String(describing: error)

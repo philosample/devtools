@@ -137,16 +137,32 @@ def _valid_report(
         and rows["stop"]["outcome"] != "known"
     )
     transport = report.get("transport")
-    transport_state_needs_review = (
-        action == "play"
-        and isinstance(transport, dict)
-        and any(
-            transport.get(name) == 1
-            for name in ("link", "arrangement_record", "session_record")
+    transport_before_stop = report.get("transport_before_stop")
+    monitored_states = ("link", "arrangement_record", "session_record")
+    if transport_before_stop is not None and (
+        action != "play"
+        or not isinstance(transport_before_stop, dict)
+        or any(
+            type(transport_before_stop.get(name)) is not int
+            or transport_before_stop[name] not in (0, 1)
+            for name in ("play", *monitored_states)
         )
+    ):
+        return False
+    transport_state_needs_review = action == "play" and any(
+        isinstance(state, dict)
+        and any(state.get(name) == 1 for name in monitored_states)
+        for state in (transport_before_stop, transport)
     )
     if report["manual_inspection_required"] is not (
         unknown or play_attempted_without_verified_stop or transport_state_needs_review
+    ):
+        return False
+    if (
+        action == "play"
+        and rows["play"]["outcome"] == "known"
+        and rows["stop"]["outcome"] == "known"
+        and transport_before_stop is None
     ):
         return False
     if report.get("play_for_seconds") != play_for_seconds:
@@ -390,7 +406,11 @@ def run_live_transport(
                 uncertain["error"] = (
                     "native helper timed out; exact Live transport state requires inspection"
                 )
-                if selected_action == "play":
+                if selected_action == "inspect":
+                    uncertain["error"] = (
+                        "native inspection timed out; transport observation is unavailable"
+                    )
+                elif selected_action == "play":
                     for name in ("settings_close", "play", "stop"):
                         uncertain["actions"][name] = {
                             "attempted": True,
@@ -401,7 +421,7 @@ def run_live_transport(
                         "attempted": True,
                         "outcome": "unknown",
                     }
-                uncertain["manual_inspection_required"] = True
+                uncertain["manual_inspection_required"] = selected_action != "inspect"
                 return save(uncertain) if execute else uncertain
             try:
                 report = json.loads(result.stdout)

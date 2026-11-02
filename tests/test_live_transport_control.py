@@ -110,6 +110,18 @@ def transport_report(path, action, *, seconds=None, status="complete"):
             "arrangement_record": 0,
             "session_record": 0,
         },
+        **(
+            {
+                "transport_before_stop": {
+                    "play": 1,
+                    "link": 0,
+                    "arrangement_record": 0,
+                    "session_record": 0,
+                }
+            }
+            if action == "play"
+            else {}
+        ),
         "play_for_seconds": seconds,
         "actions": rows,
         "manual_inspection_required": False,
@@ -414,6 +426,37 @@ class LiveTransportControlTests(unittest.TestCase):
         self.assertTrue(report["manual_inspection_required"])
         self.assertEqual(report["actions"]["stop"]["outcome"], "unknown")
 
+    def test_inspection_timeout_keeps_empty_read_only_actions(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    side_effect=subprocess.TimeoutExpired(["native"], 70),
+                ),
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                )
+        self.assertEqual(report["status"], "stopped")
+        self.assertEqual(report["phase"], "native-helper-timeout")
+        self.assertTrue(report["read_only"])
+        self.assertEqual(report["actions"], {})
+        self.assertFalse(report["manual_inspection_required"])
+        self.assertIn("observation is unavailable", report["error"])
+
     def test_explicit_stop_uses_exact_set_without_sync_baseline(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)
@@ -452,6 +495,55 @@ class LiveTransportControlTests(unittest.TestCase):
             sync.assert_not_called()
             self.assertEqual(report["status"], "complete")
             self.assertEqual(report["actions"]["stop"]["outcome"], "verified_noop")
+
+    def test_native_stop_preflight_refusal_preserves_known_not_attempted_receipt(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "refused-stop.json"
+            refused = transport_report(set_path, "stop", status="stopped")
+            refused["phase"] = "stop-preflight"
+            refused["actions"]["stop"] = {
+                "attempted": False,
+                "outcome": "not_attempted",
+                "detail": "exact Set is not on the current desktop",
+            }
+            refused["error"] = "exact Set is not on the current desktop"
+            native = subprocess.CompletedProcess(
+                args=["native"],
+                returncode=1,
+                stdout=json.dumps(refused),
+                stderr="",
+            )
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    return_value=native,
+                ),
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="stop",
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(report, saved)
+        self.assertEqual(report["set_url"], set_path.as_uri())
+        self.assertEqual(report["actions"]["stop"]["outcome"], "not_attempted")
+        self.assertFalse(report["actions"]["stop"]["attempted"])
+        self.assertFalse(report["manual_inspection_required"])
 
     def test_play_duration_and_output_count_are_bounded_before_helper_launch(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
@@ -525,6 +617,21 @@ class LiveTransportControlTests(unittest.TestCase):
                 "returncode": 0,
             }
             self.assertTrue(_valid_report(report, **kwargs))
+            report["transport_before_stop"]["link"] = 1
+            report["manual_inspection_required"] = False
+            self.assertFalse(_valid_report(report, **kwargs))
+            report["manual_inspection_required"] = True
+            self.assertTrue(_valid_report(report, **kwargs))
+            report["transport_before_stop"]["link"] = 0
+            report["manual_inspection_required"] = False
+            report.pop("transport_before_stop")
+            self.assertFalse(_valid_report(report, **kwargs))
+            report["transport_before_stop"] = {
+                "play": 1,
+                "link": 0,
+                "arrangement_record": 0,
+                "session_record": 0,
+            }
             report["transport"]["link"] = 1
             report["manual_inspection_required"] = True
             self.assertTrue(_valid_report(report, **kwargs))
@@ -563,6 +670,12 @@ class LiveTransportControlTests(unittest.TestCase):
             source,
         )
         self.assertIn("CGWindowListCopyWindowInfo", source)
+        self.assertIn("canonicalSetURL = URL(fileURLWithPath: options.setPath)", source)
+        self.assertIn("canonicalSetURL?.absoluteString ?? options.setPath", source)
+        self.assertIn(
+            "if linkAtStop != 0 || arrangementAtStop != 0 || sessionAtStop != 0",
+            source,
+        )
         self.assertIn("try sameSetURL(document, expected: url)", source)
         self.assertIn('"Transport.Play"', source)
         self.assertIn('"Transport.Stop"', source)
