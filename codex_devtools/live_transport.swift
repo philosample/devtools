@@ -798,6 +798,7 @@ do {
     result["actions"] = actions
     result["manual_inspection_required"] = manualInspectionRequired
     result["error"] = String(describing: error)
+    if options.action == "play" { result["play_for_seconds"] = options.playForSeconds }
     if !attempted { result["manual_inspection_required"] = false }
     emit(result, code: 1)
 }

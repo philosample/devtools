@@ -545,6 +545,75 @@ class LiveTransportControlTests(unittest.TestCase):
         self.assertFalse(report["actions"]["stop"]["attempted"])
         self.assertFalse(report["manual_inspection_required"])
 
+    def test_early_native_play_refusal_preserves_duration_and_not_attempted_actions(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "refused-play.json"
+            refused = {
+                "format": FORMAT,
+                "status": "stopped",
+                "phase": "identity",
+                "action": "play",
+                "read_only": False,
+                "target": {"pid": PID, "bundle_identifier": BUNDLE},
+                "set_url": set_path.as_uri(),
+                "play_for_seconds": 3,
+                "actions": {
+                    name: {"attempted": False, "outcome": "not_attempted"}
+                    for name in ("settings_close", "play", "stop")
+                },
+                "manual_inspection_required": False,
+                "error": "Accessibility is not trusted",
+            }
+            native = subprocess.CompletedProcess(
+                args=["native"],
+                returncode=1,
+                stdout=json.dumps(refused),
+                stderr="",
+            )
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.run_live_midi_sync",
+                    return_value=baseline(),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    return_value=native,
+                ),
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="play",
+                    play_for_seconds=3,
+                    expected_count=21,
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(report, saved)
+        self.assertEqual(report["phase"], "identity")
+        self.assertEqual(report["set_url"], set_path.as_uri())
+        self.assertEqual(report["play_for_seconds"], 3)
+        self.assertTrue(all(not row["attempted"] for row in report["actions"].values()))
+        self.assertTrue(
+            all(row["outcome"] == "not_attempted" for row in report["actions"].values())
+        )
+        self.assertFalse(report["manual_inspection_required"])
+
     def test_play_duration_and_output_count_are_bounded_before_helper_launch(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)
@@ -672,6 +741,10 @@ class LiveTransportControlTests(unittest.TestCase):
         self.assertIn("CGWindowListCopyWindowInfo", source)
         self.assertIn("canonicalSetURL = URL(fileURLWithPath: options.setPath)", source)
         self.assertIn("canonicalSetURL?.absoluteString ?? options.setPath", source)
+        self.assertIn(
+            'if options.action == "play" { result["play_for_seconds"] = options.playForSeconds }',
+            source,
+        )
         self.assertIn(
             "if linkAtStop != 0 || arrangementAtStop != 0 || sessionAtStop != 0",
             source,
