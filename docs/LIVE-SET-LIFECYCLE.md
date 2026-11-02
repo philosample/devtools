@@ -51,7 +51,10 @@ element before Return. The command verifies that the sheet child disappears
 after Return before continuing to Save controls.
 During Save panel scans, AX elements that have become invalid are skipped as
 stale file-list rows; each required control must still match exactly once, and
-other AX errors or traversal-bound violations stop the operation.
+unsupported optional `AXTitle`/`AXIdentifier` reads make only that element a
+non-match. Required controls still need the exact role and each selector and
+readback required by that control's guard; other AX errors or traversal-bound
+violations stop the operation.
 
 The native helper bounds Save, Quit, LaunchServices completion, and reopen
 observation waits to a combined 180 seconds. The wrapper allows 240 seconds to

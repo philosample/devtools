@@ -307,6 +307,8 @@ func savePanelAttribute(_ element: AXUIElement, _ name: String) throws -> CFType
     let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
     if error == .success { return value }
     if error == .noValue || error == .invalidUIElement { return nil }
+    let optionalIdentityAttribute = name == (kAXTitleAttribute as String) || name == "AXIdentifier"
+    if error == .attributeUnsupported && optionalIdentityAttribute { return nil }
     throw LifecycleFailure(phase: phase, message: "Save panel AX read \(name) failed (\(error.rawValue))")
 }
 

@@ -331,6 +331,61 @@ class LiveSetLifecycleTests(unittest.TestCase):
             native_source,
         )
 
+    def test_unsupported_optional_save_panel_identity_attributes_are_nonmatches(self):
+        # Reduced from the complete r6 Save-panel receipt: real rows omit
+        # optional AXTitle or AXIdentifier while required controls are present.
+        observed_rows = [
+            {
+                "role": "AXTextField",
+                "identifier": "saveAsNameTextField",
+                "value": "TR1000-tooling-recall-r71.als",
+                "attribute_errors": {"title": -25205},
+            },
+            {
+                "role": "AXButton",
+                "attribute_errors": {"identifier": -25212, "title": -25205},
+            },
+            {
+                "role": "AXButton",
+                "identifier": "OKButton",
+                "title": "Save",
+                "enabled": True,
+            },
+        ]
+        self.assertEqual(observed_rows[0]["attribute_errors"]["title"], -25205)
+        self.assertEqual(observed_rows[1]["attribute_errors"]["identifier"], -25212)
+        self.assertEqual(observed_rows[2]["title"], "Save")
+
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        attribute_reader = native_source[
+            native_source.index("func savePanelAttribute(") : native_source.index(
+                "func savePanelElements("
+            )
+        ]
+        self.assertIn("error == .attributeUnsupported", attribute_reader)
+        self.assertIn("name == (kAXTitleAttribute as String)", attribute_reader)
+        self.assertIn('name == "AXIdentifier"', attribute_reader)
+        self.assertIn(
+            "if error == .attributeUnsupported && optionalIdentityAttribute { return nil }",
+            attribute_reader,
+        )
+        self.assertIn(
+            'throw LifecycleFailure(phase: phase, message: "Save panel AX read',
+            attribute_reader,
+        )
+
+        exact_matcher = native_source[
+            native_source.index("func uniqueSavePanelElement(") : native_source.index(
+                "func waitForGoToPathField("
+            )
+        ]
+        self.assertIn("try require(matches.count == 1", exact_matcher)
+        self.assertIn("is disabled", exact_matcher)
+
     def test_stale_save_panel_rows_count_toward_element_bound(self):
         native_source = (
             Path(__file__).resolve().parents[1]
