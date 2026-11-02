@@ -179,12 +179,7 @@ def _valid_report(
             and report["stop_play_readback"] != "verified"
         ):
             return False
-    if (
-        action == "play"
-        and rows["play"]["outcome"] == "known"
-        and rows["stop"]["outcome"] == "known"
-        and transport_before_stop is None
-    ):
+    if action == "play" and rows["stop"]["attempted"] and transport_before_stop is None:
         return False
     if report.get("play_for_seconds") != play_for_seconds:
         return False

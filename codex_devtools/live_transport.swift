@@ -410,6 +410,22 @@ func waitUntil(_ predicate: () -> Bool, seconds: TimeInterval) -> Bool {
     return predicate()
 }
 
+func waitForValueUntilDeadline(
+    _ expected: Int,
+    deadline: UInt64,
+    now: () -> UInt64,
+    read: () throws -> Int,
+    pump: () -> Void
+) throws -> Bool {
+    while now() < deadline {
+        let value = try read()
+        if now() >= deadline { return false }
+        if value == expected { return true }
+        pump()
+    }
+    return false
+}
+
 func waitForTransportValue(
     _ expected: Int,
     element: AXUIElement,
@@ -422,18 +438,22 @@ func waitForTransportValue(
     title: String,
     deadline: UInt64
 ) throws -> Bool {
-    while true {
+    let guardedRead = { () throws -> Int in
         try require(currentProcessMatches(pid, bundleID: bundleID), "Live process identity changed during \(controlName) readback")
         try require(frontmost(pid) && focusedWindowIs(app, window), "exact Set focus changed during \(controlName) readback")
         try validateWindowDocument(window, url: url)
         try require(onscreenWindow(pid: pid, title: title), "exact Set window left the current desktop during \(controlName) readback")
         _ = try appWindows(app)
         try validateControlIdentity(element, name: controlName)
-        if try checkboxValue(element) == expected { return true }
-        let now = DispatchTime.now().uptimeNanoseconds
-        if now >= deadline { return false }
-        pumpRunLoopTurn(until: deadline)
+        return try checkboxValue(element)
     }
+    return try waitForValueUntilDeadline(
+        expected,
+        deadline: deadline,
+        now: { DispatchTime.now().uptimeNanoseconds },
+        read: guardedRead,
+        pump: { pumpRunLoopTurn(until: deadline) }
+    )
 }
 
 func acknowledgementDeadline(maxSeconds: Double, cappedBy deadline: UInt64) -> UInt64 {
@@ -687,13 +707,21 @@ func run() throws -> [String: Any] {
             )
             receipt["stop_play_readback"] = stopAcknowledged ? "verified" : "not_observed_before_bound"
             try require(stopAcknowledged, "Stop did not read back Play off within the acknowledgement bound")
+        }
+        let finalState = controlsState(try exactControls(try exactSetWindow(app, url: pathURL)))
+        if actions["stop"]?["attempted"] as? Bool == true {
+            try require(finalState["play"] as? Int == 0, "Play changed after Stop acknowledgement")
             setAction("stop", outcome: "known")
         }
-        return transportReport(
+        var result = transportReport(
             status: "complete", phase: "complete", action: "stop", readOnly: false,
             pid: options.pid, bundleID: options.bundleID, processName: process.localizedName ?? "",
-            setURL: pathURL, title: setTitle, transport: controlsState(try exactControls(try exactSetWindow(app, url: pathURL)))
+            setURL: pathURL, title: setTitle, transport: finalState
         )
+        if let readback = receipt["stop_play_readback"] {
+            result["stop_play_readback"] = readback
+        }
+        return result
     }
 
     phase = "play-baseline"

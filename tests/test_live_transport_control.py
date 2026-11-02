@@ -753,6 +753,109 @@ class LiveTransportControlTests(unittest.TestCase):
             self.assertIn("Play did not read back on", report["error"])
             self.assertTrue(_valid_report(report, **kwargs))
 
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_production_deadline_gate_models_delayed_and_expired_readbacks(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        function_start = source.index("func waitForValueUntilDeadline(")
+        function_end = source.index("\nfunc waitForTransportValue(", function_start)
+        production_gate = source[function_start:function_end]
+        harness = f"""
+{production_gate}
+final class ClockBox {{ var value: UInt64 = 0; var reads = 0 }}
+let delayedClock = ClockBox()
+let delayedValues = [0, 0, 1]
+let delayed = try! waitForValueUntilDeadline(
+    1,
+    deadline: 10,
+    now: {{ delayedClock.value }},
+    read: {{ let value = delayedValues[delayedClock.reads]; delayedClock.reads += 1; return value }},
+    pump: {{ delayedClock.value += 1 }}
+)
+precondition(delayed && delayedClock.reads == 3 && delayedClock.value == 2)
+
+let expiredClock = ClockBox()
+expiredClock.value = 5
+let expired = try! waitForValueUntilDeadline(
+    1,
+    deadline: 5,
+    now: {{ expiredClock.value }},
+    read: {{ expiredClock.reads += 1; return 1 }},
+    pump: {{}}
+)
+precondition(!expired && expiredClock.reads == 0)
+
+let lateClock = ClockBox()
+let late = try! waitForValueUntilDeadline(
+    1,
+    deadline: 5,
+    now: {{ lateClock.value }},
+    read: {{ lateClock.value = 5; lateClock.reads += 1; return 1 }},
+    pump: {{}}
+)
+precondition(!late && lateClock.reads == 1)
+"""
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            main_swift = root / "main.swift"
+            binary = root / "deadline-model"
+            main_swift.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                ["/usr/bin/xcrun", "swiftc", str(main_swift), "-o", str(binary)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_explicit_stop_success_receipt_preserves_verified_readback(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "stop.json"
+            native = transport_report(set_path, "stop")
+            native["actions"]["stop"] = {"attempted": True, "outcome": "known"}
+            native["stop_play_readback"] = "verified"
+            completed = subprocess.CompletedProcess(
+                args=["native"], returncode=0, stdout=json.dumps(native), stderr=""
+            )
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    return_value=completed,
+                ),
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="stop",
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(report, saved)
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(report["actions"]["stop"]["outcome"], "known")
+        self.assertEqual(report["stop_play_readback"], "verified")
+
     def test_swift_contract_uses_monotonic_deadline_exact_set_and_settings_baseline(
         self,
     ):
