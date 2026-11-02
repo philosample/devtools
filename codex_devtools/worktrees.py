@@ -45,10 +45,23 @@ def _read(path: Path) -> dict:
     ):
         raise ValueError(f"invalid worktree registry schema: {path}")
     for key, entry in data["entries"].items():
+        required = (
+            "repository",
+            "worktree",
+            "branch",
+            "head",
+            "owner_chat",
+            "story",
+            "plan",
+            "pr",
+        )
         if (
             not isinstance(key, str)
             or not isinstance(entry, dict)
             or entry.get("worktree") != key
+            or any(not isinstance(entry.get(field), str) for field in required)
+            or not isinstance(entry.get("released"), bool)
+            or not re.fullmatch(r"[0-9a-f]{40}", entry["head"])
         ):
             raise ValueError(f"invalid worktree registry entry: {key}")
     return data
@@ -115,6 +128,29 @@ def _entry(data: dict, worktree: Path, owner_chat: str) -> dict:
     return entry
 
 
+def _new_entry(
+    repository: Path,
+    worktree: Path,
+    branch: str,
+    head: str,
+    owner_chat: str,
+    story: str,
+    plan: str,
+    pr: str = "",
+) -> dict:
+    return {
+        "repository": str(repository),
+        "worktree": str(worktree),
+        "branch": branch,
+        "head": head,
+        "owner_chat": owner_chat,
+        "story": story,
+        "plan": plan,
+        "pr": pr,
+        "released": False,
+    }
+
+
 def register(
     repository: Path,
     worktree: Path,
@@ -132,17 +168,9 @@ def register(
         data = _read(path)
         if str(worktree) in data["entries"]:
             raise ValueError(f"worktree is already registered: {worktree}")
-        entry = {
-            "repository": str(repository),
-            "worktree": str(worktree),
-            "branch": branch,
-            "head": head,
-            "owner_chat": owner_chat,
-            "story": story,
-            "plan": plan,
-            "pr": pr,
-            "released": False,
-        }
+        entry = _new_entry(
+            repository, worktree, branch, head, owner_chat, story, plan, pr
+        )
         data["entries"][str(worktree)] = entry
         _write(path, data)
     return entry
@@ -157,23 +185,44 @@ def start(
     story: str,
     plan: str,
 ) -> dict:
-    repository, worktree = repository.resolve(), worktree.expanduser().absolute()
+    repository, worktree = (
+        repository.resolve(),
+        worktree.expanduser().resolve(strict=False),
+    )
     if worktree.exists():
         raise ValueError(f"worktree path already exists: {worktree}")
     if not owner_chat.strip() or not story.strip() or not plan.strip():
         raise ValueError("owner chat, story and plan are required")
-    _run(
-        "git",
-        "-C",
-        str(repository),
-        "worktree",
-        "add",
-        "-b",
-        branch,
-        str(worktree),
-        base,
-    )
-    return register(repository, worktree, owner_chat, story, plan)
+    path = registry_path()
+    with _locked(path):
+        data = _read(path)
+        if str(worktree) in data["entries"]:
+            raise ValueError(f"worktree is already registered: {worktree}")
+        _run(
+            "git",
+            "-C",
+            str(repository),
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            str(worktree),
+            base,
+        )
+        try:
+            actual_branch, head = _identity(repository, worktree)
+            if actual_branch != branch:
+                raise ValueError("new worktree branch differs from requested branch")
+            entry = _new_entry(
+                repository, worktree, branch, head, owner_chat, story, plan
+            )
+            data["entries"][str(worktree)] = entry
+            _write(path, data)
+        except (OSError, ValueError):
+            _run("git", "-C", str(repository), "worktree", "remove", str(worktree))
+            _run("git", "-C", str(repository), "branch", "-D", branch)
+            raise
+    return entry
 
 
 def update(
@@ -258,7 +307,7 @@ def cleanup(worktree: Path, owner_chat: str) -> dict:
     with _locked(path):
         data = _read(path)
         entry = _entry(data, worktree, owner_chat)
-        if not entry["released"]:
+        if entry["released"] is not True:
             raise ValueError("owner has not released worktree")
         repository = Path(entry["repository"])
         branch, head = _identity(repository, worktree)

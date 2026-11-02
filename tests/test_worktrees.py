@@ -89,6 +89,23 @@ class WorktreeTests(unittest.TestCase):
             worktrees.audit()
         self.assertEqual(self.registry.read_bytes(), original)
 
+    def test_malformed_release_flag_cannot_enable_cleanup(self) -> None:
+        self.start()
+        data = json.loads(self.registry.read_text())
+        data["entries"][str(self.worktree.resolve())]["released"] = "false"
+        self.registry.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "invalid worktree registry entry"):
+            worktrees.cleanup(self.worktree, "chat-1")
+        self.assertTrue(self.worktree.exists())
+
+    def test_start_preflights_registry_before_creating_worktree(self) -> None:
+        self.registry.parent.mkdir()
+        self.registry.write_text("{broken")
+        with self.assertRaisesRegex(ValueError, "invalid worktree registry"):
+            self.start()
+        self.assertFalse(self.worktree.exists())
+        self.assertEqual(git("branch", "--list", "codex/fixture", cwd=self.repo), "")
+
     def test_primary_checkout_cannot_be_registered(self) -> None:
         with self.assertRaisesRegex(ValueError, "primary repository checkout"):
             worktrees.register(self.repo, self.repo, "chat-1", "STORY-1", "issue #1")
