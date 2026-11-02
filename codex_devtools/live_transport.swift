@@ -410,6 +410,39 @@ func waitUntil(_ predicate: () -> Bool, seconds: TimeInterval) -> Bool {
     return predicate()
 }
 
+func waitForTransportValue(
+    _ expected: Int,
+    element: AXUIElement,
+    controlName: String,
+    app: AXUIElement,
+    pid: pid_t,
+    bundleID: String,
+    window: AXUIElement,
+    url: URL,
+    title: String,
+    deadline: UInt64
+) throws -> Bool {
+    while true {
+        try require(currentProcessMatches(pid, bundleID: bundleID), "Live process identity changed during \(controlName) readback")
+        try require(frontmost(pid) && focusedWindowIs(app, window), "exact Set focus changed during \(controlName) readback")
+        try validateWindowDocument(window, url: url)
+        try require(onscreenWindow(pid: pid, title: title), "exact Set window left the current desktop during \(controlName) readback")
+        _ = try appWindows(app)
+        try validateControlIdentity(element, name: controlName)
+        if try checkboxValue(element) == expected { return true }
+        let now = DispatchTime.now().uptimeNanoseconds
+        if now >= deadline { return false }
+        pumpRunLoopTurn(until: deadline)
+    }
+}
+
+func acknowledgementDeadline(maxSeconds: Double, cappedBy deadline: UInt64) -> UInt64 {
+    let now = DispatchTime.now().uptimeNanoseconds
+    let interval = UInt64(maxSeconds * 1_000_000_000)
+    let (uncapped, overflow) = now.addingReportingOverflow(interval)
+    return min(deadline, overflow ? UInt64.max : uncapped)
+}
+
 func onscreenWindow(pid: pid_t, title: String) throws -> Bool {
     let flags: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
     guard let entries = CGWindowListCopyWindowInfo(flags, kCGNullWindowID) as? [[String: Any]] else {
@@ -636,7 +669,24 @@ func run() throws -> [String: Any] {
             let freshWindow = try exactSetWindow(app, url: pathURL)
             try require(CFEqual(freshWindow, setWindow) && currentProcessMatches(options.pid, bundleID: options.bundleID) && frontmost(options.pid) && focusedWindowIs(app, freshWindow), "exact Set focus changed during Stop")
             let after = try exactControls(freshWindow)
-            try require(after["Play"]?.value == 0, "Stop did not read back Play off")
+            let ackDeadline = acknowledgementDeadline(
+                maxSeconds: 2.0,
+                cappedBy: DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+            )
+            let stopAcknowledged = try waitForTransportValue(
+                0,
+                element: after["Play"]!.element,
+                controlName: "Play",
+                app: app,
+                pid: options.pid,
+                bundleID: options.bundleID,
+                window: freshWindow,
+                url: pathURL,
+                title: setTitle,
+                deadline: ackDeadline
+            )
+            receipt["stop_play_readback"] = stopAcknowledged ? "verified" : "not_observed_before_bound"
+            try require(stopAcknowledged, "Stop did not read back Play off within the acknowledgement bound")
             setAction("stop", outcome: "known")
         }
         return transportReport(
@@ -689,16 +739,33 @@ func run() throws -> [String: Any] {
     let playControl = controls["Play"]!.element
     do {
         try press(playControl, actionName: "play")
-        let playValue = try checkboxValue(playControl)
-        guard playValue == 1 else {
-            setAction("play", outcome: "unknown", detail: "Play press returned success but did not read back on")
-            throw TransportFailure(phase: phase, message: "Play did not read back on")
+        let playAckDeadline = acknowledgementDeadline(maxSeconds: 2.0, cappedBy: deadline)
+        let playAcknowledged = try waitForTransportValue(
+            1,
+            element: playControl,
+            controlName: "Play",
+            app: app,
+            pid: options.pid,
+            bundleID: options.bundleID,
+            window: setWindow,
+            url: pathURL,
+            title: setTitle,
+            deadline: playAckDeadline
+        )
+        receipt["play_readback"] = playAcknowledged ? "verified" : "not_observed_before_bound"
+        guard playAcknowledged else {
+            setAction("play", outcome: "unknown", detail: "Play did not read back on within the acknowledgement bound")
+            throw TransportFailure(phase: phase, message: "Play readback did not confirm on before the acknowledgement bound")
         }
         setAction("play", outcome: "known")
     } catch {
         // Once Play is attempted, the independent deadline Stop still runs even
         // if the AX call or immediate readback has an uncertain outcome.
         receipt["play_error"] = String(describing: error)
+        if actions["play"]?["attempted"] as? Bool == true,
+           receipt["play_readback"] == nil {
+            receipt["play_readback"] = "unknown"
+        }
     }
     if actions["play"]?["attempted"] as? Bool != true {
         receipt["status"] = "stopped"
@@ -738,11 +805,21 @@ func run() throws -> [String: Any] {
         ]
         try require(frontmost(options.pid) && focusedWindowIs(app, stopWindow), "exact Set window lost focus before timed Stop")
         try press(beforeStop["Stop"]!.element, actionName: "stop")
-        let afterWindow = setWindow
-        try require(CFEqual(afterWindow, setWindow) && frontmost(options.pid) && focusedWindowIs(app, afterWindow), "exact Set focus changed after timed Stop")
-        try validateWindowDocument(afterWindow, url: pathURL)
-        _ = try appWindows(app)
-        try require(try checkboxValue(controls["Play"]!.element) == 0, "timed Stop did not read back Play off")
+        let stopAckDeadline = acknowledgementDeadline(maxSeconds: 2.0, cappedBy: DispatchTime.now().uptimeNanoseconds + 2_000_000_000)
+        let stopAcknowledged = try waitForTransportValue(
+            0,
+            element: beforeStop["Play"]!.element,
+            controlName: "Play",
+            app: app,
+            pid: options.pid,
+            bundleID: options.bundleID,
+            window: setWindow,
+            url: pathURL,
+            title: setTitle,
+            deadline: stopAckDeadline
+        )
+        receipt["stop_play_readback"] = stopAcknowledged ? "verified" : "not_observed_before_bound"
+        try require(stopAcknowledged, "timed Stop did not read back Play off within the acknowledgement bound")
         let linkAfterStop = try checkboxValue(controls["Link"]!.element)
         let arrangementAfterStop = try checkboxValue(controls["Arrangement Record"]!.element)
         let sessionAfterStop = try checkboxValue(controls["Session Record"]!.element)
@@ -763,13 +840,22 @@ func run() throws -> [String: Any] {
         let stopWasAttempted = actions["stop"]?["attempted"] as? Bool == true
         if stopWasAttempted {
             setAction("stop", outcome: "unknown", detail: String(describing: error))
+            if receipt["stop_play_readback"] == nil {
+                receipt["stop_play_readback"] = "unknown"
+            }
         } else {
             setAction("stop", outcome: "not_attempted", detail: String(describing: error))
             manualInspectionRequired = true
         }
         receipt["status"] = "stopped"
         receipt["phase"] = phase
-        receipt["error"] = String(describing: error)
+        let stopError = String(describing: error)
+        receipt["stop_error"] = stopError
+        if let playError = receipt["play_error"] as? String {
+            receipt["error"] = "Play attempt: \(playError); Stop cleanup: \(stopError)"
+        } else {
+            receipt["error"] = stopError
+        }
         receipt["transport"] = ["play": NSNull(), "link": NSNull(), "arrangement_record": NSNull(), "session_record": NSNull()]
     }
     if actions["play"]?["outcome"] as? String != "known" && receipt["status"] as? String == "complete" {
@@ -812,6 +898,10 @@ do {
     result["target"] = ["pid": options.pid, "bundle_identifier": options.bundleID]
     result["set_url"] = canonicalSetURL?.absoluteString ?? options.setPath
     result["actions"] = actions
+    if actions["stop"]?["attempted"] as? Bool == true,
+       result["stop_play_readback"] == nil {
+        result["stop_play_readback"] = "unknown"
+    }
     result["manual_inspection_required"] = manualInspectionRequired
     result["error"] = String(describing: error)
     if options.action == "play" { result["play_for_seconds"] = options.playForSeconds }

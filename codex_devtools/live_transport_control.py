@@ -158,6 +158,27 @@ def _valid_report(
         unknown or play_attempted_without_verified_stop or transport_state_needs_review
     ):
         return False
+    if action == "play" and rows["play"]["attempted"]:
+        if report.get("play_readback") not in {
+            "verified",
+            "not_observed_before_bound",
+            "unknown",
+        }:
+            return False
+        if rows["play"]["outcome"] == "known" and report["play_readback"] != "verified":
+            return False
+    if rows["stop"]["attempted"]:
+        if report.get("stop_play_readback") not in {
+            "verified",
+            "not_observed_before_bound",
+            "unknown",
+        }:
+            return False
+        if (
+            rows["stop"]["outcome"] == "known"
+            and report["stop_play_readback"] != "verified"
+        ):
+            return False
     if (
         action == "play"
         and rows["play"]["outcome"] == "known"

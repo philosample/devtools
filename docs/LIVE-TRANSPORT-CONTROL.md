@@ -60,6 +60,20 @@ bounded activation/focus waits and while waiting for the monotonic Stop
 deadline. It does not change Spaces. This source correction still needs a
 reviewed native retest before relying on it.
 
+On 2026-11-02, a later run passed idle Stop with Play already off. A bounded
+three-second Play then recorded Settings close and Play as known, attempted
+Stop at its deadline, but read Play still on immediately afterward and marked
+the Stop uncertain for manual review. A fresh independent inspection shortly
+afterward read Play off and Link/recording controls off. This shows that the
+immediate transport readback did not settle with the Stop press. The helper now
+waits up to two seconds for Play-on readback, capped by the original Play
+deadline, and up to two seconds after Stop for Play-off readback. Each read
+rechecks PID, exact Set URL, focus, desktop visibility, unexpected dialogs, and
+control identity while pumping the current run loop. Once Play AXPress is
+attempted, including when its outcome is uncertain, the helper keeps the
+original Stop deadline cleanup obligation active. It never retries Play or
+Stop. The delayed observation is not evidence of MIDI or audible output.
+
 This is a bounded Accessibility control for the current English Live UI and
 macOS behavior. It establishes only the observed transport and preference
 states of the exact Live Set. It does not prove MIDI packets, audible output,

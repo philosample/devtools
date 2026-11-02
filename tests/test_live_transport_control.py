@@ -122,6 +122,14 @@ def transport_report(path, action, *, seconds=None, status="complete"):
             if action == "play"
             else {}
         ),
+        **(
+            {
+                "play_readback": "verified",
+                "stop_play_readback": "verified",
+            }
+            if action == "play"
+            else {}
+        ),
         "play_for_seconds": seconds,
         "actions": rows,
         "manual_inspection_required": False,
@@ -686,6 +694,9 @@ class LiveTransportControlTests(unittest.TestCase):
                 "returncode": 0,
             }
             self.assertTrue(_valid_report(report, **kwargs))
+            report.pop("stop_play_readback")
+            self.assertFalse(_valid_report(report, **kwargs))
+            report["stop_play_readback"] = "verified"
             report["transport_before_stop"]["link"] = 1
             report["manual_inspection_required"] = False
             self.assertFalse(_valid_report(report, **kwargs))
@@ -715,6 +726,31 @@ class LiveTransportControlTests(unittest.TestCase):
             report["actions"]["stop"]["outcome"] = "unknown"
             report["actions"]["stop"]["attempted"] = True
             kwargs["returncode"] = 1
+            self.assertTrue(_valid_report(report, **kwargs))
+
+    def test_report_model_keeps_unknown_play_with_verified_stop_cleanup(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            set_path = Path(temporary) / "recall.als"
+            set_path.write_bytes(b"test Set")
+            report = transport_report(set_path, "play", seconds=3, status="stopped")
+            report["phase"] = "play-outcome-unknown"
+            report["error"] = (
+                "Play did not read back on before its acknowledgement bound"
+            )
+            report["manual_inspection_required"] = True
+            report["play_readback"] = "not_observed_before_bound"
+            report["actions"]["play"] = {"attempted": True, "outcome": "unknown"}
+            kwargs = {
+                "action": "play",
+                "pid": PID,
+                "bundle_id": BUNDLE,
+                "set_path": set_path,
+                "play_for_seconds": 3,
+                "returncode": 1,
+            }
+            self.assertEqual(report["actions"]["stop"]["outcome"], "known")
+            self.assertEqual(report["stop_play_readback"], "verified")
+            self.assertIn("Play did not read back on", report["error"])
             self.assertTrue(_valid_report(report, **kwargs))
 
     def test_swift_contract_uses_monotonic_deadline_exact_set_and_settings_baseline(
@@ -777,6 +813,9 @@ class LiveTransportControlTests(unittest.TestCase):
             "let deadline = start + UInt64(options.playForSeconds) * 1_000_000_000",
             source,
         )
+        self.assertIn(
+            "acknowledgementDeadline(maxSeconds: 2.0, cappedBy: deadline)", source
+        )
 
     def test_activation_and_deadline_waits_pump_run_loop_with_monotonic_bounds(self):
         source = (
@@ -793,6 +832,25 @@ class LiveTransportControlTests(unittest.TestCase):
         self.assertIn("func pumpRunLoop(until deadline: UInt64)", source)
         self.assertIn("RunLoop.current.run(", source)
         self.assertNotIn("Thread.sleep", source)
+        play_press = source.index('try press(playControl, actionName: "play")')
+        play_ack = source.index(
+            "let playAcknowledged = try waitForTransportValue(", play_press
+        )
+        attempted_gate = source.index(
+            'if actions["play"]?["attempted"] as? Bool != true', play_ack
+        )
+        deadline_wait = source.index("pumpRunLoop(until: deadline)", attempted_gate)
+        timed_stop = source.index(
+            'try press(beforeStop["Stop"]!.element, actionName: "stop")', deadline_wait
+        )
+        stop_ack = source.index(
+            "let stopAcknowledged = try waitForTransportValue(", timed_stop
+        )
+        self.assertLess(play_press, play_ack)
+        self.assertLess(play_ack, attempted_gate)
+        self.assertLess(attempted_gate, deadline_wait)
+        self.assertLess(deadline_wait, timed_stop)
+        self.assertLess(timed_stop, stop_ack)
 
 
 if __name__ == "__main__":
