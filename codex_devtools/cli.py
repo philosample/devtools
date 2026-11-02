@@ -228,6 +228,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ax_snapshot.add_argument("--max-elements", type=int, default=500)
     ax_snapshot.add_argument("--max-depth", type=int, default=10)
+    ax_verify = ax_sub.add_parser(
+        "verify-studio-capture",
+        help="assert exact Studio Capture switch values from three saved AX snapshots",
+    )
+    ax_verify.add_argument("before", type=Path)
+    ax_verify.add_argument("isolated", type=Path)
+    ax_verify.add_argument("restored", type=Path)
+    ax_verify.add_argument("--expected-bundle-id", required=True)
+    ax_verify.add_argument(
+        "--max-age-seconds",
+        type=float,
+        help="require all snapshots to be no older than this at verification time",
+    )
     runtime = commands.add_parser("runtime", help="discover existing local runtimes")
     runtime_sub = runtime.add_subparsers(dest="action", required=True)
     node = runtime_sub.add_parser(
@@ -374,6 +387,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.group == "ax" and args.action == "verify-studio-capture":
+            from .live_midi_ax import verify_studio_capture_isolation
+
+            result = verify_studio_capture_isolation(
+                args.before,
+                args.isolated,
+                args.restored,
+                expected_bundle_id=args.expected_bundle_id,
+                max_age_seconds=args.max_age_seconds,
+            )
+            _json_out(result)
+            return 0 if result["valid"] else 1
         if args.group == "midi":
             from .midi_monitor import parse_document, write_csv, write_json
 
