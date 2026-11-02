@@ -7,6 +7,7 @@
 - `max validate` covers JSON graph structure and port references, not runtime semantics or host compatibility.
 - Keep the hash manifest stable across runs and exclude its own destination, VCS metadata, generated caches, and transient output/work directories.
 - Do not copy personal config, secrets, application binaries, user audio, or unrelated project fixtures into this directory.
+- Worktree ownership records are machine-local state outside Git. `worktree audit` must stay read-only; cleanup requires explicit owner release, an unchanged clean worktree, and a GitHub merged PR whose head matches the recorded head. Never infer ownership from a branch name or bulk-prune old worktrees.
 - MIDI inspection/export/report commands are offline. Only the explicit `midi capture` command may drive MIDI Monitor; preserve user windows and keep captures, endpoint IDs and routing templates local. Never click a mixed source-category checkbox to disconnect inputs: it can enable unrelated inputs. Expand categories and disconnect selected sources, then verify saved source settings. IAC tests require verified Live input isolation before sending probes.
 - Deployment manifests contain logical relative paths only. Keep machine-specific source/destination roots, plans, receipts, and backups outside Git; never use actual user install paths as fixtures.
 

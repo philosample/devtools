@@ -247,6 +247,35 @@ def build_parser() -> argparse.ArgumentParser:
         "--expect-amxd-sha256",
         help="require the expected and referenced AMXD bytes to match this SHA-256",
     )
+    worktree = commands.add_parser(
+        "worktree", help="track local ownership and guarded post-merge cleanup"
+    )
+    worktree_sub = worktree.add_subparsers(dest="action", required=True)
+    wt_start = worktree_sub.add_parser(
+        "start", help="create and register a named Git worktree"
+    )
+    wt_start.add_argument("--repository", required=True, type=Path)
+    wt_start.add_argument("--worktree", required=True, type=Path)
+    wt_start.add_argument("--branch", required=True)
+    wt_start.add_argument("--base", required=True)
+    wt_register = worktree_sub.add_parser(
+        "register", help="register an existing named Git worktree"
+    )
+    wt_register.add_argument("--repository", required=True, type=Path)
+    wt_register.add_argument("--worktree", required=True, type=Path)
+    for command in (wt_start, wt_register):
+        command.add_argument("--owner-chat", required=True)
+        command.add_argument("--story", required=True)
+        command.add_argument("--plan", required=True)
+    wt_register.add_argument("--pr", default="")
+    for action in ("update", "release", "cleanup"):
+        command = worktree_sub.add_parser(action)
+        command.add_argument("--worktree", required=True, type=Path)
+        command.add_argument("--owner-chat", required=True)
+        if action == "update":
+            command.add_argument("--pr")
+            command.add_argument("--plan")
+    worktree_sub.add_parser("audit", help="read-only inventory of registered worktrees")
     from .harness_control import register_cli
 
     register_cli(commands)
@@ -256,6 +285,40 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.group == "worktree":
+            from . import worktrees
+
+            if args.action == "start":
+                result = worktrees.start(
+                    args.repository,
+                    args.worktree,
+                    args.branch,
+                    args.base,
+                    args.owner_chat,
+                    args.story,
+                    args.plan,
+                )
+            elif args.action == "register":
+                result = worktrees.register(
+                    args.repository,
+                    args.worktree,
+                    args.owner_chat,
+                    args.story,
+                    args.plan,
+                    args.pr,
+                )
+            elif args.action == "update":
+                result = worktrees.update(
+                    args.worktree, args.owner_chat, args.pr, args.plan
+                )
+            elif args.action == "release":
+                result = worktrees.release(args.worktree, args.owner_chat)
+            elif args.action == "cleanup":
+                result = worktrees.cleanup(args.worktree, args.owner_chat)
+            else:
+                result = worktrees.audit()
+            _json_out(result)
+            return 0
         if args.group == "harness":
             from .harness_control import run_cli
 
