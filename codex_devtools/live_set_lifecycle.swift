@@ -1,6 +1,7 @@
 // Native Accessibility Save As/Quit/LaunchServices reopen for one exact Live Set.
 import ApplicationServices
 import AppKit
+import Darwin
 import Foundation
 
 struct Options {
@@ -164,6 +165,17 @@ func canonicalURL(_ path: String) throws -> URL {
     return URL(fileURLWithPath: safe)
 }
 
+func requireAbsentLeaf(_ path: String, _ message: String) throws {
+    var info = stat()
+    let result = path.withCString { lstat($0, &info) }
+    if result == 0 {
+        throw LifecycleFailure(phase: phase, message: message)
+    }
+    guard errno == ENOENT else {
+        throw LifecycleFailure(phase: phase, message: "cannot verify destination absence: \(path) (errno \(errno))")
+    }
+}
+
 func ensureNoSymlinkChain(_ path: URL, mustExist: Bool, outsideGit: Bool) throws {
     let file = path.path
     var cursor = URL(fileURLWithPath: "/")
@@ -189,8 +201,8 @@ func ensureNoSymlinkChain(_ path: URL, mustExist: Bool, outsideGit: Bool) throws
         let kind = try path.resourceValues(forKeys: [.isSymbolicLinkKey])
         try require(kind.isSymbolicLink != true, "source Set cannot be a symbolic link")
     } else {
-        try require(!FileManager.default.fileExists(atPath: file), "destination already exists")
-        try require(!FileManager.default.fileExists(atPath: file + ".als"), "destination collision")
+        try requireAbsentLeaf(file, "destination already exists or is a symbolic link")
+        try requireAbsentLeaf(file + ".als", "destination collision or symbolic link")
     }
 }
 
@@ -449,7 +461,6 @@ func run(_ options: Options) throws -> [String: Any] {
     try require(stringValue(finalWhere) == destination.deletingLastPathComponent().lastPathComponent, "Save As selected folder leaf mismatch")
     let saveButton = try uniqueElement(refreshed, role: kAXButtonRole as String, title: "Save", identifier: "OKButton")
     try ensureNoDialogs(appElement, except: "Save")
-    try require(!FileManager.default.fileExists(atPath: destination.path), "destination appeared before Save; refusing overwrite")
     try ensureNoSymlinkChain(destination, mustExist: false, outsideGit: true)
     let sourceBeforeSaveIdentity = try fileIdentity(source)
     try require(sameFileIdentity(originalSourceIdentity, sourceBeforeSaveIdentity), "source Set metadata changed before Save")

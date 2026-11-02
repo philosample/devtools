@@ -144,7 +144,6 @@ class LiveSetLifecycleTests(unittest.TestCase):
                 destination_set=self.destination,
             )
         run.assert_not_called()
-
         self.destination.unlink()
         git_parent = self.root / "repo"
         git_parent.mkdir()
@@ -164,6 +163,63 @@ class LiveSetLifecycleTests(unittest.TestCase):
                 destination_set=git_parent / "Copy.als",
             )
         run.assert_not_called()
+
+    def test_dangling_destination_symlink_is_refused_before_native_call(self):
+        self.destination.symlink_to(self.source_dir / "missing-target.als")
+        with (
+            patch(
+                "codex_devtools.live_set_lifecycle.platform.system",
+                return_value="Darwin",
+            ),
+            patch("codex_devtools.live_set_lifecycle.subprocess.run") as run,
+            self.assertRaisesRegex(ValueError, "symbolic links"),
+        ):
+            run_lifecycle(
+                PID,
+                expected_bundle_id=BUNDLE,
+                source_set=self.source,
+                destination_set=self.destination,
+            )
+        run.assert_not_called()
+
+    def test_swift_rechecks_destination_leaf_with_lstat_at_save_boundary(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        self.assertIn("path.withCString { lstat($0, &info) }", native_source)
+        self.assertIn("guard errno == ENOENT", native_source)
+        save_boundary = native_source.index(
+            "try ensureNoSymlinkChain(destination, mustExist: false, outsideGit: true)"
+        )
+        save_attempt = native_source.index("saveAttempted = true", save_boundary)
+        self.assertLess(save_boundary, save_attempt)
+
+    def test_outer_timeout_preserves_unknown_execute_outcomes(self):
+        with (
+            patch(
+                "codex_devtools.live_set_lifecycle.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_set_lifecycle.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("swift", 240),
+            ) as run,
+        ):
+            report = run_lifecycle(
+                PID,
+                expected_bundle_id=BUNDLE,
+                source_set=self.source,
+                destination_set=self.destination,
+                app_bundle=self.app,
+                execute=True,
+            )
+        self.assertEqual(run.call_args.kwargs["timeout"], 240)
+        self.assertEqual(report["phase"], "outer-timeout")
+        self.assertTrue(report["manual_inspection_required"])
+        self.assertTrue(report["read_only"] is False)
+        self.assertEqual(set(report["actions"].values()), {"outcome_unknown"})
 
     def test_stopped_save_panel_ambiguity_is_reported_without_retry(self):
         receipt = {

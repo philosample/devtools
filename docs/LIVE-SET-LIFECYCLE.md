@@ -39,6 +39,12 @@ Replace/security/discard prompt, missing or duplicate control, changed source
 URL, unexpected dialog, or failed readback stops the operation. No prompt is
 accepted and no action is retried automatically.
 
+The native helper bounds Save, Quit, LaunchServices completion, and reopen
+observation waits to a combined 180 seconds. The wrapper allows 240 seconds to
+leave process startup and receipt time. If that outer deadline expires during
+execution, it returns a `stopped` receipt with every action marked
+`outcome_unknown` and requires manual inspection.
+
 AX menu items are acted on only when the observed element is uniquely identified,
 enabled and exposes `AXPress`. The Go To Folder chord and Return use
 `CGEvent.postToPid` for the already verified PID; no CUA bridge or global

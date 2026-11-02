@@ -124,8 +124,34 @@ def run_lifecycle(
         command.append("--execute")
     try:
         result = subprocess.run(
-            command, check=False, capture_output=True, text=True, timeout=180
+            command, check=False, capture_output=True, text=True, timeout=240
         )
+    except subprocess.TimeoutExpired:
+        # The native helper's bounded waits total 180 seconds. If its outer
+        # deadline still expires, it may have been stopped after any action.
+        # Return an explicit uncertain receipt so callers know to inspect Live.
+        actions = {
+            name: "outcome_unknown" if execute else "not_attempted"
+            for name in (
+                "menu_navigation",
+                "save_as_menu",
+                "save",
+                "quit",
+                "open",
+            )
+        }
+        return {
+            "format": FORMAT,
+            "status": "stopped",
+            "target": {"pid": pid, "bundle_identifier": expected_bundle_id},
+            "phase": "outer-timeout",
+            "error": "native helper exceeded its outer deadline; action outcomes are unknown",
+            "actions": actions,
+            "manual_inspection_required": execute,
+            "read_only": not execute,
+            "source_set_url": source.as_uri(),
+            "destination_set_url": destination.as_uri() if destination else None,
+        }
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"native Live lifecycle command failed: {error}") from error
     try:
