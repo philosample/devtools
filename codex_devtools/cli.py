@@ -214,6 +214,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=3.0,
         help="callback wait bound in seconds (0.05–30)",
     )
+    ax = commands.add_parser(
+        "ax", help="read bounded, read-only macOS Accessibility snapshots"
+    )
+    ax_sub = ax.add_subparsers(dest="action", required=True)
+    ax_snapshot = ax_sub.add_parser(
+        "snapshot",
+        help="snapshot one exact PID without UI actions or permission prompts",
+    )
+    ax_snapshot.add_argument("--pid", type=int, required=True)
+    ax_snapshot.add_argument(
+        "--window-title", help="descend into exactly one window with this exact title"
+    )
+    ax_snapshot.add_argument("--max-elements", type=int, default=500)
+    ax_snapshot.add_argument("--max-depth", type=int, default=10)
     runtime = commands.add_parser("runtime", help="discover existing local runtimes")
     runtime_sub = runtime.add_subparsers(dest="action", required=True)
     node = runtime_sub.add_parser(
@@ -347,6 +361,18 @@ def main(argv: list[str] | None = None) -> int:
                 expected_amxd_sha256=args.expect_amxd_sha256,
             )
             _json_out(result)
+            return 0
+        if args.group == "ax" and args.action == "snapshot":
+            from .ax_snapshot import snapshot
+
+            _json_out(
+                snapshot(
+                    args.pid,
+                    window_title=args.window_title,
+                    max_elements=args.max_elements,
+                    max_depth=args.max_depth,
+                )
+            )
             return 0
         if args.group == "midi":
             from .midi_monitor import parse_document, write_csv, write_json
