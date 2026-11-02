@@ -229,6 +229,14 @@ class LiveMidiAxTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "windows array disagrees"):
             self.verify([windows_path, *self.write_triplet([VALUES] * 3)[1:]])
 
+    def test_window_list_must_contain_exactly_one_settings_title(self):
+        path = self.root / "duplicate-settings-title.json"
+        malformed = snapshot(VALUES, self.times[0])
+        malformed["windows"][1]["title"] = "Settings"
+        path.write_text(json.dumps(malformed), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "exactly one Settings window title"):
+            self.verify([path, *self.write_triplet([VALUES] * 3)[1:]])
+
     def test_every_v1_bounds_field_requires_its_declared_type(self):
         wrong_values = {
             "max_elements": True,

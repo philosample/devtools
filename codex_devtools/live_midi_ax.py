@@ -99,6 +99,8 @@ def _snapshot_tree(snapshot: dict, path: Path) -> list[dict]:
         raise ValueError("snapshot windows array contains duplicate indices")
     if sorted(window_indices) != list(range(bounds["windows_observed"])):
         raise ValueError("snapshot window indices disagree with windows_observed")
+    if sum(window["title"] == "Settings" for window in windows) != 1:
+        raise ValueError("snapshot must report exactly one Settings window title")
 
     trees = snapshot.get("trees")
     if not isinstance(trees, list) or len(trees) != 1 or not isinstance(trees[0], dict):
