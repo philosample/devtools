@@ -42,6 +42,9 @@ accepted and no action is retried automatically.
 Before sending Go To Folder, it raises the exact Save window if needed, presses
 the observed filename field, and requires that field to be the focused AX
 element while the selected Live PID remains frontmost.
+During Save panel scans, AX elements that have become invalid are skipped as
+stale file-list rows; each required control must still match exactly once, and
+other AX errors or traversal-bound violations stop the operation.
 
 The native helper bounds Save, Quit, LaunchServices completion, and reopen
 observation waits to a combined 180 seconds. The wrapper allows 240 seconds to

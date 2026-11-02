@@ -221,6 +221,29 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertLess(field_press, field_check)
         self.assertLess(field_check, shortcut)
 
+    def test_swift_skips_stale_save_panel_rows_but_keeps_exact_control_uniqueness(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        self.assertIn("error == .noValue || error == .invalidUIElement", native_source)
+        self.assertIn(
+            "guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil",
+            native_source,
+        )
+        self.assertIn(
+            'try require(matches.count == 1, "expected exactly one Save panel AX',
+            native_source,
+        )
+        self.assertIn(
+            "let saveRows = try savePanelElements([saveWindow])", native_source
+        )
+        self.assertIn(
+            'uniqueSavePanelElement(refreshed, role: kAXButtonRole as String, title: "Save"',
+            native_source,
+        )
+
     def test_outer_timeout_preserves_unknown_execute_outcomes(self):
         with (
             patch(

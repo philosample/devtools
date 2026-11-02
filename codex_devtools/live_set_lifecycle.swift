@@ -301,6 +301,70 @@ func uniqueElement(_ elements: [AXUIElement], role expectedRole: String, title e
     return matches[0]
 }
 
+func savePanelAttribute(_ element: AXUIElement, _ name: String) throws -> CFTypeRef? {
+    var value: CFTypeRef?
+    AXUIElementSetMessagingTimeout(element, 2)
+    let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+    if error == .success { return value }
+    if error == .noValue || error == .invalidUIElement { return nil }
+    throw LifecycleFailure(phase: phase, message: "Save panel AX read \(name) failed (\(error.rawValue))")
+}
+
+func savePanelElements(_ roots: [AXUIElement], maxDepth: Int = 24, maxElements: Int = 4096) throws -> [AXUIElement] {
+    var output: [AXUIElement] = []
+    var queue = roots.map { ($0, 0) }
+    var seen = Set<CFHashCode>()
+    while !queue.isEmpty {
+        let (element, depth) = queue.removeFirst()
+        let hash = CFHash(element)
+        guard seen.insert(hash).inserted else { continue }
+        guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil else {
+            continue // A stale file-list row is unrelated to required panel controls.
+        }
+        output.append(element)
+        try require(output.count <= maxElements, "Save panel AX subtree exceeded element bound")
+        guard let rawChildren = try savePanelAttribute(element, kAXChildrenAttribute as String) else {
+            continue
+        }
+        guard let children = rawChildren as? [AXUIElement] else {
+            throw LifecycleFailure(phase: phase, message: "Save panel AX children is not an element array")
+        }
+        if depth < maxDepth {
+            queue.append(contentsOf: children.map { ($0, depth + 1) })
+        } else if !children.isEmpty {
+            throw LifecycleFailure(phase: phase, message: "Save panel AX subtree exceeded depth bound")
+        }
+    }
+    return output
+}
+
+func savePanelMatches(_ elements: [AXUIElement], role expectedRole: String, title expectedTitle: String?, identifier expectedID: String? = nil) throws -> [AXUIElement] {
+    var matches: [AXUIElement] = []
+    for element in elements {
+        guard let rawRole = try savePanelAttribute(element, kAXRoleAttribute as String),
+              let actualRole = rawRole as? String,
+              actualRole == expectedRole else { continue }
+        if let expectedTitle {
+            guard let rawTitle = try savePanelAttribute(element, kAXTitleAttribute as String),
+                  (rawTitle as? String) == expectedTitle else { continue }
+        }
+        if let expectedID {
+            guard let rawIdentifier = try savePanelAttribute(element, "AXIdentifier"),
+                  (rawIdentifier as? String) == expectedID else { continue }
+        }
+        matches.append(element)
+    }
+    return matches
+}
+
+func uniqueSavePanelElement(_ elements: [AXUIElement], role expectedRole: String, title expectedTitle: String?, identifier expectedID: String? = nil) throws -> AXUIElement {
+    let matches = try savePanelMatches(elements, role: expectedRole, title: expectedTitle, identifier: expectedID)
+    let label = expectedTitle ?? expectedID ?? "control"
+    try require(matches.count == 1, "expected exactly one Save panel AX \(expectedRole) \(label)")
+    try require((optionalAX(matches[0], kAXEnabledAttribute as String) as? NSNumber)?.boolValue == true, "Save panel AX \(label) is disabled")
+    return matches[0]
+}
+
 func findMenuItem(app: AXUIElement, menuTitle: String, itemTitle: String) throws -> AXUIElement {
     let menuBar = try ax(app, kAXMenuBarAttribute as String) as! AXUIElement
     let top = try children(menuBar)
@@ -414,9 +478,7 @@ func waitForControl(_ app: AXUIElement, windowTitle: String, role expectedRole: 
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
             continue
         }
-        let matches = try allElements([window]).filter {
-            try role($0) == expectedRole && identifier($0) == expectedID
-        }
+        let matches = try savePanelMatches(savePanelElements([window]), role: expectedRole, title: nil, identifier: expectedID)
         if matches.count == 1 {
             try require((optionalAX(matches[0], kAXEnabledAttribute as String) as? NSNumber)?.boolValue == true, "AX \(expectedID) is disabled")
             return matches[0]
@@ -480,9 +542,9 @@ func run(_ options: Options) throws -> [String: Any] {
     try ensureNoDialogs(appElement, except: "Save")
     try focusWindow(appElement, pid: options.pid, window: saveWindow)
     _ = try exactDocumentWindow(appElement, url: source)
-    let saveRows = try allElements([saveWindow])
+    let saveRows = try savePanelElements([saveWindow])
     try require(!saveRows.contains { ["Replace", "Allow", "Allow Anyway", "Discard", "Don't Save", "Don’t Save"].contains(title($0) ?? "") }, "unexpected overwrite/security/discard prompt")
-    let nameField = try uniqueElement(saveRows, role: kAXTextFieldRole as String, title: nil, identifier: "saveAsNameTextField")
+    let nameField = try uniqueSavePanelElement(saveRows, role: kAXTextFieldRole as String, title: nil, identifier: "saveAsNameTextField")
     try setString(nameField, value: destination.lastPathComponent, identifier: "saveAsNameTextField")
     try press(nameField)
     try require(focusedIs(appElement, nameField), "Save panel filename field did not receive focus")
@@ -505,14 +567,15 @@ func run(_ options: Options) throws -> [String: Any] {
     let refreshedWindow = try waitForWindow(appElement, title: "Save")
     try ensureNoDialogs(appElement, except: "Save")
     let refreshedWindows = [refreshedWindow]
-    let refreshed = try allElements(refreshedWindows)
+    let refreshed = try savePanelElements(refreshedWindows)
     try require(!refreshed.contains { ["Replace", "Allow", "Allow Anyway", "Discard", "Don't Save", "Don’t Save"].contains(title($0) ?? "") }, "unexpected overwrite/security/discard prompt")
-    try require(!refreshed.contains { identifier($0) == "PathTextField" }, "Go To Folder path field remained open")
-    let finalName = try uniqueElement(refreshed, role: kAXTextFieldRole as String, title: nil, identifier: "saveAsNameTextField")
+    let pathFields = try savePanelMatches(refreshed, role: kAXTextFieldRole as String, title: nil, identifier: "PathTextField")
+    try require(pathFields.isEmpty, "Go To Folder path field remained open")
+    let finalName = try uniqueSavePanelElement(refreshed, role: kAXTextFieldRole as String, title: nil, identifier: "saveAsNameTextField")
     try require(stringValue(finalName) == destination.lastPathComponent, "Save As filename changed")
-    let finalWhere = try uniqueElement(refreshed, role: kAXPopUpButtonRole as String, title: "Where:", identifier: "where popup")
+    let finalWhere = try uniqueSavePanelElement(refreshed, role: kAXPopUpButtonRole as String, title: "Where:", identifier: "where popup")
     try require(stringValue(finalWhere) == destination.deletingLastPathComponent().lastPathComponent, "Save As selected folder leaf mismatch")
-    let saveButton = try uniqueElement(refreshed, role: kAXButtonRole as String, title: "Save", identifier: "OKButton")
+    let saveButton = try uniqueSavePanelElement(refreshed, role: kAXButtonRole as String, title: "Save", identifier: "OKButton")
     try ensureNoDialogs(appElement, except: "Save")
     try ensureNoSymlinkChain(destination, mustExist: false, outsideGit: true)
     let sourceBeforeSaveIdentity = try fileIdentity(source)
