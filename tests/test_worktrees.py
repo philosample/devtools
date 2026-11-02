@@ -97,6 +97,14 @@ class WorktreeTests(unittest.TestCase):
             worktrees.release(self.worktree, "chat-1")
         self.assertFalse(worktrees.audit()[0]["released"])
 
+    def test_malformed_pr_cannot_bypass_clean_no_pr_release(self) -> None:
+        self.start()
+        worktrees.update(self.worktree, "chat-1", pr="not-a-pr")
+        (self.worktree / "untracked.txt").write_text("keep\n")
+        with self.assertRaisesRegex(ValueError, "must be clean"):
+            worktrees.release(self.worktree, "chat-1")
+        self.assertFalse(worktrees.audit()[0]["released"])
+
     def test_no_pr_release_rejects_changed_head(self) -> None:
         self.start()
         (self.worktree / "committed.txt").write_text("new\n")
