@@ -367,6 +367,44 @@ func uniqueSavePanelElement(_ elements: [AXUIElement], role expectedRole: String
     return matches[0]
 }
 
+func waitForGoToPathField(_ saveWindow: AXUIElement, seconds: TimeInterval = 5) throws -> (sheet: AXUIElement, pathField: AXUIElement) {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        guard let rawChildren = try savePanelAttribute(saveWindow, kAXChildrenAttribute as String),
+              let directChildren = rawChildren as? [AXUIElement] else {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+            continue
+        }
+        let sheets = try savePanelMatches(directChildren, role: "AXSheet", title: nil, identifier: "GoToWindow")
+        try require(sheets.count <= 1, "ambiguous Go To Folder AXSheet child")
+        if let sheet = sheets.first {
+            let sheetElements = try savePanelElements([sheet])
+            let pathFields = try savePanelMatches(sheetElements, role: kAXTextFieldRole as String, title: nil, identifier: "PathTextField")
+            try require(pathFields.count <= 1, "ambiguous PathTextField in Go To Folder AXSheet")
+            if let pathField = pathFields.first {
+                try require((optionalAX(pathField, kAXEnabledAttribute as String) as? NSNumber)?.boolValue == true, "Go To Folder PathTextField is disabled")
+                return (sheet, pathField)
+            }
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    throw LifecycleFailure(phase: phase, message: "timed out waiting for exact GoToWindow sheet child and PathTextField")
+}
+
+func waitForGoToSheetDismissed(_ saveWindow: AXUIElement, seconds: TimeInterval = 5) throws {
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        if let rawChildren = try savePanelAttribute(saveWindow, kAXChildrenAttribute as String),
+           let directChildren = rawChildren as? [AXUIElement] {
+            let sheets = try savePanelMatches(directChildren, role: "AXSheet", title: nil, identifier: "GoToWindow")
+            try require(sheets.count <= 1, "ambiguous Go To Folder AXSheet child after Return")
+            if sheets.isEmpty { return }
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    throw LifecycleFailure(phase: phase, message: "GoToWindow sheet child remained after Return")
+}
+
 func findMenuItem(app: AXUIElement, menuTitle: String, itemTitle: String) throws -> AXUIElement {
     let menuBar = try ax(app, kAXMenuBarAttribute as String) as! AXUIElement
     let top = try children(menuBar)
@@ -494,26 +532,6 @@ func waitForWindow(_ app: AXUIElement, title expectedTitle: String, seconds: Tim
     throw LifecycleFailure(phase: phase, message: "timed out waiting for AX window \(expectedTitle)")
 }
 
-func waitForControl(_ app: AXUIElement, windowTitle: String, role expectedRole: String, identifier expectedID: String, seconds: TimeInterval = 5) throws -> AXUIElement {
-    let deadline = Date().addingTimeInterval(seconds)
-    while Date() < deadline {
-        let namedWindows = try windows(app).filter { title($0) == windowTitle }
-        try require(namedWindows.count <= 1, "ambiguous AX window titled \(windowTitle)")
-        guard let window = namedWindows.first else {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
-            continue
-        }
-        let matches = try savePanelMatches(savePanelElements([window]), role: expectedRole, title: nil, identifier: expectedID)
-        if matches.count == 1 {
-            try require((optionalAX(matches[0], kAXEnabledAttribute as String) as? NSNumber)?.boolValue == true, "AX \(expectedID) is disabled")
-            return matches[0]
-        }
-        try require(matches.isEmpty, "ambiguous AX control \(expectedID)")
-        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
-    }
-    throw LifecycleFailure(phase: phase, message: "timed out waiting for AX control \(expectedID)")
-}
-
 func run(_ options: Options) throws -> [String: Any] {
     phase = "preflight"
     try require(AXIsProcessTrusted(), "Accessibility permission is not already trusted")
@@ -583,16 +601,18 @@ func run(_ options: Options) throws -> [String: Any] {
     try require(saveRows.contains { CFEqual($0, initialFocus) }, "Save panel does not own the current focus")
     try postChord(pid: options.pid, key: 5) // Shift-Command-G
     try ensureNoDialogs(appElement, except: "Save")
-    let pathField = try waitForControl(appElement, windowTitle: "Save", role: kAXTextFieldRole as String, identifier: "PathTextField")
+    let (goToSheet, pathField) = try waitForGoToPathField(saveWindow)
+    try require(focusedWindowIs(appElement, goToSheet), "Go To Folder AXSheet child is not the focused AX window")
     try require(focusedIs(appElement, pathField), "Go To Folder path field is not focused before setValue")
     try setString(pathField, value: destination.deletingLastPathComponent().path, identifier: "PathTextField")
     try waitForFrontmost(pid: options.pid)
-    try require(focusedWindowIs(appElement, saveWindow), "Save panel is not the focused AX window before path confirmation")
+    try require(focusedWindowIs(appElement, goToSheet), "Go To Folder AXSheet child is not the focused AX window before path confirmation")
     try require(focusedIs(appElement, pathField), "Go To Folder path field is not the focused element")
     try postKeyStroke(pid: options.pid, code: 36)
 
     phase = "verify-save-dialog"
     let refreshedWindow = try waitForWindow(appElement, title: "Save")
+    try waitForGoToSheetDismissed(refreshedWindow)
     try ensureNoDialogs(appElement, except: "Save")
     let refreshedWindows = [refreshedWindow]
     let refreshed = try savePanelElements(refreshedWindows)

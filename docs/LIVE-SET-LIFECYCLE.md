@@ -44,6 +44,11 @@ Before sending Go To Folder, it raises the exact Save window if needed, sets
 focus value and the app's focused-element/window identity. It rechecks the
 focused Path field and window before Return; it uses no `AXPress` fallback for
 the filename field.
+While Go To Folder is open, the focused AX window must be the unique
+`AXSheet` identifier `GoToWindow` that is a direct child of the `Save` window;
+the exact `PathTextField` must be found inside that sheet and be the focused
+element before Return. The command verifies that the sheet child disappears
+after Return before continuing to Save controls.
 During Save panel scans, AX elements that have become invalid are skipped as
 stale file-list rows; each required control must still match exactly once, and
 other AX errors or traversal-bound violations stop the operation.

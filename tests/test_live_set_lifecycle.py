@@ -242,7 +242,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
             "focusedIs(appElement, pathField)", 0, return_key
         )
         path_window = native_source.rindex(
-            "focusedWindowIs(appElement, saveWindow)", 0, return_key
+            "focusedWindowIs(appElement, goToSheet)", 0, return_key
         )
         path_frontmost = native_source.rindex(
             "waitForFrontmost(pid: options.pid)", 0, return_key
@@ -250,6 +250,37 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertLess(path_frontmost, return_key)
         self.assertLess(path_window, return_key)
         self.assertLess(path_focus, return_key)
+
+    def test_go_to_path_focus_must_be_the_observed_sheet_child(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        wait_sheet = native_source[
+            native_source.index("func waitForGoToPathField(") : native_source.index(
+                "func waitForGoToSheetDismissed("
+            )
+        ]
+        self.assertIn("savePanelAttribute(saveWindow, kAXChildrenAttribute", wait_sheet)
+        self.assertIn('identifier: "GoToWindow"', wait_sheet)
+        self.assertIn("savePanelElements([sheet])", wait_sheet)
+        self.assertIn('identifier: "PathTextField"', wait_sheet)
+
+        run_source = native_source[native_source.index("func run(_ options:") :]
+        go_to = run_source.index(
+            "let (goToSheet, pathField) = try waitForGoToPathField(saveWindow)"
+        )
+        focus_check = run_source.index("focusedWindowIs(appElement, goToSheet)", go_to)
+        return_key = run_source.index(
+            "try postKeyStroke(pid: options.pid, code: 36)", focus_check
+        )
+        dismissed = run_source.index(
+            "try waitForGoToSheetDismissed(refreshedWindow)", return_key
+        )
+        self.assertLess(go_to, focus_check)
+        self.assertLess(focus_check, return_key)
+        self.assertLess(return_key, dismissed)
 
     def test_go_to_folder_uses_one_frontmost_session_chord_with_consistent_flags(self):
         native_source = (
