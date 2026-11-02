@@ -33,6 +33,8 @@ python3 -m codex_devtools ableton inspect-set-device-refs path/to/selected.als
 python3 -m codex_devtools ableton inspect-set-device-refs path/to/selected.als \
   --expect-amxd-path path/to/expected-device.amxd --expect-amxd-sha256 <sha256>
 python3 -m codex_devtools ax snapshot --pid 1234 --window-title Settings
+python3 -m codex_devtools ax live-midi-sync --pid 1234 \
+  --expected-bundle-id com.ableton.live --expected-count 21 --out /private/tmp/live-sync.json
 python3 -m codex_devtools ax verify-studio-capture before.json isolated.json restored.json \
   --expected-bundle-id com.ableton.live --max-age-seconds 300
 python3 -m codex_devtools worktree start --repository /path/to/repo --worktree /path/to/worktree \
