@@ -215,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="callback wait bound in seconds (0.05–30)",
     )
     ax = commands.add_parser(
-        "ax", help="read bounded, read-only macOS Accessibility snapshots"
+        "ax", help="inspect macOS Accessibility and perform explicit bounded controls"
     )
     ax_sub = ax.add_subparsers(dest="action", required=True)
     ax_snapshot = ax_sub.add_parser(
@@ -278,6 +278,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow the selected isolate/restore action",
     )
     midi_sync.add_argument("--max-baseline-age-seconds", type=float, default=300.0)
+    live_transport = ax_sub.add_parser(
+        "live-transport",
+        help="inspect or explicitly play briefly or stop one exact Live Set",
+    )
+    live_transport.add_argument("--pid", required=True, type=int)
+    live_transport.add_argument("--expected-bundle-id", required=True)
+    live_transport.add_argument("--set", dest="set_path", required=True, type=Path)
+    live_transport.add_argument("--action", dest="operation", choices=("play", "stop"))
+    live_transport.add_argument("--play-for-seconds", type=int)
+    live_transport.add_argument("--expected-output-count", type=int)
+    live_transport.add_argument("--receipt", type=Path)
+    live_transport.add_argument(
+        "--execute",
+        action="store_true",
+        help="allow the selected bounded Play or Stop action",
+    )
     runtime = commands.add_parser("runtime", help="discover existing local runtimes")
     runtime_sub = runtime.add_subparsers(dest="action", required=True)
     node = runtime_sub.add_parser(
@@ -471,6 +487,23 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=args.receipt if args.execute else args.out,
                 execute=args.execute,
                 max_baseline_age_seconds=args.max_baseline_age_seconds,
+            )
+            _json_out(result)
+            return 1 if result["status"] == "stopped" else 0
+        if args.group == "ax" and args.action == "live-transport":
+            from .live_transport_control import run_live_transport
+
+            if not args.execute and args.operation is not None:
+                raise ValueError("--action requires --execute")
+            result = run_live_transport(
+                args.pid,
+                expected_bundle_id=args.expected_bundle_id,
+                set_path=args.set_path,
+                action=args.operation if args.execute else None,
+                play_for_seconds=args.play_for_seconds,
+                expected_count=args.expected_output_count,
+                receipt_path=args.receipt,
+                execute=args.execute,
             )
             _json_out(result)
             return 1 if result["status"] == "stopped" else 0
