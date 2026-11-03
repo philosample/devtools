@@ -211,6 +211,34 @@ class LiveSettingsTabPolicyTests(unittest.TestCase):
                     self.assertEqual(result["status"], "stopped")
                     self.assertIn("not selected", result["evidence_limit"])
 
+    def test_existing_settings_off_desktop_stops_before_any_action(self):
+        stopped = report(execute=True, status="stopped")
+        stopped["settings"].update(
+            window_observed=True,
+            tab_control_observed=False,
+            tab_selected_state_read=False,
+            tab_selected=None,
+        )
+        stopped["evidence_limit"] = (
+            "Tempo & MIDI radio-button selection state was not read; "
+            "MIDI preference checkbox values were neither read nor changed"
+        )
+        stopped["actions"] = {
+            "activate": "not_attempted",
+            "raise_source_window": "not_attempted",
+            "settings_menu": "not_attempted",
+            "tempo_midi_tab": "not_attempted",
+        }
+        stopped["manual_inspection_required"] = False
+        stopped["error"] = (
+            "exact PID/window title is not uniquely visible on the current Desktop"
+        )
+        result = self.call_native(execute=True, native_report=stopped)
+        self.assertEqual(result["status"], "stopped")
+        self.assertTrue(result["settings"]["window_observed"])
+        self.assertEqual(set(result["actions"].values()), {"not_attempted"})
+        self.assertFalse(result["manual_inspection_required"])
+
     def test_timeout_is_outcome_unknown_and_never_retried(self):
         with (
             patch(
@@ -291,6 +319,14 @@ class LiveSettingsTabPolicyTests(unittest.TestCase):
             text,
         )
         self.assertIn("currentProcess.activate()", text)
+        preflight = text.index('phase = "preflight-existing-settings-window"')
+        self.assertLess(preflight, text.index("currentProcess.activate()"))
+        menu_phase = text.index('phase = "open-settings-menu"')
+        menu_recheck = text.index(
+            "existingSettingsWindow(app, pid: options.pid)", menu_phase
+        )
+        menu_press = text.index('action: "settings_menu"', menu_phase)
+        self.assertLess(menu_recheck, menu_press)
         self.assertLess(
             text.index(
                 "currentDesktopWindow(pid: options.pid, expectedTitle: options.windowTitle)\n    let currentProcess"

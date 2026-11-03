@@ -236,6 +236,16 @@ func exactWindow(_ app: AXUIElement, expectedTitle: String) throws -> AXUIElemen
     return matches[0]
 }
 
+func existingSettingsWindow(_ app: AXUIElement, pid: pid_t) throws -> AXUIElement? {
+    let matches = try appWindows(app).filter {
+        try role($0) == (kAXWindowRole as String) && title($0) == settingsWindowTitle
+    }
+    try require(matches.count <= 1, "Settings AX window is ambiguous")
+    guard let settings = matches.first else { return nil }
+    _ = try currentDesktopWindow(pid: pid, expectedTitle: settingsWindowTitle)
+    return settings
+}
+
 func isFocused(_ app: AXUIElement, window: AXUIElement) throws -> Bool {
     guard let value = try axValue(app, kAXFocusedWindowAttribute as String),
           CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
@@ -335,16 +345,16 @@ func run() throws -> [String: Any] {
     _ = try exactSettingsMenuItem(app)
 
     if !options.execute {
-        let existingSettings = try appWindows(app).filter { try role($0) == (kAXWindowRole as String) && title($0) == settingsWindowTitle }
-        try require(existingSettings.count <= 1, "Settings AX window is ambiguous")
-        if let settings = existingSettings.first {
+        if let settings = try existingSettingsWindow(app, pid: options.pid) {
             settingsWindowObserved = true
-            _ = try currentDesktopWindow(pid: options.pid, expectedTitle: settingsWindowTitle)
             _ = try exactTempoMidiTab(settings)
             tabControlObserved = true
         }
         return receipt(status: "ready", readOnly: true, windowNumber: desktopWindow.windowNumber, error: nil)
     }
+
+    phase = "preflight-existing-settings-window"
+    _ = try existingSettingsWindow(app, pid: options.pid)
 
     phase = "activate-target"
     // This current-Desktop proof is deliberately immediately before activation.
@@ -361,6 +371,7 @@ func run() throws -> [String: Any] {
                 "exact Live PID/window is not frontmost and focused before menu press")
 
     phase = "open-settings-menu"
+    _ = try existingSettingsWindow(app, pid: options.pid)
     let freshMenuItem = try exactSettingsMenuItem(app)
     try press(freshMenuItem, action: "settings_menu") {
         _ = try targetProcess()
