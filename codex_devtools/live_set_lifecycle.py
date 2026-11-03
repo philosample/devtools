@@ -7,9 +7,111 @@ import os
 import platform
 import stat
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 FORMAT = "codex-devtools-live-set-lifecycle-v1"
+
+
+def _validate_menu_diagnostics(value: object, expected_pid: int) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "phase",
+        "observed_at_utc",
+        "expected_pid",
+        "frontmost_pid",
+        "focused_window",
+        "owned_window",
+        "focused_window_matches_owned",
+        "blocking_windows",
+        "windows_complete",
+        "file_menu",
+        "save_as_item",
+    }:
+        raise ValueError("native Live lifecycle returned invalid menu diagnostics")
+    if value.get("phase") not in {"save-as-menu", "quit-menu"}:
+        raise ValueError("native Live lifecycle returned invalid menu diagnostic phase")
+    timestamp = value.get("observed_at_utc")
+    if not isinstance(timestamp, str) or len(timestamp) > 40:
+        raise TypeError("native Live lifecycle returned invalid diagnostic timestamp")
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(
+            "native Live lifecycle returned invalid diagnostic timestamp"
+        ) from error
+    if parsed.tzinfo is None or value.get("expected_pid") != expected_pid:
+        raise ValueError("native Live lifecycle diagnostic target/timestamp mismatch")
+    frontmost = value.get("frontmost_pid")
+    if frontmost is not None and (type(frontmost) is not int or frontmost <= 0):
+        raise ValueError("native Live lifecycle returned invalid frontmost PID")
+    if type(value.get("windows_complete")) is not bool:
+        raise ValueError("native Live lifecycle returned invalid window completeness")
+    focus_match = value.get("focused_window_matches_owned")
+    if focus_match is not None and type(focus_match) is not bool:
+        raise ValueError("native Live lifecycle returned invalid focus identity")
+
+    element_keys = {
+        "role",
+        "title",
+        "identifier",
+        "document_url",
+        "modal",
+        "enabled",
+        "selected",
+        "expanded",
+        "press_action",
+        "actions",
+        "blocking",
+    }
+
+    def element(item: object, *, blocker: bool = False) -> None:
+        if not isinstance(item, dict) or set(item) != element_keys:
+            raise ValueError("native Live lifecycle returned malformed AX diagnostic")
+        for key, limit in (
+            ("role", 128),
+            ("title", 256),
+            ("identifier", 256),
+            ("document_url", 512),
+        ):
+            field = item[key]
+            if field is not None and (not isinstance(field, str) or len(field) > limit):
+                raise ValueError(
+                    "native Live lifecycle returned oversized AX diagnostic"
+                )
+        for key in ("modal", "enabled", "selected", "expanded"):
+            if item[key] is not None and type(item[key]) is not bool:
+                raise ValueError("native Live lifecycle returned invalid AX state")
+        if type(item["press_action"]) is not bool or type(item["blocking"]) is not bool:
+            raise ValueError("native Live lifecycle returned invalid AX action state")
+        actions = item["actions"]
+        if (
+            not isinstance(actions, list)
+            or len(actions) > 16
+            or any(
+                not isinstance(action, str) or len(action) > 128 for action in actions
+            )
+        ):
+            raise ValueError("native Live lifecycle returned invalid AX action list")
+        if blocker and item["blocking"] is not True:
+            raise ValueError("native Live lifecycle returned a nonblocking modal entry")
+
+    focused = value.get("focused_window")
+    if focused is not None:
+        element(focused)
+    owned = value.get("owned_window")
+    if owned is not None:
+        element(owned)
+    if focus_match is True and (focused is None or owned is None):
+        raise ValueError("native Live lifecycle focus match lacks window identities")
+    blockers = value.get("blocking_windows")
+    if not isinstance(blockers, list) or len(blockers) > 32:
+        raise ValueError("native Live lifecycle returned unbounded modal diagnostics")
+    for item in blockers:
+        element(item, blocker=True)
+    for key in ("file_menu", "save_as_item"):
+        item = value.get(key)
+        if item is not None:
+            element(item)
 
 
 def _canonical_path(value: Path) -> Path:
@@ -170,7 +272,7 @@ def run_lifecycle(
         actions = report.get("actions")
         allowed_actions = {
             "focus": {"not_attempted", "outcome_unknown", "verified"},
-            "menu_navigation": {"not_attempted", "outcome_unknown"},
+            "menu_navigation": {"not_attempted", "outcome_unknown", "verified"},
             "save_as_menu": {"not_attempted", "outcome_unknown"},
             "save": {"not_attempted", "outcome_unknown"},
             "quit": {"not_attempted", "outcome_unknown"},
@@ -201,6 +303,17 @@ def run_lifecycle(
             )
         ):
             raise ValueError("native Live lifecycle returned an invalid stop receipt")
+        if "diagnostics" in report:
+            if (
+                report.get("phase") not in {"save-as-menu", "quit-menu"}
+                or not action_attempted
+            ):
+                raise ValueError(
+                    "native Live lifecycle returned menu diagnostics outside menu inspection"
+                )
+            _validate_menu_diagnostics(report["diagnostics"], pid)
+            if report["diagnostics"]["phase"] != report["phase"]:
+                raise ValueError("native Live lifecycle menu diagnostic phase mismatch")
         return report
     if (
         result.returncode != 0

@@ -94,6 +94,164 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.native_run = run
         return report
 
+    def test_stopped_menu_diagnostics_are_bounded_and_schema_checked(self):
+        def element(**overrides):
+            value = {
+                "role": "AXWindow",
+                "title": "Source.als",
+                "identifier": None,
+                "document_url": self.source.as_uri(),
+                "modal": False,
+                "enabled": None,
+                "selected": None,
+                "expanded": None,
+                "press_action": False,
+                "actions": [],
+                "blocking": False,
+            }
+            value.update(overrides)
+            return value
+
+        diagnostics = {
+            "phase": "save-as-menu",
+            "observed_at_utc": "2026-11-03T06:45:08.431Z",
+            "expected_pid": PID,
+            "frontmost_pid": PID,
+            "focused_window": element(),
+            "owned_window": element(),
+            "focused_window_matches_owned": True,
+            "blocking_windows": [
+                element(
+                    role="AXWindow",
+                    title="Open",
+                    identifier="open-panel",
+                    modal=True,
+                    blocking=True,
+                )
+            ],
+            "windows_complete": True,
+            "file_menu": element(
+                role="AXMenuBarItem",
+                title="File",
+                expanded=True,
+                selected=True,
+            ),
+            "save_as_item": element(
+                role="AXMenuItem",
+                title="Save Live Set As...",
+                enabled=False,
+                press_action=True,
+                actions=["AXPress"],
+            ),
+        }
+        receipt = {
+            "format": FORMAT,
+            "status": "stopped",
+            "target": {"pid": PID, "bundle_identifier": BUNDLE},
+            "phase": "save-as-menu",
+            "error": "Save As is disabled",
+            "actions": {
+                "focus": "verified",
+                "menu_navigation": "verified",
+                "save_as_menu": "not_attempted",
+                "save": "not_attempted",
+                "quit": "not_attempted",
+                "open": "not_attempted",
+            },
+            "manual_inspection_required": True,
+            "diagnostics": diagnostics,
+        }
+        report = self.call(
+            subprocess.CompletedProcess([], 1, json.dumps(receipt), ""),
+            destination_set=self.destination,
+            app_bundle=self.app,
+            execute=True,
+        )
+        self.assertEqual(report["diagnostics"], diagnostics)
+
+        oversized = json.loads(json.dumps(receipt))
+        oversized["diagnostics"]["blocking_windows"] *= 33
+        with self.assertRaisesRegex(ValueError, "unbounded modal diagnostics"):
+            self.call(
+                subprocess.CompletedProcess([], 1, json.dumps(oversized), ""),
+                destination_set=self.destination,
+                app_bundle=self.app,
+                execute=True,
+            )
+
+    def test_menu_classifier_and_wait_contract_are_guarded_without_ui_calls(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        classifier = native_source[
+            native_source.index("func isBlockingWindow(") : native_source.index(
+                "func elementSummary("
+            )
+        ]
+        self.assertIn('attributeBool(element, "AXModal") == true', classifier)
+        self.assertIn('elementIdentifier == "open-panel"', classifier)
+        self.assertNotIn('elementTitle == "Open"', classifier)
+        self.assertNotIn("AXSubrole", classifier)
+        self.assertNotIn('elementTitle == "Settings"', classifier)
+
+        # Model the reported AX shape: descendants remain populated while the
+        # menu item's authoritative state attributes say it is collapsed.
+        collapsed_static_tree = {
+            "expanded": False,
+            "selected": False,
+            "children": ["AXMenu", "Save Live Set As..."],
+        }
+        self.assertTrue(collapsed_static_tree["children"])
+        self.assertFalse(
+            collapsed_static_tree["expanded"] is True
+            or collapsed_static_tree["selected"] is True
+        )
+        unsupported_state = {"expanded": None, "selected": None}
+        self.assertFalse(
+            unsupported_state["expanded"] is True
+            or unsupported_state["selected"] is True
+        )
+
+        presentation = native_source[
+            native_source.index("func menuIsPresented(") : native_source.index(
+                "func requireFreshMenuFocus("
+            )
+        ]
+        self.assertIn("kAXExpandedAttribute as String) == true", presentation)
+        self.assertIn("kAXSelectedAttribute as String) == true", presentation)
+        self.assertNotIn("descendants", presentation)
+        self.assertNotIn("children", presentation)
+
+        menu = native_source[
+            native_source.index("func findMenuItem(") : native_source.index(
+                "func stringValue("
+            )
+        ]
+        self.assertIn(
+            "let deadline = Date().addingTimeInterval(menuReadinessTimeout)", menu
+        )
+        self.assertIn("while Date() < deadline", menu)
+        self.assertIn("menuIsPresented(menu", menu)
+        self.assertEqual(menu.count("try press(menu)"), 1)
+        self.assertLess(menu.index("if !presented"), menu.index("try press(menu)"))
+        self.assertIn(
+            "attributeBool(item, kAXEnabledAttribute as String) == true", menu
+        )
+        self.assertIn("kAXPressAction as String", menu)
+        self.assertIn("RunLoop.current.run", menu)
+        self.assertIn("try requireFreshMenuFocus", menu)
+        self.assertGreaterEqual(menu.count("try requireFreshMenuFocus"), 3)
+
+        focus = native_source[
+            native_source.index("func requireFreshMenuFocus(") : native_source.index(
+                "func findMenuItem("
+            )
+        ]
+        self.assertIn("frontmostApplication?.processIdentifier == pid", focus)
+        self.assertIn("focusedWindowIs(app, sourceWindow)", focus)
+
     def test_default_is_read_only_and_execute_is_explicit(self):
         report = self.call(
             subprocess.CompletedProcess(
@@ -205,7 +363,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
             / "live_set_lifecycle.swift"
         ).read_text()
         activation = native_source.index("process.activate()")
-        menu = native_source.index('findMenuItem(app: appElement, menuTitle: "File"')
+        menu = native_source.index("findMenuItem(app: appElement, pid: options.pid")
         save_window_focus = native_source.index(
             "focusWindow(appElement, pid: options.pid, window: saveWindow)"
         )
@@ -316,10 +474,6 @@ class LiveSetLifecycleTests(unittest.TestCase):
         ).read_text()
         self.assertIn("error == .noValue || error == .invalidUIElement", native_source)
         self.assertIn(
-            "guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil",
-            native_source,
-        )
-        self.assertIn(
             'try require(matches.count == 1, "expected exactly one Save panel AX',
             native_source,
         )
@@ -399,11 +553,56 @@ class LiveSetLifecycleTests(unittest.TestCase):
         ]
         increment = scanner.index("visitedCount += 1")
         bound = scanner.index("visitedCount <= maxElements")
-        stale_skip = scanner.index(
-            "guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil"
-        )
+        stale_skip = scanner.index("guard let rawRole = try savePanelAttribute")
         self.assertLess(increment, bound)
         self.assertLess(bound, stale_skip)
+
+    def test_save_panel_prunes_browser_rows_but_keeps_required_chrome_strict(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        browser_filter = native_source[
+            native_source.index(
+                "func isIrrelevantSavePanelBrowserElement("
+            ) : native_source.index("func savePanelElements(")
+        ]
+        for role in ("AXScrollArea", "AXTable", "AXOutline", "AXRow", "AXColumn"):
+            self.assertIn(role, browser_filter)
+
+        scanner = native_source[
+            native_source.index("func savePanelElements(") : native_source.index(
+                "func savePanelMatches("
+            )
+        ]
+        browser_prune = scanner.index(
+            "if isIrrelevantSavePanelBrowserElement(elementRole) { continue }"
+        )
+        append_element = scanner.index("output.append(element)")
+        read_children = scanner.index("kAXChildrenAttribute as String")
+        self.assertLess(browser_prune, append_element)
+        self.assertLess(browser_prune, read_children)
+        self.assertIn("savePanelElementDiagnostic(element)", scanner)
+        diagnostic = native_source[
+            native_source.index(
+                "func savePanelElementDiagnostic("
+            ) : native_source.index("func isIrrelevantSavePanelBrowserElement(")
+        ]
+        for field in ("role", "subrole", "identifier"):
+            self.assertIn(field, diagnostic)
+        self.assertIn("prefix(128)", diagnostic)
+
+        matcher = native_source[
+            native_source.index("func uniqueSavePanelElement(") : native_source.index(
+                "func waitForGoToPathField("
+            )
+        ]
+        self.assertIn("try require(matches.count == 1", matcher)
+        self.assertIn('identifier: "saveAsNameTextField"', native_source)
+        self.assertIn('identifier: "where popup"', native_source)
+        self.assertIn('identifier: "OKButton"', native_source)
+        self.assertIn('identifier: "PathTextField"', native_source)
 
     def test_outer_timeout_preserves_unknown_execute_outcomes(self):
         with (

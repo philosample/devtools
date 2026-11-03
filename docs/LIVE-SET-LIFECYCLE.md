@@ -50,11 +50,14 @@ the exact `PathTextField` must be found inside that sheet and be the focused
 element before Return. The command verifies that the sheet child disappears
 after Return before continuing to Save controls.
 During Save panel scans, AX elements that have become invalid are skipped as
-stale file-list rows; each required control must still match exactly once, and
-unsupported optional `AXTitle`/`AXIdentifier` reads make only that element a
-non-match. Required controls still need the exact role and each selector and
-readback required by that control's guard; other AX errors or traversal-bound
-violations stop the operation.
+stale file-list rows. Browser `AXScrollArea`, `AXTable`, `AXOutline`, `AXRow`, and
+`AXColumn` subtrees are omitted because they do not contain the Save-panel chrome
+controls. Each required control must still match exactly once, and unsupported
+optional `AXTitle`/`AXIdentifier` reads make only that element a non-match.
+Required controls still need the exact role and each selector/readback required
+by that control's guard; other AX errors or traversal-bound violations stop the
+operation and identify the failing container's role, subrole and identifier
+where available.
 
 The native helper bounds Save, Quit, LaunchServices completion, and reopen
 observation waits to a combined 180 seconds. The wrapper allows 240 seconds to
@@ -78,6 +81,23 @@ outcome-unknown as soon as their respective actions are attempted. A stop
 receipt includes the phase and whether
 manual inspection is required. After a Save attempt, never repeat the command
 until the current UI and destination are inspected.
+
+Before File-menu interaction, the helper rechecks that the exact Live PID is
+frontmost and the owned Set window is focused. It recognizes an already expanded
+or selected File menu and does not toggle it; otherwise it presses File once and
+waits up to two seconds for positive expanded/selected state and the exact enabled
+`Save Live Set As...` menu item with `AXPress`. AX children are not proof that the
+menu is open because collapsed menus may retain a static subtree. If expansion
+attributes are unsupported, it makes at most one best-effort show attempt, then
+fails closed unless expansion is positively observed; it never presses Save As
+based on subtree presence alone. The
+modal guard includes AXModal windows and the observed `open-panel` window
+identifier; it does not close modeless Settings windows or reject windows only because
+of an AXDialog subrole. A stopped menu-phase receipt may include bounded,
+timestamped focus, blocker, File-menu and target-item readbacks. These diagnostics
+explain the observed AX state; they do not establish why a prior menu state was
+disabled. The focused unit checks are source-contract and receipt-model checks,
+not native AX execution; native confirmation remains a separate gate.
 
 Reopen uses `NSWorkspace.open(_:withApplicationAt:configuration:)`, which opens
 the exact URL in the selected app. The old `NSRunningApplication` must report

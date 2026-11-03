@@ -24,11 +24,102 @@ var saveAsMenuAttempted = false
 var quitAttempted = false
 var openAttempted = false
 var menuNavigationAttempted = false
+var menuNavigationVerified = false
 var focusAttempted = false
 var focusVerified = false
 var uiActionAttempted = false
 var initialPID: Int?
 var initialBundleID: String?
+var menuDiagnostics: [String: Any]?
+var activeFileMenu: AXUIElement?
+
+let menuReadinessTimeout: TimeInterval = 2
+
+func bounded(_ value: String?, limit: Int = 256) -> Any {
+    guard let value else { return NSNull() }
+    return String(value.prefix(limit))
+}
+
+func attributeBool(_ element: AXUIElement?, _ name: String) -> Bool? {
+    guard let element, let value = optionalAX(element, name) as? NSNumber else { return nil }
+    return value.boolValue
+}
+
+func isBlockingWindow(_ element: AXUIElement, except allowedTitle: String? = nil) -> Bool {
+    let elementRole = (try? role(element)) ?? ""
+    let elementTitle = title(element)
+    let elementIdentifier = identifier(element)
+    if elementRole == (kAXWindowRole as String), elementTitle == allowedTitle, allowedTitle != nil {
+        return false
+    }
+    if ["AXDialog", "AXSheet"].contains(elementRole) {
+        return true
+    }
+    if attributeBool(element, "AXModal") == true {
+        return true
+    }
+    return elementRole == (kAXWindowRole as String) &&
+        elementIdentifier == "open-panel"
+}
+
+func elementSummary(_ element: AXUIElement?, blocking: Bool = false) -> [String: Any]? {
+    guard let element else { return nil }
+    let actionList = (try? actionNames(element)) ?? []
+    let focusedValue = optionalAX(element, kAXDocumentAttribute as String) as? String
+    return [
+        "role": bounded(try? role(element)),
+        "title": bounded(title(element)),
+        "identifier": bounded(identifier(element)),
+        "document_url": bounded(focusedValue, limit: 512),
+        "modal": attributeBool(element, "AXModal") as Any? ?? NSNull(),
+        "enabled": attributeBool(element, kAXEnabledAttribute as String) as Any? ?? NSNull(),
+        "selected": attributeBool(element, kAXSelectedAttribute as String) as Any? ?? NSNull(),
+        "expanded": attributeBool(element, kAXExpandedAttribute as String) as Any? ?? NSNull(),
+        "press_action": actionList.contains(kAXPressAction as String),
+        "actions": actionList.prefix(16).map { String($0.prefix(128)) },
+        "blocking": blocking,
+    ]
+}
+
+func captureMenuDiagnostics(app: AXUIElement, pid: pid_t, menu: AXUIElement?, item: AXUIElement?,
+                            ownedWindow: AXUIElement? = nil) {
+    let readWindows = try? windows(app)
+    let appWindows = readWindows ?? []
+    let blockers = appWindows.prefix(32).compactMap { window -> [String: Any]? in
+        guard isBlockingWindow(window) else { return nil }
+        return elementSummary(window, blocking: true)
+    }
+    let focusedWindow = optionalAX(app, kAXFocusedWindowAttribute as String)
+    let focusedElement: AXUIElement?
+    if let focusedWindow, CFGetTypeID(focusedWindow) == AXUIElementGetTypeID() {
+        focusedElement = (focusedWindow as! AXUIElement)
+    } else {
+        focusedElement = nil
+    }
+    let focusedSummary: Any
+    if let focusedElement {
+        focusedSummary = elementSummary(focusedElement) ?? NSNull()
+    } else {
+        focusedSummary = NSNull()
+    }
+    let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let timestamp = ISO8601DateFormatter().string(from: Date())
+    menuDiagnostics = [
+        "phase": phase,
+        "observed_at_utc": timestamp,
+        "frontmost_pid": frontmostPID as Any? ?? NSNull(),
+        "expected_pid": Int(pid),
+        "focused_window": focusedSummary,
+        "owned_window": elementSummary(ownedWindow) as Any? ?? NSNull(),
+        "focused_window_matches_owned": ownedWindow.map { window in
+            focusedElement.map { CFEqual($0, window) } ?? false
+        } as Any? ?? NSNull(),
+        "blocking_windows": blockers,
+        "windows_complete": readWindows != nil && appWindows.count <= 32,
+        "file_menu": elementSummary(menu) as Any? ?? NSNull(),
+        "save_as_item": elementSummary(item) as Any? ?? NSNull(),
+    ]
+}
 
 func fail(_ message: String) -> Never {
     fputs(message + "\n", stderr)
@@ -249,11 +340,8 @@ func exactDocumentWindow(_ app: AXUIElement, url: URL) throws -> AXUIElement {
 
 func ensureNoDialogs(_ app: AXUIElement, except allowedTitle: String? = nil) throws {
     let appWindows = try windows(app)
-    let dialogs = appWindows.filter { element in
-        let r = (try? role(element)) ?? ""
-        return ["AXDialog", "AXSheet"].contains(r)
-    }
-    try require(dialogs.isEmpty, "unexpected dialog, sheet or alert")
+    let dialogs = appWindows.filter { isBlockingWindow($0, except: allowedTitle) }
+    try require(dialogs.isEmpty, "unexpected blocking dialog, sheet or file panel")
     let allowed = appWindows.filter { (try? role($0)) == (kAXWindowRole as String) && title($0) == allowedTitle }
     try require(allowedTitle == nil || allowed.count == 1, "unexpected or ambiguous dialog window")
 }
@@ -312,6 +400,22 @@ func savePanelAttribute(_ element: AXUIElement, _ name: String) throws -> CFType
     throw LifecycleFailure(phase: phase, message: "Save panel AX read \(name) failed (\(error.rawValue))")
 }
 
+func savePanelElementDiagnostic(_ element: AXUIElement) -> String {
+    func value(_ attribute: String) -> String {
+        guard let raw = try? savePanelAttribute(element, attribute),
+              let string = raw as? String else { return "unknown" }
+        return String(string.prefix(128))
+    }
+    let roleName = value(kAXRoleAttribute as String)
+    let subrole = value(kAXSubroleAttribute as String)
+    let elementIdentifier = value("AXIdentifier")
+    return "container role=\(roleName) subrole=\(subrole) identifier=\(elementIdentifier)"
+}
+
+func isIrrelevantSavePanelBrowserElement(_ roleName: String) -> Bool {
+    ["AXScrollArea", "AXTable", "AXOutline", "AXRow", "AXColumn"].contains(roleName)
+}
+
 func savePanelElements(_ roots: [AXUIElement], maxDepth: Int = 24, maxElements: Int = 4096) throws -> [AXUIElement] {
     var output: [AXUIElement] = []
     var queue = roots.map { ($0, 0) }
@@ -323,15 +427,23 @@ func savePanelElements(_ roots: [AXUIElement], maxDepth: Int = 24, maxElements: 
         guard seen.insert(hash).inserted else { continue }
         visitedCount += 1
         try require(visitedCount <= maxElements, "Save panel AX subtree exceeded element bound")
-        guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil else {
-            continue // A stale file-list row is unrelated to required panel controls.
+        guard let rawRole = try savePanelAttribute(element, kAXRoleAttribute as String),
+              let elementRole = rawRole as? String else {
+            continue // An unavailable role cannot match a required panel control.
         }
+        if isIrrelevantSavePanelBrowserElement(elementRole) { continue }
         output.append(element)
-        guard let rawChildren = try savePanelAttribute(element, kAXChildrenAttribute as String) else {
+        let rawChildren: CFTypeRef?
+        do {
+            rawChildren = try savePanelAttribute(element, kAXChildrenAttribute as String)
+        } catch let error as LifecycleFailure {
+            throw LifecycleFailure(phase: phase, message: "\(error.message); \(savePanelElementDiagnostic(element))")
+        }
+        guard let rawChildren else {
             continue
         }
         guard let children = rawChildren as? [AXUIElement] else {
-            throw LifecycleFailure(phase: phase, message: "Save panel AX children is not an element array")
+            throw LifecycleFailure(phase: phase, message: "Save panel AX children is not an element array; \(savePanelElementDiagnostic(element))")
         }
         if depth < maxDepth {
             queue.append(contentsOf: children.map { ($0, depth + 1) })
@@ -407,14 +519,68 @@ func waitForGoToSheetDismissed(_ saveWindow: AXUIElement, seconds: TimeInterval 
     throw LifecycleFailure(phase: phase, message: "GoToWindow sheet child remained after Return")
 }
 
-func findMenuItem(app: AXUIElement, menuTitle: String, itemTitle: String) throws -> AXUIElement {
+func menuItemMatches(_ elements: [AXUIElement], _ itemTitle: String) -> [AXUIElement] {
+    elements.filter { (try? role($0)) == (kAXMenuItemRole as String) && title($0) == itemTitle }
+}
+
+func menuIsPresented(_ menu: AXUIElement) -> Bool {
+    attributeBool(menu, kAXExpandedAttribute as String) == true ||
+        attributeBool(menu, kAXSelectedAttribute as String) == true
+}
+
+func requireFreshMenuFocus(app: AXUIElement, pid: pid_t, sourceWindow: AXUIElement,
+                           menu: AXUIElement? = nil, item: AXUIElement? = nil) throws {
+    let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+    focusVerified = frontmost && focusedWindowIs(app, sourceWindow)
+    if !focusVerified {
+        captureMenuDiagnostics(app: app, pid: pid, menu: menu, item: item, ownedWindow: sourceWindow)
+        throw LifecycleFailure(phase: phase, message: "exact Live PID and source Set window are not frontmost/focused before menu action")
+    }
+}
+
+func findMenuItem(app: AXUIElement, pid: pid_t, sourceWindow: AXUIElement, menuTitle: String, itemTitle: String) throws -> AXUIElement {
+    menuDiagnostics = nil
+    menuNavigationAttempted = false
+    menuNavigationVerified = false
+    activeFileMenu = nil
+    captureMenuDiagnostics(app: app, pid: pid, menu: nil, item: nil, ownedWindow: sourceWindow)
+    try requireFreshMenuFocus(app: app, pid: pid, sourceWindow: sourceWindow)
+    try ensureNoDialogs(app)
     let menuBar = try ax(app, kAXMenuBarAttribute as String) as! AXUIElement
     let top = try children(menuBar)
     let menu = try uniqueElement(top, role: kAXMenuBarItemRole as String, title: menuTitle)
-    try press(menu)
-    let menuChildren = try children(menu)
-    let nested = try allElements(menuChildren)
-    return try uniqueElement(nested, role: kAXMenuItemRole as String, title: itemTitle)
+    activeFileMenu = menu
+    var nested = (try? allElements(try children(menu))) ?? []
+    var presented = menuIsPresented(menu)
+    menuNavigationVerified = presented
+    captureMenuDiagnostics(app: app, pid: pid, menu: menu, item: menuItemMatches(nested, itemTitle).first,
+                           ownedWindow: sourceWindow)
+    if !presented {
+        try requireFreshMenuFocus(app: app, pid: pid, sourceWindow: sourceWindow, menu: menu)
+        menuNavigationAttempted = true
+        try press(menu)
+    }
+    let deadline = Date().addingTimeInterval(menuReadinessTimeout)
+    while Date() < deadline {
+        let current = menuItemMatches(nested, itemTitle).first
+        captureMenuDiagnostics(app: app, pid: pid, menu: menu, item: current, ownedWindow: sourceWindow)
+        try requireFreshMenuFocus(app: app, pid: pid, sourceWindow: sourceWindow, menu: menu, item: current)
+        try ensureNoDialogs(app)
+        nested = (try? allElements(try children(menu))) ?? []
+        presented = menuIsPresented(menu)
+        let matches = menuItemMatches(nested, itemTitle)
+        let item = matches.count == 1 ? matches[0] : nil
+        menuNavigationVerified = presented
+        captureMenuDiagnostics(app: app, pid: pid, menu: menu, item: item, ownedWindow: sourceWindow)
+        if presented, let item,
+           attributeBool(item, kAXEnabledAttribute as String) == true,
+           ((try? actionNames(item)) ?? []).contains(kAXPressAction as String) {
+            try requireFreshMenuFocus(app: app, pid: pid, sourceWindow: sourceWindow, menu: menu, item: item)
+            return item
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    throw LifecycleFailure(phase: phase, message: "File menu did not expose one enabled AXPress Save As item before the bounded readiness deadline")
 }
 
 func stringValue(_ element: AXUIElement) -> String? {
@@ -577,11 +743,18 @@ func run(_ options: Options) throws -> [String: Any] {
     }
     try require(appBundleID == options.bundleID, "Live.app bundle ID differs from target bundle ID")
 
-    try activateExactTarget(process, app: appElement, sourceWindow: exactDocumentWindow(appElement, url: source))
+    let sourceWindow = try exactDocumentWindow(appElement, url: source)
+    try activateExactTarget(process, app: appElement, sourceWindow: sourceWindow)
     phase = "save-as-menu"
-    let saveItem = try findMenuItem(app: appElement, menuTitle: "File", itemTitle: "Save Live Set As...")
+    let saveItem = try findMenuItem(app: appElement, pid: options.pid, sourceWindow: sourceWindow,
+                                    menuTitle: "File", itemTitle: "Save Live Set As...")
+    try requireFreshMenuFocus(app: appElement, pid: options.pid, sourceWindow: sourceWindow,
+                              menu: activeFileMenu, item: saveItem)
+    captureMenuDiagnostics(app: appElement, pid: options.pid, menu: activeFileMenu, item: saveItem,
+                           ownedWindow: sourceWindow)
     saveAsMenuAttempted = true
     try press(saveItem)
+    menuDiagnostics = nil
     phase = "save-dialog"
     let saveWindow = try waitForWindow(appElement, title: "Save")
     try ensureNoDialogs(appElement, except: "Save")
@@ -657,10 +830,14 @@ func run(_ options: Options) throws -> [String: Any] {
 
     phase = "quit-menu"
     try ensureNoDialogs(appElement)
-    let quitItem = try findMenuItem(app: appElement, menuTitle: process.localizedName ?? "Live", itemTitle: "Quit Live")
+    let savedWindow = try exactDocumentWindow(appElement, url: destination)
+    try focusWindow(appElement, pid: options.pid, window: savedWindow)
+    let quitItem = try findMenuItem(app: appElement, pid: options.pid, sourceWindow: savedWindow,
+                                    menuTitle: process.localizedName ?? "Live", itemTitle: "Quit Live")
     phase = "quit"
     quitAttempted = true
     try press(quitItem)
+    menuDiagnostics = nil
     phase = "verify-exit"
     let deadline = Date().addingTimeInterval(30)
     while Date() < deadline && !process.isTerminated {
@@ -718,30 +895,32 @@ do {
     let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
     print(String(data: data, encoding: .utf8) ?? "{}")
 } catch let error as LifecycleFailure {
-    let result: [String: Any] = ["format": "codex-devtools-live-set-lifecycle-v1", "status": "stopped",
+    var result: [String: Any] = ["format": "codex-devtools-live-set-lifecycle-v1", "status": "stopped",
         "target": ["pid": initialPID ?? 0, "bundle_identifier": initialBundleID ?? ""],
         "phase": error.phase, "error": error.message,
         "actions": ["focus": focusVerified ? "verified" : focusAttempted ? "outcome_unknown" : "not_attempted",
-                    "menu_navigation": menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
+                    "menu_navigation": menuNavigationVerified ? "verified" : menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
                     "save_as_menu": saveAsMenuAttempted ? "outcome_unknown" : "not_attempted",
                     "save": saveAttempted ? "outcome_unknown" : "not_attempted",
                     "quit": quitAttempted ? "outcome_unknown" : "not_attempted",
                     "open": openAttempted ? "outcome_unknown" : "not_attempted"],
         "manual_inspection_required": uiActionAttempted || saveAsMenuAttempted || saveAttempted || quitAttempted || openAttempted]
+    if let menuDiagnostics { result["diagnostics"] = menuDiagnostics }
     if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]),
        let text = String(data: data, encoding: .utf8) { print(text) }
     exit(1)
 } catch {
-    let result: [String: Any] = ["format": "codex-devtools-live-set-lifecycle-v1", "status": "stopped",
+    var result: [String: Any] = ["format": "codex-devtools-live-set-lifecycle-v1", "status": "stopped",
         "target": ["pid": initialPID ?? 0, "bundle_identifier": initialBundleID ?? ""],
         "phase": phase, "error": String(describing: error),
         "actions": ["focus": focusVerified ? "verified" : focusAttempted ? "outcome_unknown" : "not_attempted",
-                    "menu_navigation": menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
+                    "menu_navigation": menuNavigationVerified ? "verified" : menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
                     "save_as_menu": saveAsMenuAttempted ? "outcome_unknown" : "not_attempted",
                     "save": saveAttempted ? "outcome_unknown" : "not_attempted",
                     "quit": quitAttempted ? "outcome_unknown" : "not_attempted",
                     "open": openAttempted ? "outcome_unknown" : "not_attempted"],
         "manual_inspection_required": uiActionAttempted || saveAsMenuAttempted || saveAttempted || quitAttempted || openAttempted]
+    if let menuDiagnostics { result["diagnostics"] = menuDiagnostics }
     if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]),
        let text = String(data: data, encoding: .utf8) { print(text) }
     exit(1)
