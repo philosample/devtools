@@ -1,9 +1,11 @@
 """Captured label shapes with synthetic states/identities; no native AX calls."""
 
 import copy
+import hashlib
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +17,8 @@ from codex_devtools.live_midi_inputs_control import (
     FLAGS,
     FORMAT,
     _native,
+    _replace_owned_json,
+    historical_restore_expected,
     inventory_hash,
     reconcile,
     run_live_midi_inputs,
@@ -185,11 +189,66 @@ class InventoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 reconcile(baseline, seal(current), expected)
 
+    def test_historical_restore_allows_only_originally_on_input_flags_off(self):
+        baseline = matrix()
+        current = copy.deepcopy(baseline)
+        for row in current["checkboxes"][:6]:
+            if baseline["checkboxes"][int(row["identity"]) - 10]["value"] == 1:
+                row["value"] = 0
+        expected = historical_restore_expected(baseline, seal(current))
+        self.assertEqual(
+            [
+                row["identity"]
+                for row in transition_plan(baseline, seal(current), "restore")
+            ],
+            [
+                row["identity"]
+                for row in baseline["checkboxes"][:6]
+                if row["value"] == 1
+                and current["checkboxes"][int(row["identity"]) - 10]["value"] == 0
+            ],
+        )
+        self.assertEqual(expected["10"], 0)
+        self.assertEqual(expected["11"], 0)
+
+    def test_historical_restore_rejects_every_nonpermitted_drift(self):
+        baseline = matrix()
+        mutations = (
+            lambda b: b["target"].update(launch_date="new generation"),
+            lambda b: b["target"].update(pid=124),
+            lambda b: b["target"].update(bundle_identifier="other"),
+            lambda b: b["checkboxes"][1].update(value=1),
+            lambda b: b["checkboxes"][7].update(value=0),
+            lambda b: b["checkboxes"][0].update(identity="replacement"),
+            lambda b: b["checkboxes"][0].update(enabled=False),
+            lambda b: b["checkboxes"].reverse(),
+            lambda b: b["settings_window"].update(identity="new window"),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                current = copy.deepcopy(baseline)
+                mutation(current)
+                with self.assertRaises(ValueError):
+                    historical_restore_expected(baseline, seal(current))
+
 
 class ActionTests(unittest.TestCase):
-    def run_action(self, directory, baseline, state, *, action="isolate", fault=None):
+    def run_action(
+        self,
+        directory,
+        baseline,
+        state,
+        *,
+        action="isolate",
+        fault=None,
+        historical_current=None,
+    ):
         path = Path(directory) / "baseline.json"
         path.write_text(json.dumps(baseline))
+        current_path = None
+        if historical_current is not None:
+            current_path = Path(directory) / "current.json"
+            current_path.write_text(json.dumps(historical_current))
         receipt = Path(directory) / f"{action}.json"
         calls = []
 
@@ -221,6 +280,7 @@ class ActionTests(unittest.TestCase):
                 execute=True,
                 action=action,
                 baseline_path=path,
+                historical_current_path=current_path,
                 output_path=receipt,
             )
         self.assertEqual(json.loads(receipt.read_text()), report)
@@ -284,6 +344,217 @@ class ActionTests(unittest.TestCase):
         self.assertFalse(calls)
         self.assertFalse(report["manual_inspection_required"])
 
+    def test_default_restore_rechecks_original_baseline_freshness_before_press(self):
+        baseline = matrix()
+        freshness_checks = []
+
+        def expire_on_press(snapshot, max_age):
+            freshness_checks.append(snapshot)
+            if len(freshness_checks) == 2:
+                raise ValueError("baseline is stale or from the future")
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch(
+                "codex_devtools.live_midi_inputs_control._fresh",
+                side_effect=expire_on_press,
+            ),
+        ):
+            report, calls = self.run_action(
+                directory, baseline, copy.deepcopy(baseline), action="restore"
+            )
+        self.assertEqual(report["status"], "stopped")
+        self.assertFalse([call for call in calls if call.get("action")])
+        self.assertIs(freshness_checks[0], freshness_checks[1])
+        self.assertFalse(report["manual_inspection_required"])
+
+    def test_slow_prepress_receipt_write_cannot_admit_a_late_press(self):
+        baseline = matrix()
+        baseline["observed_at_utc"] = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        seal(baseline)
+        current = copy.deepcopy(baseline)
+        current["observed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        current["checkboxes"][0]["value"] = 0
+        seal(current)
+        clock = [0.0]
+        replace_receipt = _replace_owned_json
+        persistence_calls = []
+
+        def delayed_receipt(path, identity, report):
+            result = replace_receipt(path, identity, report)
+            if report["phase"] == "press" and not persistence_calls:
+                persistence_calls.append(report["phase"])
+                clock[0] = 181.0
+            return result
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                time,
+                "monotonic",
+                side_effect=lambda: clock[0],
+            ),
+            patch(
+                "codex_devtools.live_midi_inputs_control._replace_owned_json",
+                side_effect=delayed_receipt,
+            ),
+        ):
+            report, calls = self.run_action(
+                directory,
+                baseline,
+                copy.deepcopy(current),
+                action="restore",
+                historical_current=current,
+            )
+        self.assertEqual(report["status"], "stopped")
+        self.assertTrue(report["manual_inspection_required"])
+        self.assertEqual(report["actions"][0]["outcome"], "unknown")
+        self.assertFalse([call for call in calls if call.get("action")])
+
+    def test_expired_original_with_fresh_matching_current_restores(self):
+        baseline = matrix()
+        original_timestamp = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        baseline["observed_at_utc"] = original_timestamp
+        seal(baseline)
+        current = copy.deepcopy(baseline)
+        current["observed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        current["checkboxes"][0]["value"] = 0
+        current["checkboxes"][2]["value"] = 0
+        seal(current)
+        state = copy.deepcopy(current)
+        with tempfile.TemporaryDirectory() as directory:
+            report, calls = self.run_action(
+                directory,
+                baseline,
+                state,
+                action="restore",
+                historical_current=current,
+            )
+        self.assertEqual(report["status"], "complete")
+        self.assertEqual(report["scope"], "historical-restore")
+        self.assertEqual(
+            report["current_observation_sha256"],
+            hashlib.sha256(json.dumps(current).encode()).hexdigest(),
+        )
+        self.assertEqual(len([call for call in calls if call.get("action")]), 2)
+        self.assertEqual(state["checkboxes"], baseline["checkboxes"])
+        self.assertEqual(baseline["observed_at_utc"], original_timestamp)
+
+    def test_historical_restore_rejects_stale_and_future_current_without_native_calls(
+        self,
+    ):
+        baseline = matrix()
+        baseline["observed_at_utc"] = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        seal(baseline)
+        for delta in (timedelta(seconds=-301), timedelta(seconds=10)):
+            current = copy.deepcopy(baseline)
+            current["observed_at_utc"] = (
+                datetime.now(timezone.utc) + delta
+            ).isoformat()
+            seal(current)
+            with tempfile.TemporaryDirectory() as directory:
+                report, calls = self.run_action(
+                    directory,
+                    baseline,
+                    copy.deepcopy(current),
+                    action="restore",
+                    historical_current=current,
+                )
+            self.assertEqual(report["status"], "stopped")
+            self.assertFalse(calls)
+            self.assertFalse(report["manual_inspection_required"])
+
+    def test_historical_restore_rejects_malformed_current_inventory(self):
+        baseline = matrix()
+        baseline["observed_at_utc"] = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        seal(baseline)
+        current = copy.deepcopy(baseline)
+        current["observed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        current["checkboxes"].pop()
+        seal(current)
+        with tempfile.TemporaryDirectory() as directory:
+            report, calls = self.run_action(
+                directory,
+                baseline,
+                matrix(),
+                action="restore",
+                historical_current=current,
+            )
+        self.assertEqual(report["status"], "stopped")
+        self.assertFalse(calls)
+        self.assertFalse(report["manual_inspection_required"])
+
+    def test_historical_restore_rejects_changed_original_intent_hash(self):
+        baseline = matrix()
+        baseline["observed_at_utc"] = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        baseline["checkboxes"][0]["value"] = 0
+        current = matrix()
+        with tempfile.TemporaryDirectory() as directory:
+            report, calls = self.run_action(
+                directory,
+                baseline,
+                copy.deepcopy(current),
+                action="restore",
+                historical_current=current,
+            )
+        self.assertEqual(report["status"], "stopped")
+        self.assertFalse(calls)
+
+    def test_historical_current_inventory_requires_explicit_restore_mode(self):
+        args = build_parser().parse_args(
+            [
+                "ax",
+                "live-midi-inputs",
+                "--pid",
+                "123",
+                "--expected-bundle-id",
+                "com.ableton.live",
+                "--expected-count",
+                "2",
+                "--execute",
+                "--action",
+                "isolate",
+                "--historical-current-inventory",
+                "/private/tmp/current.json",
+                "--baseline",
+                "/private/tmp/original.json",
+                "--receipt",
+                "/private/tmp/receipt.json",
+            ]
+        )
+        self.assertEqual(args.operation, "isolate")
+        with tempfile.TemporaryDirectory() as directory:
+            current = Path(directory) / "current.json"
+            current.write_text(json.dumps(matrix()))
+            report_path = Path(directory) / "receipt.json"
+            with (
+                patch(
+                    "codex_devtools.live_midi_inputs_control.platform.system",
+                    return_value="Darwin",
+                ),
+                self.assertRaisesRegex(ValueError, "only for restore"),
+            ):
+                run_live_midi_inputs(
+                    123,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=2,
+                    action="isolate",
+                    baseline_path=Path(directory) / "baseline.json",
+                    historical_current_path=current,
+                    output_path=report_path,
+                    execute=True,
+                )
+
     def test_default_native_and_cli_are_inspection(self):
         args = build_parser().parse_args(
             [
@@ -307,6 +578,43 @@ class ActionTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[command.index("--input-inventory") + 1], "inspect")
         self.assertNotIn("--operation", command)
+
+    def test_historical_native_press_pins_current_state_and_remaining_deadline(self):
+        expected = matrix()
+        deadline = time.time() + 60
+        with patch(
+            "codex_devtools.live_midi_inputs_control.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, "{}"),
+        ) as run:
+            _native(
+                123,
+                "com.ableton.live",
+                2,
+                operation="restore",
+                baseline_path=Path("/private/tmp/original.json"),
+                baseline_hash="a" * 64,
+                expected=expected,
+                action={"identity": "10", "desired_value": 1},
+                historical_restore=True,
+                deadline_unix_seconds=deadline,
+                timeout=17.5,
+            )
+        command = run.call_args.args[0]
+        current_path = Path(
+            command[command.index("--historical-current-inventory") + 1]
+        )
+        current_hash = command[command.index("--historical-current-sha256") + 1]
+        self.assertEqual(command[command.index("--operation") + 1], "restore")
+        self.assertEqual(
+            command[command.index("--deadline-unix-seconds") + 1],
+            str(deadline),
+        )
+        self.assertEqual(
+            current_path, Path(command[command.index("--input-expected") + 1])
+        )
+        self.assertEqual(
+            current_hash, hashlib.sha256(json.dumps(expected).encode()).hexdigest()
+        )
 
 
 class NativePolicySourceTests(unittest.TestCase):
@@ -334,11 +642,38 @@ precondition(inputFlags == Set(["Track", "Sync", "Remote Control"]))
 precondition(!inputFlags.contains("Remote"), "unobserved short alias must fail")
 let (_, baseline) = try inputJSON(CommandLine.arguments[1])
 try compareInputs(baseline, baseline)
+precondition(pressDeadlineIsValid(180, nowUnixSeconds: 0))
+precondition(!pressDeadlineIsValid(181, nowUnixSeconds: 0))
+precondition(!pressDeadlineIsValid(180, nowUnixSeconds: 180))
+precondition(actionDeadlineAllowsPress(180, nowUnixSeconds: 179.999))
+precondition(!actionDeadlineAllowsPress(180, nowUnixSeconds: 180))
+precondition(!actionDeadlineAllowsPress(180, nowUnixSeconds: 181))
+var rejected = false
+var historical = baseline
+var historicalRows = try inputRows(historical)
+historicalRows[0]["value"] = 0
+historicalRows[2]["value"] = 0
+historical["checkboxes"] = historicalRows
+let historicalValues = try historicalRestoreValues(baseline, historical)
+precondition(historicalValues["10"] == 0 && historicalValues["12"] == 0)
+historicalRows = try inputRows(baseline)
+historicalRows[1]["value"] = 1
+historical = baseline
+historical["checkboxes"] = historicalRows
+rejected = false
+do { _ = try historicalRestoreValues(baseline, historical) } catch { rejected = true }
+precondition(rejected, "originally-off input changes must fail historical restore")
+historicalRows = try inputRows(baseline)
+historicalRows[7]["value"] = 0
+historical = baseline
+historical["checkboxes"] = historicalRows
+rejected = false
+do { _ = try historicalRestoreValues(baseline, historical) } catch { rejected = true }
+precondition(rejected, "unrelated checkbox changes must fail historical restore")
 var changed = baseline
 var rows = try inputRows(changed)
 rows[0]["value"] = 0
 changed["checkboxes"] = rows
-var rejected = false
 do { try compareInputs(baseline, changed) } catch { rejected = true }
 precondition(rejected, "unexpected input changes must fail")
 var permitted: [String: Int] = [:]
