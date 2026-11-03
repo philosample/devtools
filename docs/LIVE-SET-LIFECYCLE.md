@@ -79,6 +79,19 @@ receipt includes the phase and whether
 manual inspection is required. After a Save attempt, never repeat the command
 until the current UI and destination are inspected.
 
+Before File-menu interaction, the helper rechecks that the exact Live PID is
+frontmost and the owned Set window is focused. It recognizes an already expanded
+or selected File menu and does not toggle it; otherwise it presses File once and
+waits up to two seconds for the exact enabled `Save Live Set As...` menu item
+with `AXPress`. It does not retry the menu action or press a disabled item. The
+modal guard includes AXModal windows and the observed `open-panel`/`Open` window
+form; it does not close modeless Settings windows or reject windows only because
+of an AXDialog subrole. A stopped menu-phase receipt may include bounded,
+timestamped focus, blocker, File-menu and target-item readbacks. These diagnostics
+explain the observed AX state; they do not establish why a prior menu state was
+disabled. The focused unit checks are source-contract and receipt-model checks,
+not native AX execution; native confirmation remains a separate gate.
+
 Reopen uses `NSWorkspace.open(_:withApplicationAt:configuration:)`, which opens
 the exact URL in the selected app. The old `NSRunningApplication` must report
 `terminated`, its PID must be absent, and no other process with the expected

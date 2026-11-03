@@ -94,6 +94,136 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.native_run = run
         return report
 
+    def test_stopped_menu_diagnostics_are_bounded_and_schema_checked(self):
+        def element(**overrides):
+            value = {
+                "role": "AXWindow",
+                "title": "Source.als",
+                "identifier": None,
+                "document_url": self.source.as_uri(),
+                "modal": False,
+                "enabled": None,
+                "selected": None,
+                "expanded": None,
+                "press_action": False,
+                "actions": [],
+                "blocking": False,
+            }
+            value.update(overrides)
+            return value
+
+        diagnostics = {
+            "phase": "save-as-menu",
+            "observed_at_utc": "2026-11-03T06:45:08.431Z",
+            "expected_pid": PID,
+            "frontmost_pid": PID,
+            "focused_window": element(),
+            "owned_window": element(),
+            "focused_window_matches_owned": True,
+            "blocking_windows": [
+                element(
+                    role="AXWindow",
+                    title="Open",
+                    identifier="open-panel",
+                    modal=True,
+                    blocking=True,
+                )
+            ],
+            "windows_complete": True,
+            "file_menu": element(
+                role="AXMenuBarItem",
+                title="File",
+                expanded=True,
+                selected=True,
+            ),
+            "save_as_item": element(
+                role="AXMenuItem",
+                title="Save Live Set As...",
+                enabled=False,
+                press_action=True,
+                actions=["AXPress"],
+            ),
+        }
+        receipt = {
+            "format": FORMAT,
+            "status": "stopped",
+            "target": {"pid": PID, "bundle_identifier": BUNDLE},
+            "phase": "save-as-menu",
+            "error": "Save As is disabled",
+            "actions": {
+                "focus": "verified",
+                "menu_navigation": "verified",
+                "save_as_menu": "not_attempted",
+                "save": "not_attempted",
+                "quit": "not_attempted",
+                "open": "not_attempted",
+            },
+            "manual_inspection_required": True,
+            "diagnostics": diagnostics,
+        }
+        report = self.call(
+            subprocess.CompletedProcess([], 1, json.dumps(receipt), ""),
+            destination_set=self.destination,
+            app_bundle=self.app,
+            execute=True,
+        )
+        self.assertEqual(report["diagnostics"], diagnostics)
+
+        oversized = json.loads(json.dumps(receipt))
+        oversized["diagnostics"]["blocking_windows"] *= 33
+        with self.assertRaisesRegex(ValueError, "unbounded modal diagnostics"):
+            self.call(
+                subprocess.CompletedProcess([], 1, json.dumps(oversized), ""),
+                destination_set=self.destination,
+                app_bundle=self.app,
+                execute=True,
+            )
+
+    def test_menu_classifier_and_wait_contract_are_guarded_without_ui_calls(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        classifier = native_source[
+            native_source.index("func isBlockingWindow(") : native_source.index(
+                "func elementSummary("
+            )
+        ]
+        self.assertIn('attributeBool(element, "AXModal") == true', classifier)
+        self.assertIn('elementIdentifier == "open-panel"', classifier)
+        self.assertIn('elementTitle == "Open"', classifier)
+        self.assertNotIn("AXSubrole", classifier)
+        self.assertNotIn('elementTitle == "Settings"', classifier)
+
+        menu = native_source[
+            native_source.index("func findMenuItem(") : native_source.index(
+                "func stringValue("
+            )
+        ]
+        self.assertIn(
+            "let deadline = Date().addingTimeInterval(menuReadinessTimeout)", menu
+        )
+        self.assertIn("while Date() < deadline", menu)
+        self.assertIn("menuIsPresented(menu", menu)
+        self.assertEqual(menu.count("try press(menu)"), 1)
+        self.assertLess(menu.index("if !presented"), menu.index("try press(menu)"))
+        self.assertIn(
+            "attributeBool(item, kAXEnabledAttribute as String) == true", menu
+        )
+        self.assertIn("kAXPressAction as String", menu)
+        self.assertIn("RunLoop.current.run", menu)
+        self.assertIn("try requireFreshMenuFocus", menu)
+        self.assertGreaterEqual(menu.count("try requireFreshMenuFocus"), 3)
+
+        focus = native_source[
+            native_source.index("func requireFreshMenuFocus(") : native_source.index(
+                "func findMenuItem("
+            )
+        ]
+        self.assertIn("frontmostApplication?.processIdentifier == pid", focus)
+        self.assertIn("focusedWindowIs(app, sourceWindow)", focus)
+
     def test_default_is_read_only_and_execute_is_explicit(self):
         report = self.call(
             subprocess.CompletedProcess(
@@ -205,7 +335,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
             / "live_set_lifecycle.swift"
         ).read_text()
         activation = native_source.index("process.activate()")
-        menu = native_source.index('findMenuItem(app: appElement, menuTitle: "File"')
+        menu = native_source.index("findMenuItem(app: appElement, pid: options.pid")
         save_window_focus = native_source.index(
             "focusWindow(appElement, pid: options.pid, window: saveWindow)"
         )
