@@ -192,7 +192,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
         ]
         self.assertIn('attributeBool(element, "AXModal") == true', classifier)
         self.assertIn('elementIdentifier == "open-panel"', classifier)
-        self.assertIn('elementTitle == "Open"', classifier)
+        self.assertNotIn('elementTitle == "Open"', classifier)
         self.assertNotIn("AXSubrole", classifier)
         self.assertNotIn('elementTitle == "Settings"', classifier)
 
@@ -474,10 +474,6 @@ class LiveSetLifecycleTests(unittest.TestCase):
         ).read_text()
         self.assertIn("error == .noValue || error == .invalidUIElement", native_source)
         self.assertIn(
-            "guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil",
-            native_source,
-        )
-        self.assertIn(
             'try require(matches.count == 1, "expected exactly one Save panel AX',
             native_source,
         )
@@ -557,11 +553,56 @@ class LiveSetLifecycleTests(unittest.TestCase):
         ]
         increment = scanner.index("visitedCount += 1")
         bound = scanner.index("visitedCount <= maxElements")
-        stale_skip = scanner.index(
-            "guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil"
-        )
+        stale_skip = scanner.index("guard let rawRole = try savePanelAttribute")
         self.assertLess(increment, bound)
         self.assertLess(bound, stale_skip)
+
+    def test_save_panel_prunes_browser_rows_but_keeps_required_chrome_strict(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        browser_filter = native_source[
+            native_source.index(
+                "func isIrrelevantSavePanelBrowserElement("
+            ) : native_source.index("func savePanelElements(")
+        ]
+        for role in ("AXScrollArea", "AXTable", "AXOutline", "AXRow", "AXColumn"):
+            self.assertIn(role, browser_filter)
+
+        scanner = native_source[
+            native_source.index("func savePanelElements(") : native_source.index(
+                "func savePanelMatches("
+            )
+        ]
+        browser_prune = scanner.index(
+            "if isIrrelevantSavePanelBrowserElement(elementRole) { continue }"
+        )
+        append_element = scanner.index("output.append(element)")
+        read_children = scanner.index("kAXChildrenAttribute as String")
+        self.assertLess(browser_prune, append_element)
+        self.assertLess(browser_prune, read_children)
+        self.assertIn("savePanelElementDiagnostic(element)", scanner)
+        diagnostic = native_source[
+            native_source.index(
+                "func savePanelElementDiagnostic("
+            ) : native_source.index("func isIrrelevantSavePanelBrowserElement(")
+        ]
+        for field in ("role", "subrole", "identifier"):
+            self.assertIn(field, diagnostic)
+        self.assertIn("prefix(128)", diagnostic)
+
+        matcher = native_source[
+            native_source.index("func uniqueSavePanelElement(") : native_source.index(
+                "func waitForGoToPathField("
+            )
+        ]
+        self.assertIn("try require(matches.count == 1", matcher)
+        self.assertIn('identifier: "saveAsNameTextField"', native_source)
+        self.assertIn('identifier: "where popup"', native_source)
+        self.assertIn('identifier: "OKButton"', native_source)
+        self.assertIn('identifier: "PathTextField"', native_source)
 
     def test_outer_timeout_preserves_unknown_execute_outcomes(self):
         with (

@@ -59,7 +59,7 @@ func isBlockingWindow(_ element: AXUIElement, except allowedTitle: String? = nil
         return true
     }
     return elementRole == (kAXWindowRole as String) &&
-        (elementIdentifier == "open-panel" || elementTitle == "Open")
+        elementIdentifier == "open-panel"
 }
 
 func elementSummary(_ element: AXUIElement?, blocking: Bool = false) -> [String: Any]? {
@@ -400,6 +400,22 @@ func savePanelAttribute(_ element: AXUIElement, _ name: String) throws -> CFType
     throw LifecycleFailure(phase: phase, message: "Save panel AX read \(name) failed (\(error.rawValue))")
 }
 
+func savePanelElementDiagnostic(_ element: AXUIElement) -> String {
+    func value(_ attribute: String) -> String {
+        guard let raw = try? savePanelAttribute(element, attribute),
+              let string = raw as? String else { return "unknown" }
+        return String(string.prefix(128))
+    }
+    let roleName = value(kAXRoleAttribute as String)
+    let subrole = value(kAXSubroleAttribute as String)
+    let elementIdentifier = value("AXIdentifier")
+    return "container role=\(roleName) subrole=\(subrole) identifier=\(elementIdentifier)"
+}
+
+func isIrrelevantSavePanelBrowserElement(_ roleName: String) -> Bool {
+    ["AXScrollArea", "AXTable", "AXOutline", "AXRow", "AXColumn"].contains(roleName)
+}
+
 func savePanelElements(_ roots: [AXUIElement], maxDepth: Int = 24, maxElements: Int = 4096) throws -> [AXUIElement] {
     var output: [AXUIElement] = []
     var queue = roots.map { ($0, 0) }
@@ -411,15 +427,23 @@ func savePanelElements(_ roots: [AXUIElement], maxDepth: Int = 24, maxElements: 
         guard seen.insert(hash).inserted else { continue }
         visitedCount += 1
         try require(visitedCount <= maxElements, "Save panel AX subtree exceeded element bound")
-        guard try savePanelAttribute(element, kAXRoleAttribute as String) != nil else {
-            continue // A stale file-list row is unrelated to required panel controls.
+        guard let rawRole = try savePanelAttribute(element, kAXRoleAttribute as String),
+              let elementRole = rawRole as? String else {
+            continue // An unavailable role cannot match a required panel control.
         }
+        if isIrrelevantSavePanelBrowserElement(elementRole) { continue }
         output.append(element)
-        guard let rawChildren = try savePanelAttribute(element, kAXChildrenAttribute as String) else {
+        let rawChildren: CFTypeRef?
+        do {
+            rawChildren = try savePanelAttribute(element, kAXChildrenAttribute as String)
+        } catch let error as LifecycleFailure {
+            throw LifecycleFailure(phase: phase, message: "\(error.message); \(savePanelElementDiagnostic(element))")
+        }
+        guard let rawChildren else {
             continue
         }
         guard let children = rawChildren as? [AXUIElement] else {
-            throw LifecycleFailure(phase: phase, message: "Save panel AX children is not an element array")
+            throw LifecycleFailure(phase: phase, message: "Save panel AX children is not an element array; \(savePanelElementDiagnostic(element))")
         }
         if depth < maxDepth {
             queue.append(contentsOf: children.map { ($0, depth + 1) })
