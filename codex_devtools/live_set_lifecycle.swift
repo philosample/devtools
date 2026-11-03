@@ -519,6 +519,56 @@ func waitForGoToSheetDismissed(_ saveWindow: AXUIElement, seconds: TimeInterval 
     throw LifecycleFailure(phase: phase, message: "GoToWindow sheet child remained after Return")
 }
 
+// Readiness only: never press Save, repeat menu navigation, or repair a drifted panel.
+func waitForSaveButtonEnabled(app: AXUIElement, pid: pid_t, bundleID: String,
+                              process: NSRunningApplication, saveWindow: AXUIElement,
+                              source: URL, originalSourceIdentity: [FileAttributeKey: Any],
+                              destination: URL, seconds: TimeInterval = 5) throws -> AXUIElement {
+    let deadline = ProcessInfo.processInfo.systemUptime + seconds
+    while ProcessInfo.processInfo.systemUptime < deadline {
+        try require(!process.isTerminated, "original Live process terminated during Save readiness")
+        guard let currentProcess = NSRunningApplication(processIdentifier: pid) else {
+            throw LifecycleFailure(phase: phase, message: "exact Live PID disappeared during Save readiness")
+        }
+        let running = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleID }
+        try require(currentProcess.bundleIdentifier == bundleID && running.count == 1 && running[0].processIdentifier == pid,
+                    "Live PID/bundle identity changed during Save readiness")
+        try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, "Live lost foreground during Save readiness")
+        try ensureNoDialogs(app, except: "Save")
+        let panels = try windows(app).filter { (try? role($0)) == (kAXWindowRole as String) && title($0) == "Save" }
+        try require(panels.count == 1 && CFEqual(panels[0], saveWindow) && identifier(panels[0]) == "save-panel",
+                    "Save panel identity changed during readiness")
+        let currentPanel = panels[0]
+        try require(focusedWindowIs(app, currentPanel), "Save panel lost focus during readiness")
+        let refreshed = try savePanelElements([currentPanel])
+        try require(!refreshed.contains { ["Replace", "Allow", "Allow Anyway", "Discard", "Don't Save", "Don’t Save"].contains(title($0) ?? "") }, "unexpected overwrite/security/discard prompt")
+        let pathFields = try savePanelMatches(refreshed, role: kAXTextFieldRole as String, title: nil, identifier: "PathTextField")
+        let sheets = try savePanelMatches(refreshed, role: "AXSheet", title: nil, identifier: "GoToWindow")
+        try require(pathFields.isEmpty && sheets.isEmpty, "Go To Folder sheet/path field remained open")
+        let finalName = try uniqueSavePanelElement(refreshed, role: kAXTextFieldRole as String, title: nil, identifier: "saveAsNameTextField")
+        try require(stringValue(finalName) == destination.lastPathComponent, "Save As filename changed")
+        let finalWhere = try uniqueSavePanelElement(refreshed, role: kAXPopUpButtonRole as String, title: "Where:", identifier: "where popup")
+        try require(stringValue(finalWhere) == destination.deletingLastPathComponent().lastPathComponent, "Save As selected folder leaf mismatch")
+        let buttons = try savePanelMatches(refreshed, role: kAXButtonRole as String, title: "Save", identifier: "OKButton")
+        try require(buttons.count == 1, "expected exactly one Save panel AX Save/OKButton")
+        try ensureNoSymlinkChain(destination, mustExist: false, outsideGit: true)
+        let sourceBeforeSaveIdentity = try fileIdentity(source)
+        try require(sameFileIdentity(originalSourceIdentity, sourceBeforeSaveIdentity), "source Set metadata changed before Save")
+        _ = try exactDocumentWindow(app, url: source)
+        // File/AX reads above may take time. Recheck process/focus and the positive
+        // enabled state before returning a button; no mutation occurs in this loop.
+        try require(!process.isTerminated && NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == bundleID,
+                    "Live PID changed during Save readiness readback")
+        try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && focusedWindowIs(app, currentPanel),
+                    "Save panel focus changed during readiness readback")
+        if attributeBool(buttons[0], kAXEnabledAttribute as String) == true && ProcessInfo.processInfo.systemUptime < deadline {
+            return buttons[0]
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    throw LifecycleFailure(phase: phase, message: "Save panel did not expose an enabled Save/OKButton before the bounded readiness deadline")
+}
+
 func menuItemMatches(_ elements: [AXUIElement], _ itemTitle: String) -> [AXUIElement] {
     elements.filter { (try? role($0)) == (kAXMenuItemRole as String) && title($0) == itemTitle }
 }
@@ -788,21 +838,9 @@ func run(_ options: Options) throws -> [String: Any] {
     phase = "verify-save-dialog"
     let refreshedWindow = try waitForWindow(appElement, title: "Save")
     try waitForGoToSheetDismissed(refreshedWindow)
-    try ensureNoDialogs(appElement, except: "Save")
-    let refreshedWindows = [refreshedWindow]
-    let refreshed = try savePanelElements(refreshedWindows)
-    try require(!refreshed.contains { ["Replace", "Allow", "Allow Anyway", "Discard", "Don't Save", "Don’t Save"].contains(title($0) ?? "") }, "unexpected overwrite/security/discard prompt")
-    let pathFields = try savePanelMatches(refreshed, role: kAXTextFieldRole as String, title: nil, identifier: "PathTextField")
-    try require(pathFields.isEmpty, "Go To Folder path field remained open")
-    let finalName = try uniqueSavePanelElement(refreshed, role: kAXTextFieldRole as String, title: nil, identifier: "saveAsNameTextField")
-    try require(stringValue(finalName) == destination.lastPathComponent, "Save As filename changed")
-    let finalWhere = try uniqueSavePanelElement(refreshed, role: kAXPopUpButtonRole as String, title: "Where:", identifier: "where popup")
-    try require(stringValue(finalWhere) == destination.deletingLastPathComponent().lastPathComponent, "Save As selected folder leaf mismatch")
-    let saveButton = try uniqueSavePanelElement(refreshed, role: kAXButtonRole as String, title: "Save", identifier: "OKButton")
-    try ensureNoDialogs(appElement, except: "Save")
-    try ensureNoSymlinkChain(destination, mustExist: false, outsideGit: true)
-    let sourceBeforeSaveIdentity = try fileIdentity(source)
-    try require(sameFileIdentity(originalSourceIdentity, sourceBeforeSaveIdentity), "source Set metadata changed before Save")
+    let saveButton = try waitForSaveButtonEnabled(app: appElement, pid: options.pid, bundleID: options.bundleID,
+                                                 process: process, saveWindow: refreshedWindow, source: source,
+                                                 originalSourceIdentity: originalSourceIdentity, destination: destination)
 
     phase = "save"
     saveAttempted = true

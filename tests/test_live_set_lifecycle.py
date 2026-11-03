@@ -252,6 +252,96 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertIn("frontmostApplication?.processIdentifier == pid", focus)
         self.assertIn("focusedWindowIs(app, sourceWindow)", focus)
 
+    def test_save_enabled_wait_refreshes_exact_panel_and_guards_every_poll(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        start = native_source.index("func waitForSaveButtonEnabled(")
+        readiness = native_source[start : native_source.index("\nfunc ", start + 1)]
+        self.assertIn("seconds: TimeInterval = 5", readiness)
+        self.assertIn(
+            "let deadline = ProcessInfo.processInfo.systemUptime + seconds", readiness
+        )
+        self.assertIn(
+            "while ProcessInfo.processInfo.systemUptime < deadline", readiness
+        )
+        for guard in (
+            "!process.isTerminated",
+            "NSRunningApplication(processIdentifier: pid)",
+            "currentProcess.bundleIdentifier == bundleID",
+            "running.count == 1 && running[0].processIdentifier == pid",
+            "frontmostApplication?.processIdentifier == pid",
+            'ensureNoDialogs(app, except: "Save")',
+            "let panels = try windows(app)",
+            "CFEqual(panels[0], saveWindow)",
+            'identifier(panels[0]) == "save-panel"',
+            "focusedWindowIs(app, currentPanel)",
+            "savePanelElements([currentPanel])",
+            "pathFields.isEmpty && sheets.isEmpty",
+            "stringValue(finalName) == destination.lastPathComponent",
+            "stringValue(finalWhere) == destination.deletingLastPathComponent().lastPathComponent",
+            "buttons.count == 1",
+            "ensureNoSymlinkChain(destination, mustExist: false, outsideGit: true)",
+            "sameFileIdentity(originalSourceIdentity, sourceBeforeSaveIdentity)",
+            "exactDocumentWindow(app, url: source)",
+        ):
+            self.assertIn(guard, readiness)
+        positive = readiness.index(
+            "if attributeBool(buttons[0], kAXEnabledAttribute as String) == true"
+        )
+        self.assertIn(
+            "ProcessInfo.processInfo.systemUptime < deadline", readiness[positive:]
+        )
+        self.assertLess(positive, readiness.index("return buttons[0]"))
+        self.assertIn("RunLoop.current.run", readiness)
+        self.assertIn("bounded readiness deadline", readiness)
+        for mutation in ("try press(", "postChord(", "setString(", "saveAttempted ="):
+            self.assertNotIn(mutation, readiness)
+
+    def test_save_wait_precedes_the_only_attempt_and_timeout_preserves_outcomes(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        run_source = native_source[native_source.index("func run(_ options:") :]
+        dismissed = run_source.index("try waitForGoToSheetDismissed(refreshedWindow)")
+        readiness = run_source.index("try waitForSaveButtonEnabled(")
+        attempted = run_source.index("saveAttempted = true")
+        save = run_source.index("try press(saveButton)")
+        self.assertLess(dismissed, readiness)
+        self.assertLess(readiness, attempted)
+        self.assertLess(attempted, save)
+        self.assertEqual(run_source.count("try press(saveButton)"), 1)
+        self.assertEqual(run_source.count("try press(saveItem)"), 1)
+        receipt = {
+            "format": FORMAT,
+            "status": "stopped",
+            "target": {"pid": PID, "bundle_identifier": BUNDLE},
+            "phase": "verify-save-dialog",
+            "error": "Save panel did not expose an enabled Save/OKButton before the bounded readiness deadline",
+            "actions": {
+                "focus": "verified",
+                "menu_navigation": "verified",
+                "save_as_menu": "outcome_unknown",
+                "save": "not_attempted",
+                "quit": "not_attempted",
+                "open": "not_attempted",
+            },
+            "manual_inspection_required": True,
+        }
+        report = self.call(
+            subprocess.CompletedProcess([], 1, json.dumps(receipt), ""),
+            destination_set=self.destination,
+            app_bundle=self.app,
+            execute=True,
+        )
+        self.assertEqual(report["phase"], "verify-save-dialog")
+        self.assertEqual(report["actions"], receipt["actions"])
+        self.assertEqual(self.native_run.call_args.kwargs["timeout"], 240)
+
     def test_default_is_read_only_and_execute_is_explicit(self):
         report = self.call(
             subprocess.CompletedProcess(
@@ -481,7 +571,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
             "let saveRows = try savePanelElements([saveWindow])", native_source
         )
         self.assertIn(
-            'uniqueSavePanelElement(refreshed, role: kAXButtonRole as String, title: "Save"',
+            'savePanelMatches(refreshed, role: kAXButtonRole as String, title: "Save"',
             native_source,
         )
 
