@@ -3,6 +3,7 @@ import ApplicationServices
 import AppKit
 import Darwin
 import Foundation
+import CryptoKit
 
 struct Options {
     var pid: pid_t = 0
@@ -11,6 +12,11 @@ struct Options {
     var destinationSet: String?
     var appPath: String?
     var execute = false
+    var openExisting = false
+    var sourceSHA256: String?
+    var destinationSHA256: String?
+    var saveOwnedSource = false
+    var backupReceipt: String?
 }
 
 struct LifecycleFailure: Error {
@@ -32,6 +38,7 @@ var initialPID: Int?
 var initialBundleID: String?
 var menuDiagnostics: [String: Any]?
 var activeFileMenu: AXUIElement?
+var sourceSaveVerified = false
 
 let menuReadinessTimeout: TimeInterval = 2
 
@@ -145,6 +152,8 @@ func parseOptions() -> Options {
             index += 1
             continue
         }
+        if key == "--open-existing" { result.openExisting = true; index += 1; continue }
+        if key == "--save-owned-source" { result.saveOwnedSource = true; index += 1; continue }
         guard index + 1 < args.count else { fail("missing value for \(key)") }
         let value = args[index + 1]
         switch key {
@@ -155,6 +164,9 @@ func parseOptions() -> Options {
         case "--source-set": result.sourceSet = value
         case "--destination-set": result.destinationSet = value
         case "--app": result.appPath = value
+        case "--source-sha256": result.sourceSHA256 = value
+        case "--destination-sha256": result.destinationSHA256 = value
+        case "--backup-receipt": result.backupReceipt = value
         default: fail("unknown option: \(key)")
         }
         index += 2
@@ -164,6 +176,15 @@ func parseOptions() -> Options {
     }
     if result.execute && (result.destinationSet == nil || result.appPath == nil) {
         fail("--execute requires --destination-set and --app")
+    }
+    if result.openExisting && (result.destinationSet == nil || result.appPath == nil || result.sourceSHA256 == nil || result.destinationSHA256 == nil) {
+        fail("--open-existing requires exact source/destination hashes, destination and app")
+    }
+    if !result.openExisting && (result.sourceSHA256 != nil || result.destinationSHA256 != nil || result.saveOwnedSource || result.backupReceipt != nil) {
+        fail("existing-Set open options require --open-existing")
+    }
+    if result.openExisting && result.execute && result.saveOwnedSource && result.backupReceipt == nil {
+        fail("saving the owned source requires its already-written backup receipt")
     }
     return result
 }
@@ -927,7 +948,273 @@ func run(_ options: Options) throws -> [String: Any] {
             "evidence_limit": "AX document URL and nonempty regular-file observation; host LOM path and recall state require separate verification"]
 }
 
+// Existing-Set mode reuses the lifecycle AX/menu/focus and LaunchServices helpers.
+struct SetObservationChanged: Error {}
+let maxPinnedSetBytes: Int64 = 128 * 1024 * 1024
+var openSourcePin: [String: Any]?
+
+func setPin(_ url: URL) throws -> [String: Any] {
+    try ensureNoSymlinkChain(url, mustExist: true, outsideGit: true)
+    let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
+    try require(fd >= 0, "cannot open exact Set file without following symlinks")
+    defer { Darwin.close(fd) }
+    var before = stat(), after = stat(), current = stat()
+    try require(fstat(fd, &before) == 0 && (before.st_mode & S_IFMT) == S_IFREG, "Set must be a regular file")
+    try require(before.st_size <= maxPinnedSetBytes, "Set exceeds bounded file size")
+    if before.st_size <= 0 { throw SetObservationChanged() }
+    var digest = SHA256(), count: Int64 = 0, buffer = [UInt8](repeating: 0, count: 65536)
+    while true {
+        let size = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+        try require(size >= 0, "Set file read failed")
+        if size == 0 { break }
+        count += Int64(size)
+        try require(count <= maxPinnedSetBytes, "Set exceeded file bound while reading")
+        digest.update(data: Data(buffer.prefix(size)))
+    }
+    try require(fstat(fd, &after) == 0 && lstat(url.path, &current) == 0, "Set disappeared while reading")
+    if before.st_dev != after.st_dev || before.st_ino != after.st_ino || before.st_size != count || before.st_size != after.st_size ||
+        before.st_mtimespec.tv_sec != after.st_mtimespec.tv_sec || before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec ||
+        before.st_ctimespec.tv_sec != after.st_ctimespec.tv_sec || before.st_ctimespec.tv_nsec != after.st_ctimespec.tv_nsec ||
+        current.st_dev != before.st_dev || current.st_ino != before.st_ino || current.st_size != before.st_size ||
+        current.st_mtimespec.tv_sec != before.st_mtimespec.tv_sec || current.st_mtimespec.tv_nsec != before.st_mtimespec.tv_nsec ||
+        current.st_ctimespec.tv_sec != before.st_ctimespec.tv_sec || current.st_ctimespec.tv_nsec != before.st_ctimespec.tv_nsec { throw SetObservationChanged() }
+    return ["path": url.path, "sha256": digest.finalize().map { String(format: "%02x", $0) }.joined(),
+            "bytes": count, "device": String(before.st_dev), "inode": String(before.st_ino),
+            "mtime_seconds": before.st_mtimespec.tv_sec, "mtime_nanoseconds": before.st_mtimespec.tv_nsec,
+            "ctime_seconds": before.st_ctimespec.tv_sec, "ctime_nanoseconds": before.st_ctimespec.tv_nsec]
+}
+
+func samePin(_ left: [String: Any], _ right: [String: Any]) -> Bool {
+    NSDictionary(dictionary: left).isEqual(to: right)
+}
+
+// Only the destination after the issued open may differ in ctime. Pre-open
+// approval and the retained source continue to require the complete pin.
+func sameOpenedDestination(_ before: [String: Any], _ after: [String: Any]) -> Bool {
+    var left = before, right = after
+    for key in ["ctime_seconds", "ctime_nanoseconds"] {
+        left.removeValue(forKey: key); right.removeValue(forKey: key)
+    }
+    return samePin(left, right)
+}
+
+func requireSameProcess(_ process: NSRunningApplication, options: Options) throws {
+    try require(!process.isTerminated, "original Live process terminated; same-process open stopped")
+    let running = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == options.bundleID }
+    try require(running.count == 1 && running[0].processIdentifier == options.pid &&
+                running[0].bundleURL == process.bundleURL, "Live process/bundle changed or became ambiguous")
+    try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid, "exact Live PID lost foreground")
+}
+
+func checkedSourceBackup(_ receiptPath: String, source: URL, destination: URL, options: Options) throws -> String {
+    let path = URL(fileURLWithPath: try lexicalPath(receiptPath))
+    try ensureNoSymlinkChain(path, mustExist: true, outsideGit: true)
+    let attributes = try fileIdentity(path)
+    try require((attributes[.size] as? NSNumber)?.intValue ?? 65537 <= 65536, "backup receipt exceeds bounds")
+    try require(((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0 &&
+                (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(), "backup receipt must be private and owned")
+    guard let receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any],
+          let original = receipt["source"] as? [String: Any], let backup = receipt["backup"] as? [String: Any],
+          let backupPath = backup["path"] as? String else {
+        throw LifecycleFailure(phase: phase, message: "invalid already-written source backup receipt")
+    }
+    try require(receipt["format"] as? String == "codex-devtools-live-set-backup-v1" &&
+                original["path"] as? String == source.path && original["sha256"] as? String == options.sourceSHA256 &&
+                receipt["destination_set_url"] as? String == destination.absoluteString &&
+                receipt["destination_sha256"] as? String == options.destinationSHA256 &&
+                receipt["pid"] as? Int == Int(options.pid) && receipt["bundle_identifier"] as? String == options.bundleID,
+                "source backup receipt does not match exact source/destination/process approval")
+    let backupURL = try canonicalURL(backupPath), pin = try setPin(backupURL)
+    let backupAttributes = try fileIdentity(backupURL)
+    try require(pin["sha256"] as? String == options.sourceSHA256 && backup["sha256"] as? String == options.sourceSHA256 &&
+                samePin(pin, backup) &&
+                ((backupAttributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0 &&
+                (backupAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(), "source backup bytes/hash or permissions mismatch")
+    return backupPath
+}
+
+func waitForOwnedSourceSaved(app: AXUIElement, process: NSRunningApplication, options: Options,
+                              source: URL, before: [String: Any], deadline: TimeInterval) throws -> [String: Any] {
+    var previous: [String: Any]?, stable = 0
+    while ProcessInfo.processInfo.systemUptime < deadline {
+        try requireSameProcess(process, options: options)
+        try ensureNoDialogs(app)
+        let window = try exactDocumentWindow(app, url: source)
+        try require(focusedWindowIs(app, window), "owned source window lost focus during Save")
+        do {
+            let pin = try setPin(source)
+            if !samePin(pin, before) {
+                stable = previous.map { samePin($0, pin) } == true ? stable + 1 : 0
+                previous = pin
+                if stable >= 2 && ProcessInfo.processInfo.systemUptime < deadline { return pin }
+            } else { previous = nil; stable = 0 }
+        } catch is SetObservationChanged { previous = nil; stable = 0 }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+    }
+    throw LifecycleFailure(phase: phase, message: "Save outcome unknown: no positive file transition followed by stable bytes/identity/URL; unchanged/no-op Save is not inferred complete")
+}
+
+func runOpenExisting(_ options: Options) throws -> [String: Any] {
+    phase = "preflight"
+    initialPID = Int(options.pid); initialBundleID = options.bundleID
+    let deadline = ProcessInfo.processInfo.systemUptime + 180
+    try require(AXIsProcessTrusted(), "Accessibility permission is not already trusted")
+    guard let process = NSRunningApplication(processIdentifier: options.pid) else {
+        throw LifecycleFailure(phase: phase, message: "exact target Live PID is unavailable")
+    }
+    try require(process.bundleIdentifier == options.bundleID, "exact PID bundle identifier mismatch")
+    let running = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == options.bundleID }
+    try require(running.count == 1 && running[0].processIdentifier == options.pid, "ambiguous running Live applications")
+    let source = try canonicalURL(options.sourceSet), destination = try canonicalURL(options.destinationSet!)
+    let sourcePin = try setPin(source), destinationPin = try setPin(destination)
+    try require(source != destination && !(sourcePin["device"] as? String == destinationPin["device"] as? String && sourcePin["inode"] as? String == destinationPin["inode"] as? String), "source/destination aliases are forbidden")
+    try require(sourcePin["sha256"] as? String == options.sourceSHA256 && destinationPin["sha256"] as? String == options.destinationSHA256,
+                "reviewed source/destination SHA-256 mismatch")
+    let appURL = URL(fileURLWithPath: options.appPath!)
+    try require(appURL.path == options.appPath && appURL.resolvingSymlinksInPath().path == appURL.path && appURL.pathExtension == "app" &&
+                process.bundleURL?.path == appURL.path && Bundle(url: appURL)?.bundleIdentifier == options.bundleID, "exact Live app differs from running target")
+    let app = AXUIElementCreateApplication(options.pid)
+    try ensureNoDialogs(app)
+    let sourceWindow = try exactDocumentWindow(app, url: source)
+    if !options.execute {
+        return ["format": "codex-devtools-live-set-open-v1", "status": "ready", "read_only": true,
+                "target": ["pid": options.pid, "bundle_identifier": options.bundleID],
+                "source_set_url": source.absoluteString, "destination_set_url": destination.absoluteString,
+                "source_file": sourcePin, "destination_file": destinationPin, "save_owned_source": options.saveOwnedSource,
+                "actions": openActions(readOnly: true)]
+    }
+    var expectedSource = sourcePin
+    var backupPath: String?
+    if options.saveOwnedSource {
+        backupPath = try checkedSourceBackup(options.backupReceipt!, source: source, destination: destination, options: options)
+    }
+    try activateExactTarget(process, app: app, sourceWindow: sourceWindow)
+    try requireSameProcess(process, options: options)
+    if options.saveOwnedSource {
+        let ownedSourceAttributes = try fileIdentity(source)
+        try require((ownedSourceAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(), "explicit source Save requires current-user ownership")
+        phase = "source-save-menu"
+        let item = try findMenuItem(app: app, pid: options.pid, sourceWindow: sourceWindow, menuTitle: "File", itemTitle: "Save Live Set")
+        try requireFreshMenuFocus(app: app, pid: options.pid, sourceWindow: sourceWindow, menu: activeFileMenu, item: item)
+        let beforeSaveSource = try setPin(source), beforeSaveDestination = try setPin(destination)
+        try require(samePin(beforeSaveSource, sourcePin) && samePin(beforeSaveDestination, destinationPin), "source/destination changed before Save")
+        _ = try checkedSourceBackup(options.backupReceipt!, source: source, destination: destination, options: options)
+        let finalSaveSource = try setPin(source), finalSaveDestination = try setPin(destination)
+        try require(samePin(finalSaveSource, sourcePin) && samePin(finalSaveDestination, destinationPin), "Set identity/hash changed while verifying backup")
+        try require(ProcessInfo.processInfo.systemUptime < deadline, "same-process operation deadline exceeded before Save")
+        try requireSameProcess(process, options: options)
+        try requireFreshMenuFocus(app: app, pid: options.pid, sourceWindow: sourceWindow, menu: activeFileMenu, item: item)
+        _ = try exactDocumentWindow(app, url: source)
+        phase = "save-owned-source"; saveAttempted = true
+        try press(item); menuDiagnostics = nil
+        phase = "verify-owned-source-save"
+        expectedSource = try waitForOwnedSourceSaved(app: app, process: process, options: options, source: source,
+                                                    before: sourcePin, deadline: min(deadline, ProcessInfo.processInfo.systemUptime + 30))
+        sourceSaveVerified = true; openSourcePin = expectedSource
+    }
+    phase = "open-existing-preflight"
+    try requireSameProcess(process, options: options)
+    try ensureNoDialogs(app)
+    let currentSource = try exactDocumentWindow(app, url: source)
+    try require(focusedWindowIs(app, currentSource), "owned source window lost focus before open")
+    let beforeOpenSource = try setPin(source), beforeOpenDestination = try setPin(destination)
+    try require(samePin(beforeOpenSource, expectedSource) && samePin(beforeOpenDestination, destinationPin), "source/destination identity/hash changed before open")
+    try requireSameProcess(process, options: options)
+    try ensureNoDialogs(app)
+    let finalSourceWindow = try exactDocumentWindow(app, url: source)
+    try require(focusedWindowIs(app, finalSourceWindow), "owned source focus changed during file verification")
+    try require(ProcessInfo.processInfo.systemUptime < deadline, "same-process operation deadline exceeded before open")
+    phase = "open-existing"
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.createsNewApplicationInstance = false
+    var opened: NSRunningApplication?, openError: Error?
+    let semaphore = DispatchSemaphore(value: 0)
+    openAttempted = true
+    NSWorkspace.shared.open([destination], withApplicationAt: appURL, configuration: configuration) { application, error in
+        opened = application; openError = error; semaphore.signal()
+    }
+    if semaphore.wait(timeout: .now() + min(45, max(0, deadline - ProcessInfo.processInfo.systemUptime))) == .timedOut {
+        throw LifecycleFailure(phase: phase, message: "existing-Set open outcome unknown: callback timed out")
+    }
+    if let openError { throw LifecycleFailure(phase: phase, message: "existing-Set open failed: \(openError.localizedDescription)") }
+    try require(opened?.processIdentifier == options.pid && opened?.bundleIdentifier == options.bundleID && !process.isTerminated,
+                "existing-Set open returned a different process; stopped without cleanup")
+    phase = "verify-opened-existing-set"
+    let verifyDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + 75)
+    while ProcessInfo.processInfo.systemUptime < verifyDeadline {
+        try requireSameProcess(process, options: options)
+        if let currentWindows = try? windows(app) {
+            try require(!currentWindows.contains { isBlockingWindow($0) }, "unexpected prompt/dialog during Set switch; no interaction attempted")
+            let matches = try currentWindows.filter { window in
+                guard let raw = optionalAX(window, kAXDocumentAttribute as String) as? String else { return false }
+                return try sameSetURL(raw, expected: destination)
+            }
+            try require(matches.count <= 1, "ambiguous destination Set URL")
+            if let window = matches.first {
+                try require(focusedWindowIs(app, window), "exact destination Set is not focused")
+                let openedDestination = try setPin(destination), retainedSource = try setPin(source)
+                try require(sameOpenedDestination(destinationPin, openedDestination) && samePin(retainedSource, expectedSource), "Set bytes/identity changed during open")
+                try requireSameProcess(process, options: options)
+                try ensureNoDialogs(app)
+                let finalDestinationWindow = try exactDocumentWindow(app, url: destination)
+                try require(focusedWindowIs(app, finalDestinationWindow), "destination focus changed during file verification")
+                try require(ProcessInfo.processInfo.systemUptime < verifyDeadline, "Set verification deadline expired")
+                return ["format": "codex-devtools-live-set-open-v1", "status": "opened", "read_only": false,
+                        "target": ["pid": options.pid, "bundle_identifier": options.bundleID], "same_process": true,
+                        "source_set_url": source.absoluteString, "destination_set_url": destination.absoluteString,
+                        "source_file": expectedSource, "destination_file": destinationPin,
+                        "destination_file_after_open": openedDestination,
+                        "destination_metadata_delta": samePin(destinationPin, openedDestination) ? [] : ["ctime"],
+                        "save_owned_source": options.saveOwnedSource,
+                        "backup_receipt": options.backupReceipt as Any? ?? NSNull(), "backup_file": backupPath as Any? ?? NSNull(),
+                        "actions": openActions(readOnly: false),
+                        "evidence_limit": "same-process AX document URL plus exact file bytes/identity; SDK/LOM handles must be invalidated, and M4L path/state/silence require independent proof"]
+            }
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+    }
+    throw LifecycleFailure(phase: phase, message: "existing-Set open outcome unknown: exact destination AX URL was not observed")
+}
+
+func openActions(readOnly: Bool) -> [String: String] {
+    if readOnly {
+        return ["focus": "not_attempted", "menu_navigation": "not_attempted", "save_as_menu": "not_attempted", "save": "not_attempted", "quit": "not_attempted", "open": "not_attempted"]
+    }
+    return ["focus": focusVerified ? "verified" : focusAttempted ? "outcome_unknown" : "not_attempted",
+            "menu_navigation": menuNavigationVerified ? "verified" : menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
+            "save_as_menu": "not_attempted", "save": sourceSaveVerified ? "source_observed" : saveAttempted ? "outcome_unknown" : "not_attempted",
+            "quit": "not_attempted", "open": "exact_set_window_observed"]
+}
+
+func stoppedOpen(_ options: Options, error: String) -> [String: Any] {
+    var actions = openActions(readOnly: false)
+    actions["open"] = openAttempted ? "outcome_unknown" : "not_attempted"
+    var report: [String: Any] = ["format": "codex-devtools-live-set-open-v1", "status": "stopped", "read_only": !options.execute,
+        "target": ["pid": options.pid, "bundle_identifier": options.bundleID], "phase": phase, "error": error,
+        "actions": actions, "manual_inspection_required": uiActionAttempted || focusAttempted || saveAttempted || openAttempted,
+        "backup_receipt": options.backupReceipt as Any? ?? NSNull()]
+    if let openSourcePin { report["saved_source_file"] = openSourcePin }
+    if let menuDiagnostics { report["diagnostics"] = menuDiagnostics }
+    return report
+}
+
 let options = parseOptions()
+if options.openExisting {
+    do {
+        let report = try runOpenExisting(options)
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        print(String(data: data, encoding: .utf8) ?? "{}")
+    } catch let error as LifecycleFailure {
+        let report = stoppedOpen(options, error: error.message)
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { print(String(data: data, encoding: .utf8) ?? "{}") }
+        exit(1)
+    } catch {
+        let report = stoppedOpen(options, error: "existing-Set operation unavailable or uncertain: " + String(describing: error))
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { print(String(data: data, encoding: .utf8) ?? "{}") }
+        exit(1)
+    }
+    exit(0)
+}
 do {
     let report = try run(options)
     let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
