@@ -73,7 +73,7 @@ def status(descriptor: Path) -> dict:
             and set(value["pins"]) == {"artifact_sha256", "components"}
             and re.fullmatch(r"[a-f0-9]{64}", value["pins"]["artifact_sha256"])
             and isinstance(value["pins"]["components"], dict)
-            and 1 <= len(value["pins"]["components"]) <= 32
+            and 1 <= len(value["pins"]["components"]) <= 64
             and all(
                 re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", key)
                 and re.fullmatch(r"[a-f0-9]{64}", pin)
