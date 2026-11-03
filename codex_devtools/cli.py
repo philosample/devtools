@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "--json", action="store_true", help="emit machine-readable JSON"
     )
+    validate.add_argument(
+        "--native-inline-inputs",
+        action="store_true",
+        help="preflight pcontrol cords to actual dedicated inlets in inline p subpatches",
+    )
     package = max_sub.add_parser(
         "package-m4l-candidate",
         help="build an unfrozen M4L MIDI-effect candidate with declared sidecars",
@@ -722,6 +727,12 @@ def main(argv: list[str] | None = None) -> int:
                 "entry_count": len(entries),
                 **graph,
             }
+            if args.native_inline_inputs:
+                from .max_inline_inputs import inline_input_report
+
+                preflight = inline_input_report(patch)
+                result["native_inline_inputs"] = preflight
+                result["errors"] = [*graph["errors"], *preflight["errors"]]
             if args.json:
                 _json_out(result)
             else:
@@ -729,11 +740,17 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"{fmt}: {counts['patchers']} patchers, {counts['boxes']} boxes, {counts['lines']} lines"
                 )
-                for error in graph["errors"]:
+                if args.native_inline_inputs:
+                    print(
+                        "native inline inputs: "
+                        f"{len(preflight['checked'])} checked cords, "
+                        f"{len(preflight['excluded'])} excluded cords"
+                    )
+                for error in result["errors"]:
                     print(f"error: {error}")
-                if not graph["errors"]:
+                if not result["errors"]:
                     print("OK")
-            return 1 if graph["errors"] else 0
+            return 1 if result["errors"] else 0
         if args.group == "max" and args.action == "package-m4l-candidate":
             from .m4l_package import package_m4l_candidate
 
