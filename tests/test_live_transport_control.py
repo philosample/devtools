@@ -262,6 +262,109 @@ class LiveTransportControlTests(unittest.TestCase):
         self.assertEqual(result["set_url"], set_path.as_uri())
         self.assertEqual(result["status"], "observed")
 
+    def test_inspect_preserves_validated_native_failure_receipt(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            set_path = Path(temporary) / "recall.als"
+            set_path.write_bytes(b"test Set")
+            native = {
+                "format": FORMAT,
+                "action": "inspect",
+                "actions": {},
+                "target": {"pid": PID, "bundle_identifier": BUNDLE},
+                "set_url": set_path.as_uri(),
+                "status": "stopped",
+                "phase": "identity",
+                "error": "TransportFailure(phase: identity, message: AX tree would exceed element bound)",
+                "read_only": True,
+                "manual_inspection_required": False,
+            }
+            kwargs = {
+                "action": "inspect",
+                "pid": PID,
+                "bundle_id": BUNDLE,
+                "set_path": set_path,
+                "play_for_seconds": None,
+                "returncode": 1,
+            }
+            self.assertTrue(_valid_report(native, **kwargs))
+
+            malformed = []
+            for name, value in (
+                ("format", "wrong-format"),
+                ("action", "stop"),
+                ("read_only", False),
+                ("manual_inspection_required", True),
+                ("phase", " "),
+                ("error", ""),
+                ("actions", {"play": {"attempted": False}}),
+                ("status", "observed"),
+            ):
+                candidate = {**native, name: value}
+                malformed.append(candidate)
+            malformed.extend(
+                (
+                    {**native, "target": {"pid": PID + 1, "bundle_identifier": BUNDLE}},
+                    {**native, "set_url": "file:///wrong.als"},
+                    {**native, "transport": {"play": 0}},
+                )
+            )
+            for candidate in malformed:
+                with self.subTest(candidate=candidate):
+                    self.assertFalse(_valid_report(candidate, **kwargs))
+
+            completed = subprocess.CompletedProcess(
+                args=["native"], returncode=1, stdout=json.dumps(native), stderr=""
+            )
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    return_value=completed,
+                ),
+            ):
+                result = run_live_transport(
+                    PID, expected_bundle_id=BUNDLE, set_path=set_path
+                )
+        self.assertEqual(result, native)
+        self.assertEqual(result["error"], native["error"])
+        self.assertNotIn("transport", result)
+        self.assertEqual(result["status"], "stopped")
+
+    def test_inspect_failure_receipt_requires_nonzero_native_exit(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            set_path = Path(temporary) / "recall.als"
+            set_path.write_bytes(b"test Set")
+            report = {
+                "format": FORMAT,
+                "action": "inspect",
+                "actions": {},
+                "target": {"pid": PID, "bundle_identifier": BUNDLE},
+                "set_url": set_path.as_uri(),
+                "status": "stopped",
+                "phase": "identity",
+                "error": "inspection failed",
+                "read_only": True,
+                "manual_inspection_required": False,
+            }
+            self.assertFalse(
+                _valid_report(
+                    report,
+                    action="inspect",
+                    pid=PID,
+                    bundle_id=BUNDLE,
+                    set_path=set_path,
+                    play_for_seconds=None,
+                    returncode=0,
+                )
+            )
+
     def test_play_compiles_before_fresh_sync_check_and_native_helper(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)

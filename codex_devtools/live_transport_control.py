@@ -105,6 +105,19 @@ def _valid_report(
     ):
         return False
     if action == "inspect":
+        if returncode == 1:
+            phase = report.get("phase")
+            error = report.get("error")
+            return (
+                report.get("status") == "stopped"
+                and not report["manual_inspection_required"]
+                and isinstance(phase, str)
+                and bool(phase.strip())
+                and isinstance(error, str)
+                and bool(error.strip())
+                and report.get("actions") == {}
+                and "transport" not in report
+            )
         transport = report.get("transport")
         return (
             returncode == 0
