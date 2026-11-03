@@ -499,14 +499,9 @@ func menuItemMatches(_ elements: [AXUIElement], _ itemTitle: String) -> [AXUIEle
     elements.filter { (try? role($0)) == (kAXMenuItemRole as String) && title($0) == itemTitle }
 }
 
-func menuIsPresented(_ menu: AXUIElement, descendants: [AXUIElement], itemTitle: String) -> Bool {
-    if attributeBool(menu, kAXExpandedAttribute as String) == true ||
-        attributeBool(menu, kAXSelectedAttribute as String) == true { return true }
-    for element in descendants where (try? role(element)) == (kAXMenuRole as String) {
-        let items = (try? allElements(try children(element))) ?? []
-        if !menuItemMatches(items, itemTitle).isEmpty { return true }
-    }
-    return false
+func menuIsPresented(_ menu: AXUIElement) -> Bool {
+    attributeBool(menu, kAXExpandedAttribute as String) == true ||
+        attributeBool(menu, kAXSelectedAttribute as String) == true
 }
 
 func requireFreshMenuFocus(app: AXUIElement, pid: pid_t, sourceWindow: AXUIElement,
@@ -532,7 +527,7 @@ func findMenuItem(app: AXUIElement, pid: pid_t, sourceWindow: AXUIElement, menuT
     let menu = try uniqueElement(top, role: kAXMenuBarItemRole as String, title: menuTitle)
     activeFileMenu = menu
     var nested = (try? allElements(try children(menu))) ?? []
-    var presented = menuIsPresented(menu, descendants: nested, itemTitle: itemTitle)
+    var presented = menuIsPresented(menu)
     menuNavigationVerified = presented
     captureMenuDiagnostics(app: app, pid: pid, menu: menu, item: menuItemMatches(nested, itemTitle).first,
                            ownedWindow: sourceWindow)
@@ -548,7 +543,7 @@ func findMenuItem(app: AXUIElement, pid: pid_t, sourceWindow: AXUIElement, menuT
         try requireFreshMenuFocus(app: app, pid: pid, sourceWindow: sourceWindow, menu: menu, item: current)
         try ensureNoDialogs(app)
         nested = (try? allElements(try children(menu))) ?? []
-        presented = menuIsPresented(menu, descendants: nested, itemTitle: itemTitle)
+        presented = menuIsPresented(menu)
         let matches = menuItemMatches(nested, itemTitle)
         let item = matches.count == 1 ? matches[0] : nil
         menuNavigationVerified = presented

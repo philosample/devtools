@@ -196,6 +196,34 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertNotIn("AXSubrole", classifier)
         self.assertNotIn('elementTitle == "Settings"', classifier)
 
+        # Model the reported AX shape: descendants remain populated while the
+        # menu item's authoritative state attributes say it is collapsed.
+        collapsed_static_tree = {
+            "expanded": False,
+            "selected": False,
+            "children": ["AXMenu", "Save Live Set As..."],
+        }
+        self.assertTrue(collapsed_static_tree["children"])
+        self.assertFalse(
+            collapsed_static_tree["expanded"] is True
+            or collapsed_static_tree["selected"] is True
+        )
+        unsupported_state = {"expanded": None, "selected": None}
+        self.assertFalse(
+            unsupported_state["expanded"] is True
+            or unsupported_state["selected"] is True
+        )
+
+        presentation = native_source[
+            native_source.index("func menuIsPresented(") : native_source.index(
+                "func requireFreshMenuFocus("
+            )
+        ]
+        self.assertIn("kAXExpandedAttribute as String) == true", presentation)
+        self.assertIn("kAXSelectedAttribute as String) == true", presentation)
+        self.assertNotIn("descendants", presentation)
+        self.assertNotIn("children", presentation)
+
         menu = native_source[
             native_source.index("func findMenuItem(") : native_source.index(
                 "func stringValue("

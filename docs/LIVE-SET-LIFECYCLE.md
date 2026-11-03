@@ -82,8 +82,12 @@ until the current UI and destination are inspected.
 Before File-menu interaction, the helper rechecks that the exact Live PID is
 frontmost and the owned Set window is focused. It recognizes an already expanded
 or selected File menu and does not toggle it; otherwise it presses File once and
-waits up to two seconds for the exact enabled `Save Live Set As...` menu item
-with `AXPress`. It does not retry the menu action or press a disabled item. The
+waits up to two seconds for positive expanded/selected state and the exact enabled
+`Save Live Set As...` menu item with `AXPress`. AX children are not proof that the
+menu is open because collapsed menus may retain a static subtree. If expansion
+attributes are unsupported, it makes at most one best-effort show attempt, then
+fails closed unless expansion is positively observed; it never presses Save As
+based on subtree presence alone. The
 modal guard includes AXModal windows and the observed `open-panel`/`Open` window
 form; it does not close modeless Settings windows or reject windows only because
 of an AXDialog subrole. A stopped menu-phase receipt may include bounded,
