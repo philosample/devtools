@@ -304,8 +304,9 @@ func exactTempoMidiTab(_ settings: AXUIElement) throws -> AXUIElement {
     try require(matches.count == 1, "expected exactly one Tempo & MIDI AXRadioButton with identifier midiTabButton")
     try require(try enabled(matches[0]), "Tempo & MIDI tab radio button is disabled")
     try require(try actionNames(matches[0]).contains(kAXPressAction as String), "Tempo & MIDI tab radio button does not support AXPress")
+    let selectedValue = try radioValue(matches[0])
+    tabSelected = selectedValue
     tabSelectedStateRead = true
-    tabSelected = try radioValue(matches[0])
     return matches[0]
 }
 
@@ -420,6 +421,14 @@ func run() throws -> [String: Any] {
 }
 
 func receipt(status: String, readOnly: Bool, windowNumber: Int?, error: String?) -> [String: Any] {
+    let selectionEvidence: String
+    if !tabSelectedStateRead {
+        selectionEvidence = "Tempo & MIDI radio-button selection state was not read"
+    } else if tabSelected == true {
+        selectionEvidence = "Tempo & MIDI radio-button AXValue was read back selected"
+    } else {
+        selectionEvidence = "Tempo & MIDI radio-button AXValue was read back not selected"
+    }
     let target: [String: Any] = [
         "pid": Int(options.pid),
         "bundle_identifier": options.bundleID,
@@ -450,7 +459,7 @@ func receipt(status: String, readOnly: Bool, windowNumber: Int?, error: String?)
         "midi_preference_values_changed": false,
         "manual_inspection_required": !readOnly,
         "error": error as Any? ?? NSNull(),
-        "evidence_limit": "Tempo & MIDI radio-button AXValue was read back selected; MIDI preference checkbox values were neither read nor changed",
+        "evidence_limit": "\(selectionEvidence); MIDI preference checkbox values were neither read nor changed",
     ]
 }
 

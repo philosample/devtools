@@ -97,8 +97,18 @@ def _unknown_receipt(
         "midi_preference_values_changed": False,
         "manual_inspection_required": execute,
         "error": error,
-        "evidence_limit": "Tempo & MIDI radio-button AXValue was read back selected; MIDI preference checkbox values were neither read nor changed",
+        "evidence_limit": _selection_evidence_limit(False, None),
     }
+
+
+def _selection_evidence_limit(state_read: bool, selected: bool | None) -> str:
+    if not state_read:
+        selection = "Tempo & MIDI radio-button selection state was not read"
+    elif selected:
+        selection = "Tempo & MIDI radio-button AXValue was read back selected"
+    else:
+        selection = "Tempo & MIDI radio-button AXValue was read back not selected"
+    return f"{selection}; MIDI preference checkbox values were neither read nor changed"
 
 
 def _valid_report(
@@ -195,7 +205,10 @@ def _valid_report(
         is not any(action != "not_attempted" for action in actions.values())
         or not isinstance(value.get("phase"), str)
         or not value["phase"]
-        or not isinstance(value.get("evidence_limit"), str)
+        or value.get("evidence_limit")
+        != _selection_evidence_limit(
+            settings["tab_selected_state_read"], settings["tab_selected"]
+        )
     ):
         return False
     if value.get("error") is not None and not isinstance(value.get("error"), str):

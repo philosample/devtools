@@ -36,6 +36,16 @@ def report(*, execute=False, status=None):
             settings_menu="AXPress_succeeded",
             tempo_midi_tab="AXPress_succeeded",
         )
+    state_read = execute
+    selected = True if execute else None
+    if not state_read:
+        selection_evidence = "Tempo & MIDI radio-button selection state was not read"
+    elif selected:
+        selection_evidence = "Tempo & MIDI radio-button AXValue was read back selected"
+    else:
+        selection_evidence = (
+            "Tempo & MIDI radio-button AXValue was read back not selected"
+        )
     return {
         "format": FORMAT,
         "status": status or ("selected" if execute else "ready"),
@@ -57,15 +67,15 @@ def report(*, execute=False, status=None):
             "window_observed": execute,
             "tab_identifier": "midiTabButton",
             "tab_control_observed": execute,
-            "tab_selected_state_read": execute,
-            "tab_selected": True if execute else None,
+            "tab_selected_state_read": state_read,
+            "tab_selected": selected,
         },
         "actions": actions,
         "midi_preference_values_read": False,
         "midi_preference_values_changed": False,
         "manual_inspection_required": execute,
         "error": None,
-        "evidence_limit": "Tempo & MIDI radio-button AXValue was read back selected; MIDI preference checkbox values were neither read nor changed",
+        "evidence_limit": f"{selection_evidence}; MIDI preference checkbox values were neither read nor changed",
     }
 
 
@@ -172,6 +182,35 @@ class LiveSettingsTabPolicyTests(unittest.TestCase):
         self.assertFalse(result["manual_inspection_required"])
         self.assertIsNone(result["target"]["process_generation"])
 
+    def test_receipt_rejects_selected_claim_when_state_is_unobserved_or_false(self):
+        cases = (
+            (False, None, "Tempo & MIDI radio-button AXValue was read back selected"),
+            (True, False, "Tempo & MIDI radio-button AXValue was read back selected"),
+        )
+        for state_read, selected, inaccurate_claim in cases:
+            with self.subTest(state_read=state_read, selected=selected):
+                stopped = report(execute=True, status="stopped")
+                stopped["settings"]["tab_selected_state_read"] = state_read
+                stopped["settings"]["tab_selected"] = selected
+                stopped["error"] = "helper stopped after a partial observation"
+                stopped["evidence_limit"] = (
+                    inaccurate_claim
+                    + "; MIDI preference checkbox values were neither read nor changed"
+                )
+                result = self.call_native(execute=True, native_report=stopped)
+                self.assertEqual(result["phase"], "native-helper-invalid-receipt")
+                self.assertIn("selection state was not read", result["evidence_limit"])
+                self.assertTrue(result["manual_inspection_required"])
+
+                if state_read and selected is False:
+                    stopped["evidence_limit"] = (
+                        "Tempo & MIDI radio-button AXValue was read back not selected"
+                        "; MIDI preference checkbox values were neither read nor changed"
+                    )
+                    result = self.call_native(execute=True, native_report=stopped)
+                    self.assertEqual(result["status"], "stopped")
+                    self.assertIn("not selected", result["evidence_limit"])
+
     def test_timeout_is_outcome_unknown_and_never_retried(self):
         with (
             patch(
@@ -192,6 +231,7 @@ class LiveSettingsTabPolicyTests(unittest.TestCase):
             )
         self.assertEqual(result["phase"], "native-helper-timeout")
         self.assertTrue(result["manual_inspection_required"])
+        self.assertIn("selection state was not read", result["evidence_limit"])
         self.assertEqual(set(result["actions"].values()), {"outcome_unknown"})
         self.assertEqual(native.call_count, 1)
 
@@ -235,6 +275,17 @@ class LiveSettingsTabPolicyTests(unittest.TestCase):
         self.assertIn('let settingsMenuTitle = "Settings..."', text)
         self.assertIn('let tempoMidiTabIdentifier = "midiTabButton"', text)
         self.assertIn("kAXRadioButtonRole", text)
+        self.assertIn("Tempo & MIDI radio-button selection state was not read", text)
+        self.assertIn(
+            "Tempo & MIDI radio-button AXValue was read back not selected", text
+        )
+        self.assertLess(
+            text.index("let selectedValue = try radioValue(matches[0])"),
+            text.index(
+                "tabSelectedStateRead = true",
+                text.index("let selectedValue = try radioValue(matches[0])"),
+            ),
+        )
         self.assertIn(
             "currentDesktopWindow(pid: options.pid, expectedTitle: options.windowTitle)",
             text,
