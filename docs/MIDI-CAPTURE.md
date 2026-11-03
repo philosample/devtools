@@ -29,6 +29,25 @@ Example expectations:
 
 Rules match exact subsets; each needs at least one selector and count bound. `report` exits 1 on failed assertions. It reports note balance within the captured window, CC ranges, invalids and per-origin clock intervals. Unmatched notes can be explained by capture boundaries; they do not by themselves prove stuck notes. Clock summaries use only known reference-second timestamps; historical host ticks are preserved without guessing units. Clock intervals describe archived MIDI timestamps, not physical delivery latency or guaranteed arrival order. UI capture windows have start/stop uncertainty and input-disconnect overhead; they are not sample-accurate timing gates. No loss detector beyond the buffer warning is claimed.
 
+Every capture run also exposes `capture-ready.json` in that new run directory.
+MIDI Monitor writes this JSON marker exclusively and atomically immediately after
+the selected document's Clear action and the capture start boundary. It identifies
+the run UUID, owning capture CLI process PID, capture filename and document URL,
+template hash, and configured source IDs. The CLI validates the marker against
+its own run identity, confirms the osascript child is still alive, and checks the
+saved preflight document's hash and source IDs before recording a `ready` object
+in `receipt.json`, including the verified osascript PID. The running receipt
+contains the same UUID, CLI PID, and fixed marker filename so an external CLI
+orchestrator can match the two files.
+
+An orchestrator should watch for `capture-ready.json`, match its UUID and PID to
+the running `receipt.json`, and confirm that the exact capture CLI child it
+started is still alive before releasing stimuli. The marker alone is not a
+readiness claim after the CLI exits. A malformed, stale, mismatched or partial
+marker fails closed and remains in the run directory for diagnosis. This
+handshake establishes the post-Clear capture boundary only; it does not prove
+that a MIDI source is delivering events or that a downstream app receives them.
+
 ## Studio Capture IAC setup
 
 Create a dedicated port in Audio MIDI Setup → MIDI Studio → IAC Driver. The studio machine now has `Studio Capture`, with the IAC driver online. Bringing IAC online also exposes pre-existing ports; no old ports were removed. CoreMIDI inventory verified the new source.

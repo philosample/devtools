@@ -6,6 +6,8 @@ on run argv
     set secondsToCapture to (item 4 of argv) as real
     set maxEvents to item 5 of argv
     set expectedDocumentURL to item 6 of argv
+    set readyMarkerPath to item 7 of argv
+    set readyMarkerPayload to item 8 of argv
     tell application "System Events"
         if exists process "MIDI Monitor" then
             tell process "MIDI Monitor"
@@ -46,6 +48,9 @@ on run argv
             do shell script "/bin/cp -n " & quoted form of capturePath & " " & quoted form of preflightPath
             click button "Clear" of eventContainer
             set startedAt to (current date)
+            -- Publish atomically and exclusively after Clear, at the capture start boundary.
+            set readyMarkerTempPath to readyMarkerPath & ".tmp"
+            do shell script "umask 077; /usr/bin/printf %s " & quoted form of readyMarkerPayload & " > " & quoted form of readyMarkerTempPath & " && /bin/ln " & quoted form of readyMarkerTempPath & " " & quoted form of readyMarkerPath & " && /bin/rm " & quoted form of readyMarkerTempPath
             delay secondsToCapture
             if name of front window is not captureTitle then error "Focus changed during capture; refusing further UI actions"
             if value of attribute "AXDocument" of w is not expectedDocumentURL then error "Capture document path changed"
