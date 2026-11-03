@@ -33,7 +33,43 @@ class HarnessTests(unittest.TestCase):
         self.pins = Path(self.temp.name) / "pins.json"
         self.pins.write_text(json.dumps(PINS))
 
-    def launch(self, mode="complete", timeout=1000, reconciliation=None, commands=None):
+    def test_coupled_package_component_count_preserves_exact_pins(self):
+        pins = {
+            "artifact_sha256": "a" * 64,
+            "components": {f"component_{i:02d}": "b" * 64 for i in range(37)},
+        }
+        _, descriptor = self.launch(pins=pins)
+        self.assertEqual(json.loads(descriptor.read_text())["pins"], pins)
+        self.assertEqual(
+            client.submit(descriptor, pins, "arm", {"value": 1})["status"], "completed"
+        )
+
+        too_many = {
+            "artifact_sha256": "a" * 64,
+            "components": {f"component_{i:02d}": "b" * 64 for i in range(65)},
+        }
+        with self.assertRaisesRegex(RuntimeError, "invalid pins"):
+            self.launch(pins=too_many)
+
+    def test_component_pin_limit_is_inclusive(self):
+        pins = {
+            "artifact_sha256": "a" * 64,
+            "components": {f"component_{i:02d}": "b" * 64 for i in range(64)},
+        }
+        _, descriptor = self.launch(pins=pins)
+        self.assertEqual(json.loads(descriptor.read_text())["pins"], pins)
+        self.assertEqual(
+            client.submit(descriptor, pins, "arm", {"value": 1})["status"], "completed"
+        )
+
+    def launch(
+        self,
+        mode="complete",
+        timeout=1000,
+        reconciliation=None,
+        commands=None,
+        pins=None,
+    ):
         script = """
 const {createHarnessMailbox}=require(process.argv[1]);
 const fs=require('fs');
@@ -90,7 +126,7 @@ process.on('SIGTERM',()=>process.exit(0));
                 script,
                 str(HELPER),
                 str(self.root),
-                json.dumps(PINS),
+                json.dumps(PINS if pins is None else pins),
                 str(self.count),
                 mode,
                 str(timeout),

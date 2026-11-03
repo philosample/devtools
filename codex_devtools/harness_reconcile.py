@@ -14,7 +14,7 @@ from pathlib import Path
 from . import harness_control as client
 from .runtime import discover_node
 
-HELPER_SHA256 = "0b7e943d89892dd3f1184a28c31316d901f850bac60973bbd3958516ff29b668"
+HELPER_SHA256 = "f4ea00b6590bbc9bc0c864b84cb528c1abcb9e2f165ef5a9a10acb1623e32280"
 HERE = Path(__file__).parent
 
 

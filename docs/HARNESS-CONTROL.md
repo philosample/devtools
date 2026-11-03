@@ -121,8 +121,10 @@ and retained ACK. `intent.json` records exact identity/pins, source hashes, Node
 runtime, operator UID, reason and witness. `before/` contains exact old bytes;
 `expected-pins.json` preserves the supplied pin bytes. It then rechecks identity,
 file hashes and inventory in Python and again in actual Node immediately before
-mutation. The reviewed `harness_mailbox.cjs` remains byte-for-byte unchanged,
-SHA-256 `baa38104661c34fce347a7ace9c6bcf710cfb0ea428606971f377155e0fe7978`.
+mutation. The reviewed `harness_mailbox.cjs` retains admission-bound
+`assertActive()` and accepts up to 64 component pins, including the 37 pins in
+the Coupled254 capture package. The helper is pinned at SHA-256
+`f4ea00b6590bbc9bc0c864b84cb528c1abcb9e2f165ef5a9a10acb1623e32280`.
 
 The runner uses that helper's existing `reconciliation: 'target-unloaded'` option
 to make one inert marker registration with the **old pins** and a single empty
