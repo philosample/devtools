@@ -37,6 +37,17 @@ The pins are mandatory caller-supplied provenance assertions. The integrating ha
 
 `handle` receives a command, a copied argument object, explicit completion callbacks and `{request, sequence}`. Returning from `handle`, returning a Promise, or calling `maxApi.outlet` establishes no domain completion. A driver must report the matching command's terminal state before calling `completed()` or `failed()`. An exception or Promise rejection fences the instance because effects are unknown. `failed()` asserts a known terminal domain failure, so it releases the actor. Completion callbacks bind to the exact admitted object plus request and sequence, and return false if no longer current. Reusing a request UUID while its ACK remains retained is rejected. After ACK pruning, a reused UUID with a new valid sequence cannot make an old callback complete the new admission. A domain with unresolved effects must let the timeout fence the instance, never report a known terminal failure merely to clear a lock.
 
+The same controls object exposes `assertActive()`. Call it immediately before each
+new side effect, including after any awaited validation or journal write. It
+throws when the captured admission is no longer pending, its receiver root owner
+changed, its command deadline or monotonic timeout elapsed, or the receiver lease
+or wall/monotonic clock checks fail. Timeout checks run at the call itself, so a
+blocked event loop cannot authorize work merely because the polling timer has
+not fired. The callback is also revoked by either terminal completion and cannot
+authorize a later admission, even if a request UUID is reused. A check does not
+cancel a message already sent to another process or prove its effects absent;
+retain the domain's independent safety obligations and unknown-effect evidence.
+
 Capabilities allow at most 16 named commands and 32 required scalar arguments each. Rules are bounded finite numeric/integer ranges, boolean, or a finite string enum (32 entries, 128 characters each). No free-form scripts, expressions, paths, device ports or callbacks are accepted from command data. There are no optional/extra arguments. Domain capabilities must remain restricted to the test harness; do not expose general message forwarding or host control.
 
 ## Select and submit from Python
