@@ -38,7 +38,7 @@ class HarnessTests(unittest.TestCase):
 const {createHarnessMailbox}=require(process.argv[1]);
 const fs=require('fs');
 const mode=process.argv[5];
-let savedCompletion=null, dispatchCount=0;
+let savedCompletion=null, savedGuard=null, dispatchCount=0;
 const h=createHarnessMailbox({root:process.argv[2],pins:JSON.parse(process.argv[3]),
   timeoutMs:Number(process.argv[6]),leaseMs:1000,
   reconciliation:process.argv[7] === 'none' ? undefined : process.argv[7],
@@ -46,6 +46,21 @@ const h=createHarnessMailbox({root:process.argv[2],pins:JSON.parse(process.argv[
   handle:(command,args,done)=>{
     fs.appendFileSync(process.argv[4],command+'\\n');
     dispatchCount++;
+    const checked=(label,guard=done.assertActive)=>{
+      let allowed=false;
+      try {guard(); allowed=true; fs.appendFileSync(process.argv[4]+'.effect',label+'\\n');} catch (_) {}
+      fs.appendFileSync(process.argv[4]+'.guard',JSON.stringify({label,allowed})+'\\n');
+    };
+    if(mode==='guard-complete') {checked('active'); done.completed(); checked('terminal');}
+    if(mode==='guard-fail') {done.failed(); checked('terminal');}
+    if(mode==='guard-async') setTimeout(()=>checked('late'),250);
+    if(mode==='guard-block') {const end=Date.now()+250; while(Date.now()<end) {} checked('late'); done.completed();}
+    if(mode==='guard-owner') {fs.writeFileSync(process.argv[2]+'/owner/identity.json','{}'); checked('owner-lost');}
+    if(mode==='guard-clock') {const original=Date.now; Date.now=()=>original()+10000; checked('clock-changed');}
+    if(mode==='guard-reuse') {
+      if(savedGuard) checked('previous',savedGuard);
+      checked('current'); savedGuard=done.assertActive; done.completed();
+    }
     if(mode==='reuse') {
       if(dispatchCount===1) savedCompletion=done.completed;
       if(dispatchCount<=33) done.completed();
@@ -198,6 +213,81 @@ process.on('SIGTERM',()=>process.exit(0));
         self.assertTrue((descriptor.parent / "actor").exists())
         self.assertEqual(self.cli(descriptor).returncode, 2)
         self.assertEqual(self.calls(), ["arm"])
+
+    def guard_results(self, count):
+        path = Path(str(self.count) + ".guard")
+        until = time.monotonic() + 2
+        while time.monotonic() < until:
+            rows = (
+                [json.loads(row) for row in path.read_text().splitlines()]
+                if path.exists()
+                else []
+            )
+            if len(rows) >= count:
+                return rows
+            time.sleep(0.005)
+        self.fail("actual delayed admission check did not run")
+
+    def test_live_guard_allows_current_and_revokes_on_terminal_completion(self):
+        _, descriptor = self.launch("guard-complete")
+        self.assertEqual(self.cli(descriptor).returncode, 0)
+        self.assertEqual(
+            self.guard_results(2),
+            [
+                {"label": "active", "allowed": True},
+                {"label": "terminal", "allowed": False},
+            ],
+        )
+        self.assertEqual(Path(str(self.count) + ".effect").read_text(), "active\n")
+
+    def test_live_guard_revokes_failed_admission(self):
+        _, descriptor = self.launch("guard-fail")
+        self.assertEqual(json.loads(self.cli(descriptor).stdout)["status"], "failed")
+        self.assertFalse(self.guard_results(1)[0]["allowed"])
+        self.assertFalse(Path(str(self.count) + ".effect").exists())
+
+    def test_live_guard_blocks_async_and_synchronous_expired_continuations(self):
+        for mode in ("guard-async", "guard-block"):
+            with self.subTest(mode=mode):
+                # Distinct private receiver roots keep fenced actors intact.
+                self.root = Path(self.temp.name).resolve() / mode
+                self.count = Path(self.temp.name) / (mode + "-count")
+                _, descriptor = self.launch(mode, timeout=150)
+                result = self.cli(descriptor)
+                self.assertEqual(json.loads(result.stdout)["status"], "unknown_effect")
+                self.assertFalse(self.guard_results(1)[0]["allowed"])
+                self.assertFalse(Path(str(self.count) + ".effect").exists())
+                self.assertEqual(client.status(descriptor)["state"], "fenced")
+                self.assertTrue((descriptor.parent / "actor").exists())
+
+    def test_live_guard_rejects_owner_loss_and_clock_jump(self):
+        for mode in ("guard-owner", "guard-clock"):
+            with self.subTest(mode=mode):
+                self.root = Path(self.temp.name).resolve() / mode
+                self.count = Path(self.temp.name) / (mode + "-count")
+                _, descriptor = self.launch(mode)
+                result = self.cli(descriptor)
+                self.assertEqual(json.loads(result.stdout)["status"], "unknown_effect")
+                self.assertFalse(self.guard_results(1)[0]["allowed"])
+                self.assertFalse(Path(str(self.count) + ".effect").exists())
+
+    def test_live_guard_from_prior_admission_cannot_authorize_current_action(self):
+        _, descriptor = self.launch("guard-reuse")
+        self.assertEqual(self.cli(descriptor).returncode, 0)
+        self.await_ready(descriptor)
+        self.assertEqual(self.cli(descriptor).returncode, 0)
+        self.assertEqual(
+            self.guard_results(3),
+            [
+                {"label": "current", "allowed": True},
+                {"label": "previous", "allowed": False},
+                {"label": "current", "allowed": True},
+            ],
+        )
+        self.assertEqual(
+            Path(str(self.count) + ".effect").read_text().splitlines(),
+            ["current", "current"],
+        )
 
     def test_monotonic_lease_gap_fences_even_before_handler_timeout(self):
         _, descriptor = self.launch("gap", timeout=5000)

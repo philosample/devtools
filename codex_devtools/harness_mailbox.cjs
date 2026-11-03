@@ -82,14 +82,20 @@ function createHarnessMailbox(options) {
     acknowledgements.push(command.request);
     while (acknowledgements.length > 32) fs.rmSync(path.join(dir, 'ack.'+acknowledgements.shift()+'.json'), {force:true});
   }
-  function finish(command, status, detail) {
+  function admissionActive(command) {
     // Bind to this exact admission, not a UUID that may be reused after pruning.
-    if (pending !== command || pending.request !== command.request || pending.sequence !== command.sequence || state !== 'pending') return false;
-    const elapsed = Number(process.hrtime.bigint()-pending.started)/1e6;
-    const sincePoll = Number(process.hrtime.bigint()-previousMono)/1e6;
-    if (elapsed >= timeoutMs || sincePoll > leaseMs || Math.abs(Date.now()-previousWall-sincePoll) > 250) {
-      fence('completion outside time bounds; effects unknown'); return false;
+    if (closed || pending !== command || pending.request !== command.request || pending.sequence !== command.sequence || state !== 'pending') return false;
+    if (!ownsRoot()) { fence('root ownership changed; effects unknown'); return false; }
+    const now = process.hrtime.bigint(), wall = Date.now();
+    const elapsed = Number(now-command.started)/1e6;
+    const sincePoll = Number(now-previousMono)/1e6;
+    if (elapsed < 0 || elapsed >= timeoutMs || sincePoll < 0 || sincePoll > leaseMs || wall >= command.deadline_ms || Math.abs(wall-previousWall-sincePoll) > 250) {
+      fence('admission outside time bounds; effects unknown'); return false;
     }
+    return true;
+  }
+  function finish(command, status, detail) {
+    if (!admissionActive(command)) return false;
     ack(command, status, detail); // terminal ACK before release; callback never releases client locks.
     pending = null; state = 'ready';
     fs.rmSync(path.join(dir, 'command.json'), {force:true});
@@ -125,6 +131,7 @@ function createHarnessMailbox(options) {
     const admission = pending;
     // Completion is explicit. Returning from handle/outlet means only enqueued.
     const controls = Object.freeze({
+      assertActive: () => { if (!admissionActive(admission)) throw Error('harness admission inactive; no new action permitted'); },
       completed: () => finish(admission,'completed','domain reported completion'),
       failed: () => finish(admission,'failed','domain reported failure')
     });
