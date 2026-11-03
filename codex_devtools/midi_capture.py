@@ -336,7 +336,10 @@ def capture(
             receipt["configured_source_identity"],
             timeout=max(0, capture_deadline - time.monotonic()),
         )
-        ready_receipt["automation_process_pid"] = process.pid
+        if process.poll() is not None:
+            raise ValueError(
+                "capture process exited before validated readiness was published"
+            )
         receipt["ready"] = ready_receipt
         save()
         try:

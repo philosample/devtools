@@ -31,22 +31,27 @@ Rules match exact subsets; each needs at least one selector and count bound. `re
 
 Every capture run also exposes `capture-ready.json` in that new run directory.
 MIDI Monitor writes this JSON marker exclusively and atomically immediately after
-the selected document's Clear action and the capture start boundary. It identifies
-the run UUID, owning capture CLI process PID, capture filename and document URL,
-template hash, and configured source IDs. The CLI validates the marker against
-its own run identity, confirms the osascript child is still alive, and checks the
-saved preflight document's hash and source IDs before recording a `ready` object
-in `receipt.json`, including the verified osascript PID. The running receipt
-contains the same UUID, CLI PID, and fixed marker filename so an external CLI
-orchestrator can match the two files.
+the selected document's Clear action and capture start boundary. It identifies
+the run UUID, owning CLI PID, capture filename and document URL, template hash,
+and configured source IDs. This raw marker is a boundary observation only; it
+is never permission to release stimuli because it precedes Python's validation
+of the saved preflight document.
 
-An orchestrator should watch for `capture-ready.json`, match its UUID and PID to
-the running `receipt.json`, and confirm that the exact capture CLI child it
-started is still alive before releasing stimuli. The marker alone is not a
-readiness claim after the CLI exits. A malformed, stale, mismatched or partial
-marker fails closed and remains in the run directory for diagnosis. This
-handshake establishes the post-Clear capture boundary only; it does not prove
-that a MIDI source is delivering events or that a downstream app receives them.
+An external orchestrator must wait until `receipt.json` contains a valid `ready`
+object, then admit stimuli only while its exact capture child is still live. It
+must require `receipt.status == "running"`, `ready.schema ==
+"devtools-midi-capture-ready-v1"`, and match `ready.run_id` and
+`ready.capture_process_pid` to the marker and top-level receipt. It must also
+match `ready.automation_process_pid` to the exact `osascript` child PID it
+started and confirm that child has not exited. The `ready.source_identity` must
+match `receipt.configured_source_identity` and the marker's configured source
+IDs; `ready.preflight_sha256` must match the current `preflight.mmon` bytes, and
+the marker's template hash must match `receipt.template_sha256`. If the receipt
+is incomplete or any comparison fails, keep waiting or fail closed. A malformed,
+stale, mismatched or partial raw marker never authorizes a trigger. The handshake
+establishes the post-Clear capture boundary and validated source configuration;
+it does not prove that a MIDI source is delivering events or that a downstream
+app receives them.
 
 ## Studio Capture IAC setup
 
