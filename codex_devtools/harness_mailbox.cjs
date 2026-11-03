@@ -6,6 +6,7 @@ const crypto = require('crypto');
 const os = require('os');
 const FORMAT = 'codex-harness-mailbox-v1';
 const uuid = () => crypto.randomUUID();
+const UUID_V4 = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const exact = (o, keys) => o && typeof o === 'object' && !Array.isArray(o) && Object.keys(o).sort().join() === keys.slice().sort().join();
 const same = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 function canonical(v) { return v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, canonical(v[k])])) : v; }
@@ -26,10 +27,10 @@ function schemaValid(s) {
   return Object.entries(s).every(([key, r]) => /^[a-zA-Z][a-zA-Z0-9_]{0,31}$/.test(key) && (
     (exact(r, ['type','min','max']) && ['number','integer'].includes(r.type) && Number.isFinite(r.min) && Number.isFinite(r.max) && r.min <= r.max) ||
     (exact(r, ['enum']) && Array.isArray(r.enum) && r.enum.length > 0 && r.enum.length <= 32 && r.enum.every(x => typeof x === 'string' && x.length <= 128)) ||
-    (exact(r, ['type']) && r.type === 'boolean')));
+    (exact(r, ['type']) && ['boolean','uuid'].includes(r.type))));
 }
 function argsValid(args, schema) {
-  return exact(args, Object.keys(schema)) && Object.entries(schema).every(([k,r]) => r.enum ? r.enum.includes(args[k]) : r.type === 'boolean' ? typeof args[k] === 'boolean' : typeof args[k] === 'number' && Number.isFinite(args[k]) && args[k] >= r.min && args[k] <= r.max && (r.type !== 'integer' || Number.isInteger(args[k])));
+  return exact(args, Object.keys(schema)) && Object.entries(schema).every(([k,r]) => r.enum ? r.enum.includes(args[k]) : r.type === 'boolean' ? typeof args[k] === 'boolean' : r.type === 'uuid' ? typeof args[k] === 'string' && args[k].length === 36 && UUID_V4.test(args[k]) : typeof args[k] === 'number' && Number.isFinite(args[k]) && args[k] >= r.min && args[k] <= r.max && (r.type !== 'integer' || Number.isInteger(args[k])));
 }
 function privateRoot(root) {
   if (!path.isAbsolute(root)) throw Error('root must be absolute');

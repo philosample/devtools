@@ -12,6 +12,92 @@ import uuid
 from pathlib import Path
 
 FORMAT = "codex-harness-mailbox-v1"
+_UUID_V4 = re.compile(
+    r"[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}"
+)
+
+
+def _finite_number(value: object) -> bool:
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _valid_commands(commands: object) -> bool:
+    if not isinstance(commands, dict) or not 1 <= len(commands) <= 16:
+        return False
+    for name, schema in commands.items():
+        if (
+            not isinstance(name, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name) is None
+            or not isinstance(schema, dict)
+            or len(schema) > 32
+        ):
+            return False
+        for key, rule in schema.items():
+            if (
+                not isinstance(key, str)
+                or re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]{0,31}", key) is None
+                or not isinstance(rule, dict)
+            ):
+                return False
+            if set(rule) == {"type", "min", "max"}:
+                if (
+                    rule["type"] not in ("number", "integer")
+                    or type(rule["type"]) is not str
+                    or not _finite_number(rule["min"])
+                    or not _finite_number(rule["max"])
+                    or rule["min"] > rule["max"]
+                ):
+                    return False
+            elif set(rule) == {"enum"}:
+                values = rule["enum"]
+                if (
+                    not isinstance(values, list)
+                    or not 1 <= len(values) <= 32
+                    or any(
+                        not isinstance(value, str)
+                        or len(value.encode("utf-16-le", "surrogatepass")) // 2 > 128
+                        for value in values
+                    )
+                ):
+                    return False
+            elif set(rule) == {"type"}:
+                if rule["type"] not in ("boolean", "uuid"):
+                    return False
+            else:
+                return False
+    return True
+
+
+def _valid_arguments(arguments: object, schema: dict) -> bool:
+    if not isinstance(arguments, dict) or set(arguments) != set(schema):
+        return False
+    for key, rule in schema.items():
+        value = arguments[key]
+        if "enum" in rule:
+            if not isinstance(value, str) or value not in rule["enum"]:
+                return False
+        elif rule.get("type") == "boolean":
+            if type(value) is not bool:
+                return False
+        elif rule.get("type") == "uuid":
+            if not isinstance(value, str) or _UUID_V4.fullmatch(value) is None:
+                return False
+        elif (
+            not _finite_number(value)
+            or not rule["min"] <= value <= rule["max"]
+            or (
+                rule["type"] == "integer"
+                and type(value) is float
+                and not value.is_integer()
+            )
+        ):
+            return False
+    return True
 
 
 def _read(path: Path) -> dict:
@@ -67,8 +153,7 @@ def status(descriptor: Path) -> dict:
             and math.isfinite(value["expires_at_ms"])
             and type(value["timeout_ms"]) is int
             and 100 <= value["timeout_ms"] <= 60000
-            and isinstance(value["commands"], dict)
-            and 1 <= len(value["commands"]) <= 16
+            and _valid_commands(value["commands"])
             and isinstance(value["pins"], dict)
             and set(value["pins"]) == {"artifact_sha256", "components"}
             and re.fullmatch(r"[a-f0-9]{64}", value["pins"]["artifact_sha256"])
@@ -130,7 +215,8 @@ def submit(
         raise ValueError("expected artifact/component pins mismatch")
     if command not in initial["commands"]:
         raise ValueError("command not advertised")
-    # Schema is independently enforced by the receiving helper.
+    if not _valid_arguments(arguments, initial["commands"][command]):
+        raise ValueError("arguments do not match advertised schema")
     if len(json.dumps(arguments, allow_nan=False)) > 16384:
         raise ValueError("arguments exceed transport bound")
     directory = descriptor.absolute().parent

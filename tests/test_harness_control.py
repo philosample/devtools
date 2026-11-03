@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 
 from codex_devtools import harness_control as client
@@ -437,10 +438,8 @@ process.on('SIGTERM',()=>process.exit(0));
         self.assertEqual(self.calls(), [])
         self.assertFalse((descriptor.parent / "actor").exists())
 
-    def envelope(self, descriptor):
+    def envelope(self, descriptor, *, command="arm", args=None):
         d = client.status(descriptor)
-        import uuid
-
         request = str(uuid.uuid4())
         actor = descriptor.parent / "actor"
         actor.mkdir(mode=0o700)
@@ -448,14 +447,17 @@ process.on('SIGTERM',()=>process.exit(0));
         return {k: d[k] for k in ("format", "instance", "nonce", "pins")} | {
             "request": request,
             "sequence": d["sequence"] + 1,
-            "command": "arm",
-            "args": {"value": 2},
+            "command": command,
+            "args": {"value": 2} if args is None else args,
             "deadline_ms": time.time() * 1000 + d["timeout_ms"],
         }
 
-    def bad_envelope(self, change):
-        _, descriptor = self.launch()
-        envelope = self.envelope(descriptor)
+    def bad_envelope(self, change, *, commands=None, command="arm", args=None):
+        process, descriptor = self.launch(
+            commands=commands,
+            reconciliation="target-unloaded" if self.root.exists() else None,
+        )
+        envelope = self.envelope(descriptor, command=command, args=args)
         envelope.update(change)
         client._atomic(descriptor.parent / "command.json", envelope)
         until = time.monotonic() + 2
@@ -465,6 +467,7 @@ process.on('SIGTERM',()=>process.exit(0));
             time.sleep(0.02)
         self.assertEqual(client.status(descriptor)["state"], "fenced")
         self.assertEqual(self.calls(), [])
+        self.stop(process)
 
     def test_bad_nonce(self):
         self.bad_envelope({"nonce": "wrong"})
@@ -489,6 +492,112 @@ process.on('SIGTERM',()=>process.exit(0));
 
     def test_expired_command(self):
         self.bad_envelope({"deadline_ms": 1})
+
+    def test_uuid_argument_dispatch_and_python_producer_parity(self):
+        commands = {
+            "arm": {
+                "approval_id": {"type": "uuid"},
+                "enabled": {"type": "boolean"},
+                "mode": {"enum": ["approve", "deny"]},
+                "value": {"type": "number", "min": 0.5, "max": 2.5},
+            }
+        }
+        _, descriptor = self.launch(commands=commands)
+        valid_uuid = str(uuid.uuid4())
+        valid_arguments = {
+            "approval_id": valid_uuid,
+            "enabled": True,
+            "mode": "approve",
+            "value": 1.5,
+        }
+        result = client.submit(descriptor, PINS, "arm", valid_arguments, wait=2)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(self.calls(), ["arm"])
+        self.await_ready(descriptor)
+
+        invalid_values = (
+            "not-a-uuid",
+            "550e8400-e29b-41d4-a716-446655440000\n",
+            "550E8400-E29B-41D4-A716-446655440000",
+            "123e4567-e89b-12d3-a456-426614174000",  # UUID v1
+            "550e8400-e29b-41d4-0716-446655440000",  # non-RFC variant
+            123,
+            None,
+        )
+        for value in invalid_values:
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    ValueError, "arguments do not match advertised schema"
+                ),
+            ):
+                client.submit(
+                    descriptor,
+                    PINS,
+                    "arm",
+                    {**valid_arguments, "approval_id": value},
+                )
+        invalid_arguments = (
+            {},
+            {**valid_arguments, "extra": True},
+            {**valid_arguments, "enabled": 1},
+            {**valid_arguments, "mode": "other"},
+            {**valid_arguments, "value": 3.0},
+        )
+        for arguments in invalid_arguments:
+            with (
+                self.subTest(arguments=arguments),
+                self.assertRaisesRegex(
+                    ValueError, "arguments do not match advertised schema"
+                ),
+            ):
+                client.submit(descriptor, PINS, "arm", arguments)
+        self.assertEqual(self.calls(), ["arm"])
+        self.assertFalse((descriptor.parent / "actor").exists())
+        self.assertFalse((descriptor.parent / "command.json").exists())
+
+    def test_node_receiver_fences_malformed_uuid_envelopes(self):
+        commands = {
+            "approve": {
+                "approval_id": {"type": "uuid"},
+                "enabled": {"type": "boolean"},
+                "mode": {"enum": ["approve", "deny"]},
+                "value": {"type": "number", "min": 0.5, "max": 2.5},
+            }
+        }
+        receiver_args = {
+            "approval_id": str(uuid.uuid4()),
+            "enabled": True,
+            "mode": "approve",
+            "value": 1.5,
+        }
+        invalid_args = (
+            {},
+            {**receiver_args, "approval_id": "not-a-uuid"},
+            {
+                **receiver_args,
+                "approval_id": "550e8400-e29b-41d4-a716-446655440000\n",
+            },
+            {**receiver_args, "approval_id": "550E8400-E29B-41D4-A716-446655440000"},
+            {**receiver_args, "approval_id": "123e4567-e89b-12d3-a456-426614174000"},
+            {**receiver_args, "approval_id": "550e8400-e29b-41d4-0716-446655440000"},
+            {**receiver_args, "approval_id": 123},
+            {**receiver_args, "extra": True},
+        )
+        for arguments in invalid_args:
+            with self.subTest(arguments=arguments):
+                self.bad_envelope(
+                    {"args": arguments},
+                    commands=commands,
+                    command="approve",
+                    args=receiver_args,
+                )
+
+    def test_unknown_generic_string_capability_stays_rejected(self):
+        commands = {"approve": {"approval_id": {"type": "string"}}}
+        with self.assertRaisesRegex(RuntimeError, "invalid capabilities"):
+            self.launch(commands=commands)
+        self.assertFalse(self.root.exists())
 
     def test_stale_process_has_no_liveness_claim_or_automatic_restart(self):
         process, descriptor = self.launch()
