@@ -37,8 +37,9 @@ hash collisions stop use, rather than authorizing name-only matching.
 ## Explicit actions
 
 Keep the original Settings window foreground and focused, with its inventory
-unchanged. Both actions require the same original baseline, at most 300 seconds
-old; `--max-baseline-age-seconds` may impose a stricter positive limit.
+unchanged. By default, both actions require the original baseline to be at most
+300 seconds old; `--max-baseline-age-seconds` may impose a stricter positive
+limit. A stale baseline is refused by default.
 
 ```sh
 python3 -m codex_devtools ax live-midi-inputs \
@@ -72,12 +73,47 @@ an explicit recovery decision. Do not blindly repeat isolation or restore.
 A native preflight rejection may conservatively mark an invocation unknown;
 no success claim is inferred from absent readback.
 
+### Explicit historical restore after the original baseline expires
+
+If the original baseline has expired, keep that file unchanged and capture a
+new complete read-only inventory immediately before the restore. The separate
+`--historical-current-inventory` option is valid only with `--execute
+--action restore`; it opts into this reconciliation path. The supplied current
+inventory must be at most 300 seconds old (or the stricter configured limit),
+have the same PID, bundle, process generation, Settings window, bounds, and
+complete ordered checkbox identities as the original baseline, and differ only
+where an originally On MIDI input Track, Sync, or Remote Control flag is now
+Off. Originally Off inputs, currently On original inputs, output controls, and
+all other checkboxes must retain their original values.
+
+```sh
+python3 -m codex_devtools ax live-midi-inputs \
+  --pid PID --expected-bundle-id com.ableton.live --expected-count INPUT_ROWS \
+  --out /private/tmp/live-inputs-restore-current.json
+
+python3 -m codex_devtools ax live-midi-inputs \
+  --pid PID --expected-bundle-id com.ableton.live --expected-count INPUT_ROWS \
+  --execute --action restore \
+  --baseline /private/tmp/live-inputs-original.json \
+  --historical-current-inventory /private/tmp/live-inputs-restore-current.json \
+  --receipt /private/tmp/live-inputs-historical-restore.json
+```
+
+The receipt records hashes for both the immutable original baseline and the
+fresh current observation. Before each press, the native helper verifies the
+same process generation, focus and complete current checkbox inventory, checks
+the remaining action deadline, and allows only that one originally On MIDI
+input flag to change from Off to On. It reads back the full inventory after the
+press. It never retimestamps the original baseline. Without the separate
+current-inventory option, expired-baseline behavior is unchanged and refuses
+the action.
+
 The tree is bounded to 64 windows, 1500 elements, depth 12, 512 checkboxes and
 1–128 input groups (at most 384 candidate presses). Actions have an overall
 180-second wall-time budget; each native invocation is bounded by the remaining
 budget. The existing two-second AX read timeout remains in force. Unknown or
-unavailable values never become zero. Refuse a stale restoration and inspect
-manually rather than creating a new baseline from an isolated state.
+unavailable values never become zero. The default path refuses a stale
+restoration and requires the explicit historical reconciliation path above.
 
 ## Coordinator's native verification after exact-head approval
 

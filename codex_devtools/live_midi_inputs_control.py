@@ -180,6 +180,19 @@ def reconcile(baseline: dict, current: dict, expected: dict[str, int]) -> None:
             raise ValueError("checkbox identity, order, enabled state or value changed")
 
 
+def historical_restore_expected(baseline: dict, current: dict) -> dict[str, int]:
+    """Permit only original-on MIDI inputs to be Off in a historical restore."""
+    expected = {row["identity"]: row["value"] for row in baseline["checkboxes"]}
+    for row, fresh in zip(baseline["checkboxes"], current["checkboxes"], strict=True):
+        identity = row["identity"]
+        if ": MIDI Input: " in row["description"] and row["value"] == 1:
+            if fresh["value"] not in (0, 1):
+                raise ValueError("historical restore input value is invalid")
+            expected[identity] = fresh["value"]
+    reconcile(baseline, current, expected)
+    return expected
+
+
 def transition_plan(baseline: dict, current: dict, operation: str) -> list[dict]:
     if operation not in {"isolate", "restore"}:
         raise ValueError("action must be isolate or restore")
@@ -217,6 +230,7 @@ def _native(
     baseline_hash: str = "",
     expected: dict | None = None,
     action: dict | None = None,
+    historical_restore: bool = False,
     max_age: float = 300,
     timeout: float = MAX_SECONDS,
 ) -> dict:
@@ -244,7 +258,8 @@ def _native(
     with tempfile.TemporaryDirectory(prefix="live-midi-inputs-") as directory:
         if action:
             state = Path(directory) / "expected.json"
-            state.write_text(json.dumps(expected))
+            state_data = json.dumps(expected).encode()
+            state.write_bytes(state_data)
             command += [
                 "--operation",
                 operation,
@@ -260,7 +275,16 @@ def _native(
                 action["identity"],
                 "--input-desired",
                 str(action["desired_value"]),
+                "--deadline-seconds",
+                str(timeout),
             ]
+            if historical_restore:
+                command += [
+                    "--historical-current-inventory",
+                    str(state),
+                    "--historical-current-sha256",
+                    hashlib.sha256(state_data).hexdigest(),
+                ]
         result = subprocess.run(
             command, capture_output=True, text=True, check=False, timeout=timeout
         )
@@ -286,6 +310,7 @@ def run_live_midi_inputs(
     expected_count: int,
     action: str | None = None,
     baseline_path: Path | None = None,
+    historical_current_path: Path | None = None,
     output_path: Path | None = None,
     execute: bool = False,
     max_baseline_age_seconds: float = 300,
@@ -326,6 +351,8 @@ def run_live_midi_inputs(
         raise ValueError(
             "execute requires isolate/restore, original baseline and new receipt"
         )
+    if historical_current_path is not None and action != "restore":
+        raise ValueError("a historical current inventory is valid only for restore")
     report = {
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "format": RECEIPT_FORMAT,
@@ -352,19 +379,55 @@ def run_live_midi_inputs(
         baseline = validate_inventory(
             json.loads(raw), pid=pid, bundle=expected_bundle_id, count=expected_count
         )
-        _fresh(baseline, max_baseline_age_seconds)
         baseline_hash = hashlib.sha256(raw).hexdigest()
         report.update(
             baseline_sha256=baseline_hash, target=baseline["target"], phase="preflight"
         )
+        historical_current = None
+        historical_current_hash = ""
+        if historical_current_path is None:
+            _fresh(baseline, max_baseline_age_seconds)
+        else:
+            if (
+                not historical_current_path.is_absolute()
+                or historical_current_path.is_symlink()
+                or not historical_current_path.is_file()
+                or historical_current_path.stat().st_size > 1_000_000
+            ):
+                raise ValueError(
+                    "historical current inventory must be an absolute regular file, never a symlink"
+                )
+            current_raw = historical_current_path.read_bytes()
+            historical_current = validate_inventory(
+                json.loads(current_raw),
+                pid=pid,
+                bundle=expected_bundle_id,
+                count=expected_count,
+            )
+            _fresh(historical_current, max_baseline_age_seconds)
+            historical_current_hash = hashlib.sha256(current_raw).hexdigest()
+            historical_restore_expected(baseline, historical_current)
+            report.update(
+                scope="historical-restore",
+                current_observation_sha256=historical_current_hash,
+            )
         current = observe()
+        if historical_current is not None:
+            initial_values = {
+                row["identity"]: row["value"]
+                for row in historical_current["checkboxes"]
+            }
+            reconcile(historical_current, current, initial_values)
         actions = transition_plan(baseline, current, action)
         report["actions"] = [
             row | {"attempted": False, "outcome": "not_attempted", "actual_value": None}
             for row in actions
         ]
         for row in report["actions"]:
-            _fresh(baseline, max_baseline_age_seconds)
+            _fresh(
+                current if historical_current is not None else baseline,
+                max_baseline_age_seconds,
+            )
             remaining = MAX_SECONDS - (time.monotonic() - started)
             if remaining <= 0:
                 raise ValueError("bounded action time exceeded")
@@ -380,6 +443,7 @@ def run_live_midi_inputs(
                 baseline_hash=baseline_hash,
                 expected=current,
                 action=row,
+                historical_restore=historical_current is not None,
                 max_age=max_baseline_age_seconds,
                 timeout=remaining,
             )
@@ -401,7 +465,10 @@ def run_live_midi_inputs(
         )
         if action == "restore" and transition_plan(baseline, final, "restore"):
             raise ValueError("exact restoration is incomplete")
-        _fresh(baseline, max_baseline_age_seconds)
+        _fresh(
+            final if historical_current is not None else baseline,
+            max_baseline_age_seconds,
+        )
         report.update(
             status="complete",
             phase="complete",
