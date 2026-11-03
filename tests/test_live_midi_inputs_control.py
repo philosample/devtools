@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from codex_devtools.live_midi_inputs_control import (
     FLAGS,
     FORMAT,
     _native,
+    _replace_owned_json,
     historical_restore_expected,
     inventory_hash,
     reconcile,
@@ -366,6 +368,51 @@ class ActionTests(unittest.TestCase):
         self.assertIs(freshness_checks[0], freshness_checks[1])
         self.assertFalse(report["manual_inspection_required"])
 
+    def test_slow_prepress_receipt_write_cannot_admit_a_late_press(self):
+        baseline = matrix()
+        baseline["observed_at_utc"] = (
+            datetime.now(timezone.utc) - timedelta(hours=2)
+        ).isoformat()
+        seal(baseline)
+        current = copy.deepcopy(baseline)
+        current["observed_at_utc"] = datetime.now(timezone.utc).isoformat()
+        current["checkboxes"][0]["value"] = 0
+        seal(current)
+        clock = [0.0]
+        replace_receipt = _replace_owned_json
+        persistence_calls = []
+
+        def delayed_receipt(path, identity, report):
+            result = replace_receipt(path, identity, report)
+            if report["phase"] == "press" and not persistence_calls:
+                persistence_calls.append(report["phase"])
+                clock[0] = 181.0
+            return result
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                time,
+                "monotonic",
+                side_effect=lambda: clock[0],
+            ),
+            patch(
+                "codex_devtools.live_midi_inputs_control._replace_owned_json",
+                side_effect=delayed_receipt,
+            ),
+        ):
+            report, calls = self.run_action(
+                directory,
+                baseline,
+                copy.deepcopy(current),
+                action="restore",
+                historical_current=current,
+            )
+        self.assertEqual(report["status"], "stopped")
+        self.assertTrue(report["manual_inspection_required"])
+        self.assertEqual(report["actions"][0]["outcome"], "unknown")
+        self.assertFalse([call for call in calls if call.get("action")])
+
     def test_expired_original_with_fresh_matching_current_restores(self):
         baseline = matrix()
         original_timestamp = (
@@ -534,6 +581,7 @@ class ActionTests(unittest.TestCase):
 
     def test_historical_native_press_pins_current_state_and_remaining_deadline(self):
         expected = matrix()
+        deadline = time.time() + 60
         with patch(
             "codex_devtools.live_midi_inputs_control.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, "{}"),
@@ -548,6 +596,7 @@ class ActionTests(unittest.TestCase):
                 expected=expected,
                 action={"identity": "10", "desired_value": 1},
                 historical_restore=True,
+                deadline_unix_seconds=deadline,
                 timeout=17.5,
             )
         command = run.call_args.args[0]
@@ -556,7 +605,10 @@ class ActionTests(unittest.TestCase):
         )
         current_hash = command[command.index("--historical-current-sha256") + 1]
         self.assertEqual(command[command.index("--operation") + 1], "restore")
-        self.assertEqual(command[command.index("--deadline-seconds") + 1], "17.5")
+        self.assertEqual(
+            command[command.index("--deadline-unix-seconds") + 1],
+            str(deadline),
+        )
         self.assertEqual(
             current_path, Path(command[command.index("--input-expected") + 1])
         )
@@ -590,6 +642,12 @@ precondition(inputFlags == Set(["Track", "Sync", "Remote Control"]))
 precondition(!inputFlags.contains("Remote"), "unobserved short alias must fail")
 let (_, baseline) = try inputJSON(CommandLine.arguments[1])
 try compareInputs(baseline, baseline)
+precondition(pressDeadlineIsValid(180, nowUnixSeconds: 0))
+precondition(!pressDeadlineIsValid(181, nowUnixSeconds: 0))
+precondition(!pressDeadlineIsValid(180, nowUnixSeconds: 180))
+precondition(actionDeadlineAllowsPress(180, nowUnixSeconds: 179.999))
+precondition(!actionDeadlineAllowsPress(180, nowUnixSeconds: 180))
+precondition(!actionDeadlineAllowsPress(180, nowUnixSeconds: 181))
 var rejected = false
 var historical = baseline
 var historicalRows = try inputRows(historical)

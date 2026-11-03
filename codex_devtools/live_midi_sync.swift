@@ -24,7 +24,7 @@ struct Options {
     var historicalCurrentPath = ""
     var historicalCurrentHash = ""
     var maximumBaselineAgeSeconds = 300.0
-    var deadlineSeconds = 180.0
+    var deadlineUnixSeconds = 0.0
 }
 
 struct SyncFailure: Error {
@@ -41,6 +41,15 @@ struct OutputControl {
 var phase = "startup"
 var receipt: [String: Any]?
 var options = Options()
+
+func pressDeadlineIsValid(
+    _ deadlineUnixSeconds: TimeInterval,
+    nowUnixSeconds: TimeInterval = Date().timeIntervalSince1970
+) -> Bool {
+    deadlineUnixSeconds.isFinite && nowUnixSeconds.isFinite
+        && deadlineUnixSeconds > nowUnixSeconds
+        && deadlineUnixSeconds - nowUnixSeconds <= 180
+}
 
 func parseOptions() throws -> Options {
     var result = Options()
@@ -72,11 +81,13 @@ func parseOptions() throws -> Options {
                 throw SyncFailure(message: "maximum baseline age must be positive and at most 300 seconds")
             }
             result.maximumBaselineAgeSeconds = parsed
-        case "--deadline-seconds":
-            guard let parsed = Double(value), parsed.isFinite, parsed > 0, parsed <= 180 else {
-                throw SyncFailure(message: "press deadline must be positive and at most 180 seconds")
+        case "--deadline-unix-seconds":
+            let now = Date().timeIntervalSince1970
+            guard let parsed = Double(value), parsed.isFinite,
+                  pressDeadlineIsValid(parsed, nowUnixSeconds: now) else {
+                throw SyncFailure(message: "absolute press deadline is invalid or expired")
             }
-            result.deadlineSeconds = parsed
+            result.deadlineUnixSeconds = parsed
         default: throw SyncFailure(message: "unknown option: \(key)")
         }
         index += 2
@@ -90,7 +101,8 @@ func parseOptions() throws -> Options {
             guard ["isolate", "restore"].contains(result.operation),
                   !result.baselinePath.isEmpty, result.baselineHash.count == 64,
                   !result.inputExpected.isEmpty, !result.inputIdentity.isEmpty,
-                  result.inputDesired == 0 || result.inputDesired == 1 else {
+                  result.inputDesired == 0 || result.inputDesired == 1,
+                  result.deadlineUnixSeconds > 0 else {
                 throw SyncFailure(message: "input press requires explicit operation, baseline and exact target")
             }
             if !result.historicalCurrentPath.isEmpty {
@@ -100,7 +112,7 @@ func parseOptions() throws -> Options {
             } else if !result.historicalCurrentHash.isEmpty {
                 throw SyncFailure(message: "historical current inventory hash has no file")
             }
-        } else if !result.operation.isEmpty || !result.baselinePath.isEmpty || !result.inputExpected.isEmpty || !result.inputIdentity.isEmpty || !result.historicalCurrentPath.isEmpty || !result.historicalCurrentHash.isEmpty || result.inputDesired != -1 {
+        } else if !result.operation.isEmpty || !result.baselinePath.isEmpty || !result.inputExpected.isEmpty || !result.inputIdentity.isEmpty || !result.historicalCurrentPath.isEmpty || !result.historicalCurrentHash.isEmpty || result.inputDesired != -1 || result.deadlineUnixSeconds != 0 {
             throw SyncFailure(message: "inspect never accepts action arguments")
         }
         return result
@@ -633,6 +645,13 @@ func inputEqual(_ first: Any?, _ second: Any?) -> Bool {
     return NSDictionary(dictionary: ["v": first]).isEqual(to: ["v": second])
 }
 
+func actionDeadlineAllowsPress(
+    _ deadlineUnixSeconds: TimeInterval,
+    nowUnixSeconds: TimeInterval = Date().timeIntervalSince1970
+) -> Bool {
+    pressDeadlineIsValid(deadlineUnixSeconds, nowUnixSeconds: nowUnixSeconds)
+}
+
 func compareInputs(_ original: [String: Any], _ current: [String: Any], values: [String: Int]? = nil) throws {
     for key in ["target", "settings_window", "bounds", "input_order", "expected_input_count"] {
         guard inputEqual(original[key], current[key]) else {
@@ -681,7 +700,6 @@ func historicalRestoreValues(_ original: [String: Any], _ current: [String: Any]
 func runInputs() throws -> [String: Any] {
     guard AXIsProcessTrusted() else { throw SyncFailure(message: "Accessibility is not trusted; no prompt requested") }
     let app = AXUIElementCreateApplication(options.pid)
-    let deadline = Date().addingTimeInterval(options.deadlineSeconds)
     let (initial, _, _) = try inputInventory(app)
     if options.inputMode == "inspect" { return initial }
     let (data, baseline) = try inputJSON(options.baselinePath)
@@ -765,11 +783,14 @@ func runInputs() throws -> [String: Any] {
         throw SyncFailure(message: "input target/focus/state changed immediately before press")
     }
     try validateBaselineFreshness(historicalDate ?? date)
-    guard Date() < deadline else {
+    guard actionDeadlineAllowsPress(options.deadlineUnixSeconds) else {
         throw SyncFailure(message: "bounded input press deadline exceeded")
     }
     phase = "input-press-outcome-unknown"
     AXUIElementSetMessagingTimeout(control, 2.0)
+    guard actionDeadlineAllowsPress(options.deadlineUnixSeconds) else {
+        throw SyncFailure(message: "bounded input press deadline exceeded")
+    }
     guard AXUIElementPerformAction(control, kAXPressAction as CFString) == .success else {
         throw SyncFailure(message: "input AXPress failed; outcome unknown")
     }

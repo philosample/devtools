@@ -111,8 +111,12 @@ the action.
 The tree is bounded to 64 windows, 1500 elements, depth 12, 512 checkboxes and
 1–128 input groups (at most 384 candidate presses). Actions have an overall
 180-second wall-time budget; each native invocation is bounded by the remaining
-budget. The existing two-second AX read timeout remains in force. Unknown or
-unavailable values never become zero. The default path refuses a stale
+budget and receives the same absolute deadline. The pre-press uncertainty
+receipt is persisted before admission; if that write consumes the remaining
+budget, the attempt stays unknown and no native press is invoked. The native
+helper rechecks the original deadline after its final AX getters and immediately
+before the press. The existing two-second AX read timeout remains in force.
+Unknown or unavailable values never become zero. The default path refuses a stale
 restoration and requires the explicit historical reconciliation path above.
 
 ## Coordinator's native verification after exact-head approval

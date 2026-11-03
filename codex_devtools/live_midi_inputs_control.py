@@ -231,6 +231,7 @@ def _native(
     expected: dict | None = None,
     action: dict | None = None,
     historical_restore: bool = False,
+    deadline_unix_seconds: float | None = None,
     max_age: float = 300,
     timeout: float = MAX_SECONDS,
 ) -> dict:
@@ -239,9 +240,20 @@ def _native(
         or baseline_path is None
         or expected is None
         or len(baseline_hash) != 64
+        or isinstance(deadline_unix_seconds, bool)
+        or not isinstance(deadline_unix_seconds, (int, float))
+        or not math.isfinite(deadline_unix_seconds)
+        or deadline_unix_seconds <= 0
     ):
         raise ValueError(
             "native press requires explicit action and validated baseline/state"
+        )
+    if (
+        action is not None
+        and not time.time() < deadline_unix_seconds <= time.time() + MAX_SECONDS
+    ):
+        raise ValueError(
+            "absolute press deadline is expired or exceeds the action budget"
         )
     command = [
         "/usr/bin/swift",
@@ -275,8 +287,8 @@ def _native(
                 action["identity"],
                 "--input-desired",
                 str(action["desired_value"]),
-                "--deadline-seconds",
-                str(timeout),
+                "--deadline-unix-seconds",
+                str(deadline_unix_seconds),
             ]
             if historical_restore:
                 command += [
@@ -363,8 +375,9 @@ def run_live_midi_inputs(
         "manual_inspection_required": False,
         "phase": "baseline-validation",
     }
-    receipt_identity = _write_new_json(output_path, report)
     started = time.monotonic()
+    deadline_unix_seconds = time.time() + MAX_SECONDS
+    receipt_identity = _write_new_json(output_path, report)
     try:
         if (
             not baseline_path.is_absolute()
@@ -424,19 +437,24 @@ def run_live_midi_inputs(
             for row in actions
         ]
         for row in report["actions"]:
+            remaining = MAX_SECONDS - (time.monotonic() - started)
+            if remaining <= 0:
+                raise ValueError("bounded action time exceeded")
             _fresh(
                 current if historical_current is not None else baseline,
                 max_baseline_age_seconds,
             )
-            remaining = MAX_SECONDS - (time.monotonic() - started)
-            if remaining <= 0:
-                raise ValueError("bounded action time exceeded")
             report["phase"] = "press"
             row.update(attempted=True, outcome="unknown")
             report["manual_inspection_required"] = True
             receipt_identity = _replace_owned_json(
                 output_path, receipt_identity, report
             )
+            remaining = MAX_SECONDS - (time.monotonic() - started)
+            if remaining <= 0:
+                raise ValueError(
+                    "bounded action time exceeded during prepress receipt persistence"
+                )
             observed = observe(
                 operation=action,
                 baseline_path=baseline_path,
@@ -444,6 +462,7 @@ def run_live_midi_inputs(
                 expected=current,
                 action=row,
                 historical_restore=historical_current is not None,
+                deadline_unix_seconds=deadline_unix_seconds,
                 max_age=max_baseline_age_seconds,
                 timeout=remaining,
             )
