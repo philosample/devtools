@@ -17,6 +17,9 @@ struct Options {
     var destinationSHA256: String?
     var saveOwnedSource = false
     var backupReceipt: String?
+    var saveCopyOnly = false
+    var expectedFinalSet: String?
+    var projectRequiredDialog = false
 }
 
 struct LifecycleFailure: Error {
@@ -39,6 +42,13 @@ var initialBundleID: String?
 var menuDiagnostics: [String: Any]?
 var activeFileMenu: AXUIElement?
 var sourceSaveVerified = false
+var projectPromptAttempted = false
+var projectPromptVerified = false
+var saveCopyDeadline: TimeInterval?
+
+func checkSaveCopyDeadline() throws {
+    if let deadline = saveCopyDeadline { try require(ProcessInfo.processInfo.systemUptime < deadline, "same-process Save As deadline expired; no retry") }
+}
 
 let menuReadinessTimeout: TimeInterval = 2
 
@@ -152,6 +162,8 @@ func parseOptions() -> Options {
             index += 1
             continue
         }
+        if key == "--save-copy-only" { result.saveCopyOnly = true; index += 1; continue }
+        if key == "--project-required-dialog" { result.projectRequiredDialog = true; index += 1; continue }
         if key == "--open-existing" { result.openExisting = true; index += 1; continue }
         if key == "--save-owned-source" { result.saveOwnedSource = true; index += 1; continue }
         guard index + 1 < args.count else { fail("missing value for \(key)") }
@@ -167,6 +179,7 @@ func parseOptions() -> Options {
         case "--source-sha256": result.sourceSHA256 = value
         case "--destination-sha256": result.destinationSHA256 = value
         case "--backup-receipt": result.backupReceipt = value
+        case "--expected-final-set": result.expectedFinalSet = value
         default: fail("unknown option: \(key)")
         }
         index += 2
@@ -180,12 +193,17 @@ func parseOptions() -> Options {
     if result.openExisting && (result.destinationSet == nil || result.appPath == nil || result.sourceSHA256 == nil || result.destinationSHA256 == nil) {
         fail("--open-existing requires exact source/destination hashes, destination and app")
     }
-    if !result.openExisting && (result.sourceSHA256 != nil || result.destinationSHA256 != nil || result.saveOwnedSource || result.backupReceipt != nil) {
+    if !result.openExisting && !result.saveCopyOnly && (result.sourceSHA256 != nil || result.destinationSHA256 != nil || result.saveOwnedSource || result.backupReceipt != nil) {
         fail("existing-Set open options require --open-existing")
     }
     if result.openExisting && result.execute && result.saveOwnedSource && result.backupReceipt == nil {
         fail("saving the owned source requires its already-written backup receipt")
     }
+    if result.saveCopyOnly {
+        guard !result.openExisting && !result.saveOwnedSource && result.destinationSHA256 == nil && result.sourceSHA256 != nil &&
+              result.destinationSet != nil && result.expectedFinalSet != nil && result.appPath != nil &&
+              (!result.execute || result.backupReceipt != nil) else { fail("save-copy-only requires exact source hash, selected/final paths, app and execute backup; incompatible mode flags") }
+    } else if result.expectedFinalSet != nil || result.projectRequiredDialog { fail("Save As copy options require --save-copy-only") }
     return result
 }
 
@@ -389,12 +407,15 @@ func actionNames(_ element: AXUIElement) throws -> [String] {
 }
 
 func press(_ element: AXUIElement) throws {
+    try checkSaveCopyDeadline()
     try require((optionalAX(element, kAXEnabledAttribute as String) as? NSNumber)?.boolValue == true, "target AX element is not enabled")
     let actions = try actionNames(element)
     try require(actions.contains(kAXPressAction as String), "target AX element does not support AXPress")
     AXUIElementSetMessagingTimeout(element, 2)
+    let menuItem = (try role(element)) == (kAXMenuBarItemRole as String)
+    try checkSaveCopyDeadline()
     uiActionAttempted = true
-    if (try role(element)) == (kAXMenuBarItemRole as String) { menuNavigationAttempted = true }
+    if menuItem { menuNavigationAttempted = true }
     let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
     try require(error == .success, "AXPress failed (\(error.rawValue))")
 }
@@ -544,7 +565,7 @@ func waitForGoToSheetDismissed(_ saveWindow: AXUIElement, seconds: TimeInterval 
 func waitForSaveButtonEnabled(app: AXUIElement, pid: pid_t, bundleID: String,
                               process: NSRunningApplication, saveWindow: AXUIElement,
                               source: URL, originalSourceIdentity: [FileAttributeKey: Any],
-                              destination: URL, seconds: TimeInterval = 5) throws -> AXUIElement {
+                              destination: URL, seconds: TimeInterval = 5, additionalGuard: (() throws -> Void)? = nil) throws -> AXUIElement {
     let deadline = ProcessInfo.processInfo.systemUptime + seconds
     while ProcessInfo.processInfo.systemUptime < deadline {
         try require(!process.isTerminated, "original Live process terminated during Save readiness")
@@ -582,6 +603,7 @@ func waitForSaveButtonEnabled(app: AXUIElement, pid: pid_t, bundleID: String,
                     "Live PID changed during Save readiness readback")
         try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid && focusedWindowIs(app, currentPanel),
                     "Save panel focus changed during readiness readback")
+        try additionalGuard?()
         if attributeBool(buttons[0], kAXEnabledAttribute as String) == true && ProcessInfo.processInfo.systemUptime < deadline {
             return buttons[0]
         }
@@ -659,22 +681,26 @@ func stringValue(_ element: AXUIElement) -> String? {
 }
 
 func setString(_ element: AXUIElement, value: String, identifier expectedID: String) throws {
+    try checkSaveCopyDeadline()
     let fieldRole = try role(element)
     try require(identifier(element) == expectedID && fieldRole == (kAXTextFieldRole as String), "unexpected AX text-field identity")
     var settable = DarwinBoolean(false)
     let error = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable)
     try require(error == .success && settable.boolValue, "AX text field is not settable")
+    try checkSaveCopyDeadline()
     let setError = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFTypeRef)
     try require(setError == .success, "AXSetValue failed (\(setError.rawValue))")
     try require(stringValue(element) == value, "AX text-field readback mismatch")
 }
 
 func focusSaveNameField(_ element: AXUIElement, app: AXUIElement) throws {
+    try checkSaveCopyDeadline()
     let fieldRole = try role(element)
     try require(fieldRole == (kAXTextFieldRole as String) && identifier(element) == "saveAsNameTextField", "unexpected Save As filename field identity")
     var settable = DarwinBoolean(false)
     let checkError = AXUIElementIsAttributeSettable(element, kAXFocusedAttribute as CFString, &settable)
     try require(checkError == .success && settable.boolValue, "Save As filename field is not focus-settable")
+    try checkSaveCopyDeadline()
     let setError = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     try require(setError == .success, "setting Save As filename focus failed (\(setError.rawValue))")
     let focused = try ax(element, kAXFocusedAttribute as String) as? NSNumber
@@ -706,10 +732,12 @@ func waitForFrontmost(pid: pid_t, seconds: TimeInterval = 5) throws {
 }
 
 func focusWindow(_ app: AXUIElement, pid: pid_t, window: AXUIElement) throws {
+    try checkSaveCopyDeadline()
     try waitForFrontmost(pid: pid)
     if !focusedWindowIs(app, window) {
         let actions = try actionNames(window)
         try require(actions.contains(kAXRaiseAction as String), "exact AX window does not support AXRaise")
+        try checkSaveCopyDeadline()
         uiActionAttempted = true
         let error = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         try require(error == .success, "raising exact AX window failed (\(error.rawValue))")
@@ -725,6 +753,7 @@ func focusWindow(_ app: AXUIElement, pid: pid_t, window: AXUIElement) throws {
 }
 
 func activateExactTarget(_ process: NSRunningApplication, app: AXUIElement, sourceWindow: AXUIElement) throws {
+    try checkSaveCopyDeadline()
     phase = "activate-target"
     uiActionAttempted = true
     focusAttempted = true
@@ -746,6 +775,7 @@ func makeKeyEvent(code: CGKeyCode, down: Bool, flags: CGEventFlags) throws -> CG
 }
 
 func postKeyStroke(pid: pid_t, code: CGKeyCode, flags: CGEventFlags = []) throws {
+    try checkSaveCopyDeadline()
     let keyDown = try makeKeyEvent(code: code, down: true, flags: flags)
     let keyUp = try makeKeyEvent(code: code, down: false, flags: flags)
     try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, "exact Live PID lost foreground before keyboard stroke")
@@ -771,8 +801,163 @@ func waitForWindow(_ app: AXUIElement, title expectedTitle: String, seconds: Tim
     throw LifecycleFailure(phase: phase, message: "timed out waiting for AX window \(expectedTitle)")
 }
 
+// Save-copy-only uses the existing Save As sequence, with a separate exact
+// prompt policy and same-process receipt. No other mode adopts this prompt.
+let projectRequiredText = "The Live Set you are about to save is located outside of a Project folder. Live must save the Set into a Project folder. Please choose a Project folder to save the Set into."
+
+func projectRequiredSignature(_ rows: [[String: Any]]) -> Bool {
+    guard rows.count == 6 else { return false }
+    let byRole = Dictionary(grouping: rows) { $0["role"] as? String ?? "" }
+    guard byRole.keys.count == 4, byRole["AXWindow"]?.count == 1, byRole["AXGroup"]?.count == 1,
+          byRole["AXStaticText"]?.count == 2, byRole["AXButton"]?.count == 2,
+          let window = byRole["AXWindow"]?.first, window["subrole"] as? String == "AXDialog", window["title"] as? String == "" else { return false }
+    let texts = byRole["AXStaticText"]!
+    guard texts.filter({ $0["identifier"] as? String == "DialogText" && $0["value"] as? String == projectRequiredText }).count == 1,
+          texts.filter({ $0["value"] as? String == "" }).count == 1 else { return false }
+    let buttons = byRole["AXButton"]!
+    for (id, description) in [("Cancel", "Cancel"), ("SaveAs...", "Save As...")] {
+        guard buttons.filter({ $0["identifier"] as? String == id && $0["description"] as? String == description &&
+            $0["enabled"] as? Bool == true && $0["press"] as? Bool == true }).count == 1 else { return false }
+    }
+    return true
+}
+
+func saveCopyWindows(_ app: AXUIElement, allowing allowed: AXUIElement? = nil) throws {
+    for window in try windows(app) {
+        if let allowed, CFEqual(window, allowed) { continue }
+        let kind = try role(window), subrole = optionalAX(window, kAXSubroleAttribute as String) as? String
+        try require(!["AXDialog", "AXSheet", "AXAlert"].contains(kind) && subrole != "AXDialog" &&
+                    attributeBool(window, "AXModal") != true && identifier(window) != "open-panel", "unexpected dialog during same-process Save As; no prompt accepted")
+    }
+}
+
+func projectRequiredButton(_ app: AXUIElement) throws -> (AXUIElement, AXUIElement) {
+    let matches = try windows(app).filter { (try? role($0)) == "AXWindow" && optionalAX($0, kAXSubroleAttribute as String) as? String == "AXDialog" }
+    try require(matches.count == 1, "exact Project-required dialog is absent or ambiguous")
+    let dialog = matches[0], elements = try allElements([dialog], maxDepth: 6, maxElements: 16)
+    let rows: [[String: Any]] = try elements.map { element in
+        ["role": try role(element), "subrole": optionalAX(element, kAXSubroleAttribute as String) as Any? ?? NSNull(),
+         "title": title(element) as Any? ?? NSNull(), "identifier": identifier(element) as Any? ?? NSNull(),
+         "description": optionalAX(element, kAXDescriptionAttribute as String) as Any? ?? NSNull(),
+         "value": stringValue(element) as Any? ?? NSNull(), "enabled": attributeBool(element, kAXEnabledAttribute as String) as Any? ?? NSNull(),
+         "press": ((try? actionNames(element)) ?? []).contains(kAXPressAction as String)]
+    }
+    try require(projectRequiredSignature(rows), "Project-required dialog signature differs; no prompt accepted")
+    try saveCopyWindows(app, allowing: dialog)
+    let buttons = elements.filter { identifier($0) == "SaveAs..." && (try? role($0)) == "AXButton" }
+    try require(buttons.count == 1, "Project Save As button ambiguous")
+    return (dialog, buttons[0])
+}
+
+func saveCopyTransport(_ sourceWindow: AXUIElement) throws -> [String: Int] {
+    let elements = try allElements([sourceWindow])
+    var values: [String: Int] = [:]
+    for (key, name, id) in [("play", "Play", "Transport.Play"), ("link", "Link", "Transport.AbletonLink"),
+                             ("arrangement_record", "Arrangement Record", "Transport.GlobalRecord"), ("session_record", "Session Record", "Transport.SessionRecord")] {
+        let matches = elements.filter { identifier($0) == id }
+        try require(matches.count == 1 && (try? role(matches[0])) == "AXCheckBox" &&
+                    optionalAX(matches[0], kAXDescriptionAttribute as String) as? String == name, "exact source transport checkbox missing/ambiguous")
+        guard let value = optionalAX(matches[0], kAXValueAttribute as String) as? NSNumber else {
+            throw LifecycleFailure(phase: phase, message: "source transport value unavailable")
+        }
+        try require(value.doubleValue == 0, "Save As requires Play, Link and both recording flags off")
+        values[key] = 0
+    }
+    return values
+}
+
+func saveCopyDirectoryPin(_ url: URL, empty: Bool) throws -> [String: String] {
+    let normalized = try lexicalPath(url.path)
+    try require(url.path == normalized, "canonical destination directory required")
+    // Foundation rewrites /private/tmp to /tmp even for a canonical POSIX path.
+    // lstat each supplied component instead of treating that rewrite as evidence.
+    var cursor = URL(fileURLWithPath: "/"), info = stat()
+    for part in url.path.split(separator: "/") {
+        cursor.appendPathComponent(String(part), isDirectory: true)
+        try require(lstat(cursor.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR, "destination directory has a missing/non-directory/symlink component")
+        try require(!FileManager.default.fileExists(atPath: cursor.appendingPathComponent(".git").path), "Save As destination must remain outside Git")
+    }
+    try require(info.st_uid == getuid() && info.st_mode & 0o077 == 0, "fresh private owned destination directory required")
+    if empty { let contents = try FileManager.default.contentsOfDirectory(atPath: url.path); try require(contents.isEmpty, "fresh Save As directory is no longer empty; refuse overwrite") }
+    return ["path": url.path, "device": String(info.st_dev), "inode": String(info.st_ino)]
+}
+
+func checkedSaveCopyBackup(_ options: Options, source: URL, selected: URL, final: URL, directory: URL) throws -> [String: String] {
+    let path = URL(fileURLWithPath: try lexicalPath(options.backupReceipt!))
+    try ensureNoSymlinkChain(path, mustExist: true, outsideGit: true)
+    let attrs = try fileIdentity(path)
+    try require(((attrs[.size] as? NSNumber)?.intValue ?? 131073) <= 131072 &&
+                ((attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0 &&
+                (attrs[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(), "private bounded Save As backup receipt required")
+    guard let proof = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any],
+          let original = proof["source"] as? [String: Any], let backup = proof["backup"] as? [String: Any],
+          let backupPath = backup["path"] as? String, let directoryPin = proof["destination_directory"] as? [String: String] else {
+        throw LifecycleFailure(phase: phase, message: "invalid Save As source backup proof")
+    }
+    let currentSource = try setPin(source), currentBackup = try setPin(canonicalURL(backupPath)), currentDirectory = try saveCopyDirectoryPin(directory, empty: true)
+    try require(proof["format"] as? String == "codex-devtools-live-set-save-as-backup-v1" && proof["pid"] as? Int == Int(options.pid) &&
+                proof["bundle_identifier"] as? String == options.bundleID && proof["project_required_dialog"] as? Bool == options.projectRequiredDialog &&
+                proof["destination_set_url"] as? String == selected.absoluteString && proof["expected_final_set_url"] as? String == final.absoluteString &&
+                original["sha256"] as? String == options.sourceSHA256 && samePin(original, currentSource) &&
+                samePin(backup, currentBackup) && backup["sha256"] as? String == options.sourceSHA256 &&
+                directoryPin == currentDirectory, "Save As backup/source/destination/process proof changed")
+    let backupAttrs = try fileIdentity(URL(fileURLWithPath: backupPath))
+    try require(((backupAttrs[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0 &&
+                (backupAttrs[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(), "Save As backup must be private and owned")
+    return directoryPin
+}
+
+func saveCopyActions(_ options: Options, saved: Bool = false) -> [String: String] {
+    ["focus": focusVerified ? "verified" : focusAttempted ? "outcome_unknown" : "not_attempted",
+     "menu_navigation": menuNavigationVerified ? "verified" : menuNavigationAttempted ? "outcome_unknown" : "not_attempted",
+     "save_as_menu": saveAsMenuAttempted ? (saved ? "verified_panel" : "outcome_unknown") : "not_attempted",
+     "project_prompt": projectPromptVerified ? "verified_save_panel" : projectPromptAttempted ? "outcome_unknown" : "not_attempted",
+     "save": saved ? "destination_observed" : saveAttempted ? "outcome_unknown" : "not_attempted", "quit": "not_attempted", "open": "not_attempted"]
+}
+
+func waitForSavedCopy(app: AXUIElement, process: NSRunningApplication, options: Options, source: URL,
+                      before: [String: Any], final: URL, directory: URL, directoryPin: [String: String]) throws -> [String: Any] {
+    let deadline = min(saveCopyDeadline!, ProcessInfo.processInfo.systemUptime + 30)
+    var previous: [String: Any]?, stable = 0
+    while ProcessInfo.processInfo.systemUptime < deadline {
+        try requireSameProcess(process, options: options); try saveCopyWindows(app)
+        let currentSource = try setPin(source), currentDirectory = try saveCopyDirectoryPin(directory, empty: false)
+        try require(samePin(currentSource, before) && directoryPin == currentDirectory, "source or destination directory changed during Save As")
+        var info = stat(); let exists = lstat(final.path, &info) == 0
+        if !exists { try require(errno == ENOENT, "cannot inspect exact saved destination") }
+        if exists {
+            do {
+                let matching = try windows(app).filter { window in
+                    guard let raw = optionalAX(window, kAXDocumentAttribute as String) as? String else { return false }
+                    return try sameSetURL(raw, expected: final)
+                }
+                try require(matching.count <= 1, "ambiguous exact saved Set window")
+                guard let window = matching.first else {
+                    _ = try exactDocumentWindow(app, url: source); stable = 0; previous = nil
+                    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1)); continue
+                }
+                try require(focusedWindowIs(app, window), "saved Set lost focus")
+                _ = try saveCopyTransport(window)
+                let pin = try setPin(final)
+                stable = previous.map { samePin($0, pin) } == true ? stable + 1 : 0; previous = pin
+                if stable >= 2 { try checkSaveCopyDeadline(); return pin }
+            } catch is SetObservationChanged { stable = 0; previous = nil }
+        } else { _ = try exactDocumentWindow(app, url: source) }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+    }
+    throw LifecycleFailure(phase: phase, message: "Save As outcome unknown: exact final URL/hash/metadata did not settle before deadline; no retry")
+}
+
+func stoppedSaveCopy(_ options: Options, error: String) -> [String: Any] {
+    ["format": "codex-devtools-live-set-save-as-v1", "status": "stopped", "read_only": !options.execute,
+     "target": ["pid": options.pid, "bundle_identifier": options.bundleID], "phase": phase, "error": error,
+     "actions": saveCopyActions(options), "manual_inspection_required": uiActionAttempted || focusAttempted || saveAsMenuAttempted || projectPromptAttempted || saveAttempted,
+     "backup_receipt": options.backupReceipt as Any? ?? NSNull()]
+}
+
 func run(_ options: Options) throws -> [String: Any] {
     phase = "preflight"
+    if options.saveCopyOnly { saveCopyDeadline = ProcessInfo.processInfo.systemUptime + 120 }
     try require(AXIsProcessTrusted(), "Accessibility permission is not already trusted")
     guard let process = NSRunningApplication(processIdentifier: options.pid) else {
         throw LifecycleFailure(phase: phase, message: "exact target PID is not a running application")
@@ -786,17 +971,48 @@ func run(_ options: Options) throws -> [String: Any] {
     try ensureNoSymlinkChain(source, mustExist: true, outsideGit: false)
     let originalSourceIdentity = try fileIdentity(source)
     let appElement = AXUIElementCreateApplication(options.pid)
-    try ensureNoDialogs(appElement)
-    _ = try exactDocumentWindow(appElement, url: source)
+    var initialProjectDialog: AXUIElement?
+    if options.saveCopyOnly {
+        if options.projectRequiredDialog { initialProjectDialog = try projectRequiredButton(appElement).0 }
+        else { try saveCopyWindows(appElement) }
+    } else { try ensureNoDialogs(appElement) }
+    let exactSourceWindow = try exactDocumentWindow(appElement, url: source)
+    var copySourcePin: [String: Any]?, copyDirectoryPin: [String: String]?, copyFinal: URL?
+    if options.saveCopyOnly {
+        copySourcePin = try setPin(source)
+        try require(copySourcePin!["sha256"] as? String == options.sourceSHA256 &&
+                    (originalSourceIdentity[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(), "exact owned source hash required for Save As")
+        _ = try saveCopyTransport(exactSourceWindow)
+        let appURL = URL(fileURLWithPath: options.appPath!)
+        try require(appURL.path == options.appPath && appURL.resolvingSymlinksInPath().path == appURL.path && appURL.pathExtension == "app" &&
+                    process.bundleURL?.path == appURL.path && Bundle(url: appURL)?.bundleIdentifier == options.bundleID, "exact Save As app differs from running process")
+    }
 
     var destination: URL?
     if let rawDestination = options.destinationSet {
         let target = try canonicalURL(rawDestination)
-        try require(target != source && target.deletingLastPathComponent() == source.deletingLastPathComponent(), "destination must be a new sibling of the exact source Set")
-        try ensureNoSymlinkChain(target, mustExist: false, outsideGit: true)
+        if options.saveCopyOnly {
+            let directory = target.deletingLastPathComponent(), final = try canonicalURL(options.expectedFinalSet!)
+            let project = directory.appendingPathComponent(target.deletingPathExtension().lastPathComponent + " Project").appendingPathComponent(target.lastPathComponent)
+            try require(target != source && (final == target || final == project), "explicit final Set must be the exact direct or Live Project form")
+            if options.execute { copyDirectoryPin = try checkedSaveCopyBackup(options, source: source, selected: target, final: final, directory: directory) }
+            else { try ensureNoSymlinkChain(directory, mustExist: false, outsideGit: true) }
+            copyFinal = final
+        } else {
+            try require(target != source && target.deletingLastPathComponent() == source.deletingLastPathComponent(), "destination must be a new sibling of the exact source Set")
+            try ensureNoSymlinkChain(target, mustExist: false, outsideGit: true)
+        }
         destination = target
     }
     guard options.execute else {
+        if options.saveCopyOnly {
+            return ["format": "codex-devtools-live-set-save-as-v1", "status": "ready", "read_only": true,
+                    "target": ["pid": options.pid, "bundle_identifier": options.bundleID], "app": options.appPath!,
+                    "source_set_url": source.absoluteString, "destination_set_url": destination!.absoluteString,
+                    "expected_final_set_url": copyFinal!.absoluteString, "source_file": copySourcePin!,
+                    "project_required_dialog": options.projectRequiredDialog, "transport": try saveCopyTransport(exactSourceWindow),
+                    "actions": saveCopyActions(options)]
+        }
         return ["format": "codex-devtools-live-set-lifecycle-v1", "status": "ready",
                 "target": ["pid": options.pid, "bundle_identifier": options.bundleID,
                            "process_name": process.localizedName ?? ""],
@@ -815,19 +1031,38 @@ func run(_ options: Options) throws -> [String: Any] {
     try require(appBundleID == options.bundleID, "Live.app bundle ID differs from target bundle ID")
 
     let sourceWindow = try exactDocumentWindow(appElement, url: source)
-    try activateExactTarget(process, app: appElement, sourceWindow: sourceWindow)
-    phase = "save-as-menu"
-    let saveItem = try findMenuItem(app: appElement, pid: options.pid, sourceWindow: sourceWindow,
-                                    menuTitle: "File", itemTitle: "Save Live Set As...")
-    try requireFreshMenuFocus(app: appElement, pid: options.pid, sourceWindow: sourceWindow,
-                              menu: activeFileMenu, item: saveItem)
-    captureMenuDiagnostics(app: appElement, pid: options.pid, menu: activeFileMenu, item: saveItem,
-                           ownedWindow: sourceWindow)
-    saveAsMenuAttempted = true
-    try press(saveItem)
-    menuDiagnostics = nil
+    try activateExactTarget(process, app: appElement, sourceWindow: initialProjectDialog ?? sourceWindow)
+    if options.saveCopyOnly {
+        try requireSameProcess(process, options: options)
+        _ = try checkedSaveCopyBackup(options, source: source, selected: destination, final: copyFinal!, directory: destination.deletingLastPathComponent())
+        _ = try saveCopyTransport(sourceWindow)
+    }
+    if let initialProjectDialog {
+        phase = "project-required-dialog"
+        let (dialog, projectButton) = try projectRequiredButton(appElement)
+        try require(CFEqual(dialog, initialProjectDialog) && focusedWindowIs(appElement, dialog), "Project-required dialog identity/focus changed")
+        _ = try exactDocumentWindow(appElement, url: source)
+        try checkSaveCopyDeadline(); projectPromptAttempted = true
+        try press(projectButton)
+    } else {
+        phase = "save-as-menu"
+        let saveItem = try findMenuItem(app: appElement, pid: options.pid, sourceWindow: sourceWindow,
+                                        menuTitle: "File", itemTitle: "Save Live Set As...")
+        try requireFreshMenuFocus(app: appElement, pid: options.pid, sourceWindow: sourceWindow,
+                                  menu: activeFileMenu, item: saveItem)
+        captureMenuDiagnostics(app: appElement, pid: options.pid, menu: activeFileMenu, item: saveItem,
+                               ownedWindow: sourceWindow)
+        saveAsMenuAttempted = true
+        try press(saveItem)
+        menuDiagnostics = nil
+    }
     phase = "save-dialog"
     let saveWindow = try waitForWindow(appElement, title: "Save")
+    if options.saveCopyOnly {
+        try require(identifier(saveWindow) == "save-panel", "exact Save panel identifier required")
+        try saveCopyWindows(appElement, allowing: saveWindow)
+    }
+    if projectPromptAttempted { projectPromptVerified = true }
     try ensureNoDialogs(appElement, except: "Save")
     try focusWindow(appElement, pid: options.pid, window: saveWindow)
     _ = try exactDocumentWindow(appElement, url: source)
@@ -861,12 +1096,34 @@ func run(_ options: Options) throws -> [String: Any] {
     try waitForGoToSheetDismissed(refreshedWindow)
     let saveButton = try waitForSaveButtonEnabled(app: appElement, pid: options.pid, bundleID: options.bundleID,
                                                  process: process, saveWindow: refreshedWindow, source: source,
-                                                 originalSourceIdentity: originalSourceIdentity, destination: destination)
+                                                 originalSourceIdentity: originalSourceIdentity, destination: destination,
+                                                 additionalGuard: options.saveCopyOnly ? {
+        try checkSaveCopyDeadline(); try requireSameProcess(process, options: options)
+        try saveCopyWindows(appElement, allowing: refreshedWindow)
+        _ = try saveCopyTransport(sourceWindow)
+        _ = try checkedSaveCopyBackup(options, source: source, selected: destination, final: copyFinal!, directory: destination.deletingLastPathComponent())
+    } : nil)
 
     phase = "save"
+    try checkSaveCopyDeadline()
     saveAttempted = true
     try press(saveButton)
     phase = "verify-saved-set"
+    if options.saveCopyOnly {
+        let saved = try waitForSavedCopy(app: appElement, process: process, options: options, source: source, before: copySourcePin!,
+                                         final: copyFinal!, directory: destination.deletingLastPathComponent(), directoryPin: copyDirectoryPin!)
+        let finalWindow = try exactDocumentWindow(appElement, url: copyFinal!)
+        let transport = try saveCopyTransport(finalWindow), afterSource = try setPin(source)
+        try require(samePin(afterSource, copySourcePin!), "source changed after Save As")
+        try requireSameProcess(process, options: options); try checkSaveCopyDeadline()
+        return ["format": "codex-devtools-live-set-save-as-v1", "status": "saved-copy", "read_only": false, "same_process": true,
+                "target": ["pid": options.pid, "bundle_identifier": options.bundleID], "app": options.appPath!,
+                "source_set_url": source.absoluteString, "destination_set_url": destination.absoluteString, "expected_final_set_url": copyFinal!.absoluteString,
+                "saved_set_url": copyFinal!.absoluteString, "source_file": copySourcePin!, "source_file_after_save": afterSource, "destination_file": saved,
+                "destination_directory": copyDirectoryPin!, "project_required_dialog": options.projectRequiredDialog, "transport": transport,
+                "stable_observations": 3, "backup_receipt": options.backupReceipt!, "actions": saveCopyActions(options, saved: true),
+                "evidence_limit": "same-process AX URL and stable file bytes/metadata only; M4L state, dependency resolution, silence and recall unproven"]
+    }
     var stableSamples = 0
     var lastSavedSize: Int = -1
     var saveVerified = false
@@ -1220,6 +1477,11 @@ do {
     let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
     print(String(data: data, encoding: .utf8) ?? "{}")
 } catch let error as LifecycleFailure {
+    if options.saveCopyOnly {
+        let report = stoppedSaveCopy(options, error: error.message)
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { print(String(data: data, encoding: .utf8) ?? "{}") }
+        exit(1)
+    }
     var result: [String: Any] = ["format": "codex-devtools-live-set-lifecycle-v1", "status": "stopped",
         "target": ["pid": initialPID ?? 0, "bundle_identifier": initialBundleID ?? ""],
         "phase": error.phase, "error": error.message,
@@ -1235,6 +1497,11 @@ do {
        let text = String(data: data, encoding: .utf8) { print(text) }
     exit(1)
 } catch {
+    if options.saveCopyOnly {
+        let report = stoppedSaveCopy(options, error: String(describing: error))
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { print(String(data: data, encoding: .utf8) ?? "{}") }
+        exit(1)
+    }
     var result: [String: Any] = ["format": "codex-devtools-live-set-lifecycle-v1", "status": "stopped",
         "target": ["pid": initialPID ?? 0, "bundle_identifier": initialBundleID ?? ""],
         "phase": phase, "error": String(describing: error),

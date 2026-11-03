@@ -96,6 +96,13 @@ For JavaScript tests, `python3 -m codex_devtools runtime node --json` discovers 
 
 Opt-in test harnesses can publish a local command mailbox for repeatable scripted control through their own existing driver inlet. See [HARNESS-CONTROL.md](docs/HARNESS-CONTROL.md) for exact-instance/pin selection, explicit completion, timeout fencing and real cross-process tests. This transport provides no general Max, Live or MIDI control.
 
+`ax live-set-save-as` provides guarded same-process owned preservation through the
+shared native Save As sequence, including a separately explicit exact
+Project-required dialog mode. It requires an exact source hash, fresh destination,
+mandatory expected final path and private preimage backup; it never quits or opens
+another Set. See [same-process Save As](docs/LIVE-SET-SAVE-AS.md). Source checks do
+not establish native UI acceptance.
+
 For native CUA sessions, the explicit app-handle [Live Set Save As helper](docs/CUA-LIVE-SAVE-AS.md) guards a fresh preservation copy, exact source/final URLs, stopped transport and a single Save attempt. It is not a CLI command; its Node fake-app checks do not establish native Live behavior. Run `node tests/live_set_save_as.test.mjs` with an existing runtime.
 
 `ax live-set-lifecycle` performs read-only preflight by default. Its explicit `--execute` mode uses native AX menu/control actions, a PID-targeted Go To Folder chord, normal Quit, and `NSWorkspace` to reopen one exact new sibling Set. It stops on ambiguous dialogs/actions or uncertain outcomes; offline tests and compile checks do not run Live. See [Guarded Live Set lifecycle](docs/LIVE-SET-LIFECYCLE.md).

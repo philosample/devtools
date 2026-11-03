@@ -271,6 +271,21 @@ def build_parser() -> argparse.ArgumentParser:
     set_open.add_argument("--save-owned-source", action="store_true")
     set_open.add_argument("--backup-root", type=Path)
     set_open.add_argument("--execute", action="store_true")
+    save_as = ax_sub.add_parser(
+        "live-set-save-as",
+        help="preserve an owned Set through one same-process Save As without quit/reopen",
+    )
+    save_as.add_argument("--pid", required=True, type=int)
+    save_as.add_argument("--expected-bundle-id", required=True)
+    save_as.add_argument("--source-set", required=True, type=Path)
+    save_as.add_argument("--source-sha256", required=True)
+    save_as.add_argument("--destination-directory", required=True, type=Path)
+    save_as.add_argument("--destination-filename", required=True)
+    save_as.add_argument("--expected-final-set", required=True, type=Path)
+    save_as.add_argument("--app", required=True, type=Path)
+    save_as.add_argument("--backup-root", required=True, type=Path)
+    save_as.add_argument("--project-required-dialog", action="store_true")
+    save_as.add_argument("--execute", action="store_true")
     midi_sync = ax_sub.add_parser(
         "live-midi-sync",
         help="inspect or explicitly isolate and restore exact MIDI Output Sync controls",
@@ -515,6 +530,24 @@ def main(argv: list[str] | None = None) -> int:
                 app_bundle=args.app,
                 save_owned_source=args.save_owned_source,
                 backup_root=args.backup_root,
+                execute=args.execute,
+            )
+            _json_out(result)
+            return 1 if result["status"] == "stopped" else 0
+        if args.group == "ax" and args.action == "live-set-save-as":
+            from .live_set_save_as import run_set_save_as
+
+            result = run_set_save_as(
+                args.pid,
+                expected_bundle_id=args.expected_bundle_id,
+                source_set=args.source_set,
+                source_sha256=args.source_sha256,
+                destination_directory=args.destination_directory,
+                destination_filename=args.destination_filename,
+                expected_final_set=args.expected_final_set,
+                app_bundle=args.app,
+                backup_root=args.backup_root,
+                project_required_dialog=args.project_required_dialog,
                 execute=args.execute,
             )
             _json_out(result)
