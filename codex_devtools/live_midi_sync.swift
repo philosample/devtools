@@ -11,6 +11,10 @@ let outputSuffix = ": MIDI Output: Sync"
 let receiptFormat = "codex-devtools-live-midi-sync-receipt-v1"
 
 struct Options {
+    var inputMode = ""
+    var inputExpected = ""
+    var inputIdentity = ""
+    var inputDesired = -1
     var pid: pid_t = 0
     var bundleID = ""
     var expectedCount = 0
@@ -44,6 +48,10 @@ func parseOptions() throws -> Options {
         guard index + 1 < args.count else { throw SyncFailure(message: "missing value for \(key)") }
         let value = args[index + 1]
         switch key {
+        case "--input-inventory": result.inputMode = value
+        case "--input-expected": result.inputExpected = value
+        case "--input-identity": result.inputIdentity = value
+        case "--input-desired": result.inputDesired = Int(value) ?? -1
         case "--pid":
             guard let parsed = Int32(value), parsed > 0 else { throw SyncFailure(message: "PID must be positive") }
             result.pid = pid_t(parsed)
@@ -63,6 +71,23 @@ func parseOptions() throws -> Options {
         }
         index += 2
     }
+    if !result.inputMode.isEmpty {
+        guard result.pid > 0, !result.bundleID.isEmpty, result.expectedCount > 0,
+              ["inspect", "press"].contains(result.inputMode) else {
+            throw SyncFailure(message: "invalid input inventory arguments")
+        }
+        if result.inputMode == "press" {
+            guard ["isolate", "restore"].contains(result.operation),
+                  !result.baselinePath.isEmpty, result.baselineHash.count == 64,
+                  !result.inputExpected.isEmpty, !result.inputIdentity.isEmpty,
+                  result.inputDesired == 0 || result.inputDesired == 1 else {
+                throw SyncFailure(message: "input press requires explicit operation, baseline and exact target")
+            }
+        } else if !result.operation.isEmpty || !result.baselinePath.isEmpty || !result.inputExpected.isEmpty || !result.inputIdentity.isEmpty || result.inputDesired != -1 {
+            throw SyncFailure(message: "inspect never accepts action arguments")
+        }
+        return result
+    }
     guard result.pid > 0, !result.bundleID.isEmpty, result.expectedCount > 0,
           ["isolate", "restore"].contains(result.operation),
           !result.baselinePath.isEmpty, result.baselineHash.count == 64,
@@ -72,12 +97,12 @@ func parseOptions() throws -> Options {
     return result
 }
 
-func axValue(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
+func axValue(_ element: AXUIElement, _ attribute: String, allowUnsupported: Bool = false) throws -> CFTypeRef? {
     AXUIElementSetMessagingTimeout(element, 2.0)
     var value: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
     if error == .success { return value }
-    if error == .noValue { return nil }
+    if error == .noValue || (allowUnsupported && error == .attributeUnsupported) { return nil }
     throw SyncFailure(message: "AX read \(attribute) failed (\(error.rawValue))")
 }
 
@@ -471,6 +496,226 @@ func run() throws -> [String: Any] {
     return result
 }
 
+
+// Input mode deliberately uses the same bounded AX read/press/focus primitives above.
+// Its separate complete inventory protects every Settings checkbox, including outputs.
+let inputFormat = "codex-devtools-live-midi-inputs-baseline-v1"
+
+func inputInventory(_ app: AXUIElement) throws -> ([String: Any], AXUIElement, [String: AXUIElement]) {
+    let process = try targetCheck(options.pid, bundleID: options.bundleID)
+    guard let launch = process.launchDate, let name = process.localizedName, !name.isEmpty else {
+        throw SyncFailure(message: "input target launch identity is unavailable")
+    }
+    guard let windows = try axValue(app, kAXWindowsAttribute as String) as? [AXUIElement],
+          !windows.isEmpty, windows.count <= maximumWindows else {
+        throw SyncFailure(message: "complete input Settings window inventory unavailable")
+    }
+    let settings = try windows.filter { try requiredString($0, kAXTitleAttribute as String) == "Settings" }
+    guard settings.count == 1 else { throw SyncFailure(message: "unique Settings window required") }
+    var queue: [(AXUIElement, Int)] = [(settings[0], 0)]
+    var seen = Set<CFHashCode>()
+    var controls: [String: AXUIElement] = [:]
+    var checks: [[String: Any]] = []
+    var groups: [String: Set<String>] = [:]
+    var order: [String] = []
+    var descriptions = Set<String>()
+    var visited = 0
+    while !queue.isEmpty {
+        let (element, depth) = queue.removeFirst()
+        let hash = CFHash(element)
+        guard seen.insert(hash).inserted, visited < maximumElements else {
+            throw SyncFailure(message: "duplicate AX identity or incomplete input tree")
+        }
+        let index = visited
+        visited += 1
+        let role = try requiredString(element, kAXRoleAttribute as String)
+        let optionalDescription = try axValue(element, kAXDescriptionAttribute as String, allowUnsupported: role != (kAXCheckBoxRole as String)) as? String
+        if role != (kAXCheckBoxRole as String), optionalDescription?.contains(": MIDI Input:") == true {
+            throw SyncFailure(message: "input description on unexpected non-checkbox role")
+        }
+        if role == (kAXCheckBoxRole as String) {
+            guard let description = optionalDescription, !description.isEmpty,
+                  descriptions.insert(description).inserted, checks.count < 512 else {
+                throw SyncFailure(message: "checkbox description unknown, duplicate or over bound")
+            }
+            let value = try checkboxValue(element)
+            let isEnabled = try enabled(element)
+            let identity = String(hash)
+            checks.append(["index": index, "identity": identity, "description": description,
+                           "role": role, "enabled": isEnabled, "value": value])
+            controls[identity] = element
+            if description.contains(": MIDI Input:") {
+                let parts = description.components(separatedBy: ": MIDI Input: ")
+                guard parts.count == 2, !parts[0].isEmpty,
+                      parts[0] == parts[0].trimmingCharacters(in: .whitespacesAndNewlines),
+                      ["Track", "Sync", "Remote"].contains(parts[1]),
+                      isEnabled || value == 0 else {
+                    throw SyncFailure(message: "ambiguous or unmodifiable input checkbox")
+                }
+                if groups[parts[0]] == nil { groups[parts[0]] = []; order.append(parts[0]) }
+                guard groups[parts[0]]!.insert(parts[1]).inserted else {
+                    throw SyncFailure(message: "duplicate input flag")
+                }
+            }
+        }
+        let children = try childElements(element)
+        guard depth < maximumDepth || children.isEmpty,
+              visited + queue.count + children.count <= maximumElements else {
+            throw SyncFailure(message: "input Settings tree exceeds bounds")
+        }
+        queue.append(contentsOf: children.map { ($0, depth + 1) })
+    }
+    guard groups.count == options.expectedCount,
+          groups.values.allSatisfy({ $0 == Set(["Track", "Sync", "Remote"]) }) else {
+        throw SyncFailure(message: "input groups are missing, partial or differ from caller count")
+    }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let result: [String: Any] = [
+        "format": inputFormat, "status": "observed", "read_only": true,
+        "observed_at_utc": formatter.string(from: Date()),
+        "target": ["pid": Int(options.pid), "bundle_identifier": options.bundleID,
+                   "process_name": name, "launch_date": formatter.string(from: launch)],
+        "settings_window": ["title": "Settings", "identity": String(CFHash(settings[0]))],
+        "expected_input_count": options.expectedCount, "input_order": order,
+        "bounds": ["max_elements": maximumElements, "max_depth": maximumDepth,
+                   "max_windows": maximumWindows, "elements_observed": visited,
+                   "windows_observed": windows.count, "truncated": false],
+        "checkboxes": checks,
+    ]
+    return (result, settings[0], controls)
+}
+
+func inputJSON(_ path: String) throws -> (Data, [String: Any]) {
+    let url = URL(fileURLWithPath: path)
+    let attrs = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+    guard attrs.isRegularFile == true, attrs.isSymbolicLink != true else {
+        throw SyncFailure(message: "input baseline/state must be a regular file")
+    }
+    let data = try Data(contentsOf: url)
+    guard data.count <= 1_000_000,
+          let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw SyncFailure(message: "input baseline/state is invalid or over bound")
+    }
+    return (data, root)
+}
+
+func inputRows(_ value: [String: Any]) throws -> [[String: Any]] {
+    guard value["format"] as? String == inputFormat,
+          value["status"] as? String == "observed", value["read_only"] as? Bool == true,
+          value["expected_input_count"] as? Int == options.expectedCount,
+          let rows = value["checkboxes"] as? [[String: Any]], !rows.isEmpty, rows.count <= 512 else {
+        throw SyncFailure(message: "invalid complete input schema")
+    }
+    return rows
+}
+
+func inputEqual(_ first: Any?, _ second: Any?) -> Bool {
+    guard let first, let second else { return false }
+    return NSDictionary(dictionary: ["v": first]).isEqual(to: ["v": second])
+}
+
+func compareInputs(_ original: [String: Any], _ current: [String: Any], values: [String: Int]? = nil) throws {
+    for key in ["target", "settings_window", "bounds", "input_order", "expected_input_count"] {
+        guard inputEqual(original[key], current[key]) else {
+            throw SyncFailure(message: "complete input inventory changed: \(key)")
+        }
+    }
+    let before = try inputRows(original)
+    let after = try inputRows(current)
+    guard before.count == after.count else { throw SyncFailure(message: "checkbox inventory changed") }
+    for (a, b) in zip(before, after) {
+        for key in ["identity", "index", "description", "role", "enabled"] {
+            guard inputEqual(a[key], b[key]) else { throw SyncFailure(message: "checkbox identity/order/role changed") }
+        }
+        guard let identity = a["identity"] as? String,
+              let expected = values?[identity] ?? (a["value"] as? Int),
+              b["value"] as? Int == expected else {
+            throw SyncFailure(message: "checkbox value changed outside known actions")
+        }
+    }
+}
+
+func runInputs() throws -> [String: Any] {
+    guard AXIsProcessTrusted() else { throw SyncFailure(message: "Accessibility is not trusted; no prompt requested") }
+    let app = AXUIElementCreateApplication(options.pid)
+    let (initial, _, _) = try inputInventory(app)
+    if options.inputMode == "inspect" { return initial }
+    let (data, baseline) = try inputJSON(options.baselinePath)
+    guard SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == options.baselineHash else {
+        throw SyncFailure(message: "baseline changed after wrapper validation")
+    }
+    let parser = ISO8601DateFormatter()
+    parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let stamp = baseline["observed_at_utc"] as? String, let date = parser.date(from: stamp) else {
+        throw SyncFailure(message: "invalid baseline time")
+    }
+    try validateBaselineFreshness(date)
+    let (_, expected) = try inputJSON(options.inputExpected)
+    let baselineRows = try inputRows(baseline)
+    let expectedRows = try inputRows(expected)
+    guard baselineRows.count == expectedRows.count else { throw SyncFailure(message: "expected inventory changed") }
+    var permitted: [String: Int] = [:]
+    var targetOriginal: [String: Any]?
+    for (original, row) in zip(baselineRows, expectedRows) {
+        guard let identity = original["identity"] as? String, permitted[identity] == nil,
+              let originalValue = original["value"] as? Int, [0, 1].contains(originalValue),
+              let value = row["value"] as? Int, [0, 1].contains(value),
+              let description = original["description"] as? String else {
+            throw SyncFailure(message: "unknown or duplicate baseline checkbox")
+        }
+        let mutable = description.contains(": MIDI Input: ") && originalValue == 1
+        guard mutable || value == originalValue else {
+            throw SyncFailure(message: "non-target baseline value changed")
+        }
+        permitted[identity] = value
+        if identity == options.inputIdentity { targetOriginal = original }
+    }
+    try compareInputs(baseline, expected, values: permitted)
+    try compareInputs(expected, initial)
+    guard let target = targetOriginal,
+          let description = target["description"] as? String, description.contains(": MIDI Input: "),
+          target["value"] as? Int == 1, target["enabled"] as? Bool == true,
+          permitted[options.inputIdentity] != options.inputDesired,
+          options.inputDesired == (options.operation == "isolate" ? 0 : 1) else {
+        throw SyncFailure(message: "press target is not an originally on input flag")
+    }
+    // Re-enumerate after baseline parsing and before every single explicit press.
+    let (fresh, settings, controls) = try inputInventory(app)
+    try compareInputs(expected, fresh)
+    let process = try targetCheck(options.pid, bundleID: options.bundleID)
+    guard process.isActive, NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
+          try focusedSettingsWindow(app, expected: settings),
+          let control = controls[options.inputIdentity], try hasPressAction(control) else {
+        throw SyncFailure(message: "exact input Settings control is not focused/enabled/pressable")
+    }
+    // Read all values once more; unavailable values stay errors rather than becoming Off.
+    for row in try inputRows(fresh) {
+        let identity = row["identity"] as! String
+        guard let element = controls[identity], try checkboxValue(element) == permitted[identity] else {
+            throw SyncFailure(message: "checkbox changed during prepress readback")
+        }
+    }
+    let finalProcess = try targetCheck(options.pid, bundleID: options.bundleID)
+    guard finalProcess.launchDate == process.launchDate, finalProcess.isActive,
+          NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
+          try focusedSettingsWindow(app, expected: settings), try enabled(control),
+          try checkboxValue(control) == permitted[options.inputIdentity],
+          try hasPressAction(control) else {
+        throw SyncFailure(message: "input target/focus/state changed immediately before press")
+    }
+    try validateBaselineFreshness(date)
+    phase = "input-press-outcome-unknown"
+    AXUIElementSetMessagingTimeout(control, 2.0)
+    guard AXUIElementPerformAction(control, kAXPressAction as CFString) == .success else {
+        throw SyncFailure(message: "input AXPress failed; outcome unknown")
+    }
+    let (after, _, _) = try inputInventory(app)
+    permitted[options.inputIdentity] = options.inputDesired
+    try compareInputs(expected, after, values: permitted)
+    return after
+}
+
 func emit(_ value: [String: Any], exitCode: Int32) -> Never {
     guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
           let text = String(data: data, encoding: .utf8) else {
@@ -483,9 +728,14 @@ func emit(_ value: [String: Any], exitCode: Int32) -> Never {
 
 do {
     options = try parseOptions()
-    let result = try run()
+    let result = try options.inputMode.isEmpty ? run() : runInputs()
     emit(result, exitCode: 0)
 } catch {
+    if !options.inputMode.isEmpty {
+        emit(["format": "codex-devtools-live-midi-inputs-native-error-v1",
+              "status": "stopped", "phase": phase,
+              "error": String(describing: error)], exitCode: 1)
+    }
     if var current = receipt {
         current["status"] = "stopped"
         current["phase"] = phase

@@ -278,6 +278,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow the selected isolate/restore action",
     )
     midi_sync.add_argument("--max-baseline-age-seconds", type=float, default=300.0)
+    midi_inputs = ax_sub.add_parser(
+        "live-midi-inputs",
+        help="inspect or explicitly isolate and restore all MIDI Input Track/Sync/Remote controls",
+    )
+    midi_inputs.add_argument("--pid", type=int, required=True)
+    midi_inputs.add_argument("--expected-bundle-id", required=True)
+    midi_inputs.add_argument("--expected-count", type=int, required=True)
+    midi_inputs.add_argument("--baseline", type=Path)
+    midi_inputs.add_argument(
+        "--out", type=Path, help="new baseline JSON path in inspect mode"
+    )
+    midi_inputs.add_argument(
+        "--receipt", type=Path, help="new structured receipt path in execute mode"
+    )
+    midi_inputs.add_argument(
+        "--action", dest="operation", choices=("isolate", "restore")
+    )
+    midi_inputs.add_argument(
+        "--execute",
+        action="store_true",
+        help="allow the selected isolate/restore action",
+    )
+    midi_inputs.add_argument("--max-baseline-age-seconds", type=float, default=300.0)
     live_transport = ax_sub.add_parser(
         "live-transport",
         help="inspect or explicitly play briefly or stop one exact Live Set",
@@ -479,6 +502,31 @@ def main(argv: list[str] | None = None) -> int:
             ):
                 raise ValueError("--action, --baseline and --receipt require --execute")
             result = run_live_midi_sync(
+                args.pid,
+                expected_bundle_id=args.expected_bundle_id,
+                expected_count=args.expected_count,
+                action=args.operation,
+                baseline_path=args.baseline,
+                output_path=args.receipt if args.execute else args.out,
+                execute=args.execute,
+                max_baseline_age_seconds=args.max_baseline_age_seconds,
+            )
+            _json_out(result)
+            return 1 if result["status"] == "stopped" else 0
+        if args.group == "ax" and args.action == "live-midi-inputs":
+            from .live_midi_inputs_control import run_live_midi_inputs
+
+            if args.execute and args.out is not None:
+                raise ValueError(
+                    "--out is for inspect mode; use --receipt with --execute"
+                )
+            if not args.execute and (
+                args.operation is not None
+                or args.baseline is not None
+                or args.receipt is not None
+            ):
+                raise ValueError("--action, --baseline and --receipt require --execute")
+            result = run_live_midi_inputs(
                 args.pid,
                 expected_bundle_id=args.expected_bundle_id,
                 expected_count=args.expected_count,
