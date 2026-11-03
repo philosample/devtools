@@ -305,10 +305,28 @@ def run_set_open(
             execute and report.get("same_process") is not True
         ):
             raise ValueError("Set-open action completion or same-process proof missing")
-        if (
-            report.get("destination_file") != destination_pin
-            or _read_set(destination, destination_sha256)[1] != destination_pin
-        ):
+        destination_after = _read_set(destination, destination_sha256)[1]
+        if report.get("destination_file") != destination_pin:
+            raise ValueError("destination pre-open approval pin differs")
+        if execute:
+
+            def without_ctime(pin):
+                return {
+                    key: value
+                    for key, value in pin.items()
+                    if key not in ("ctime_seconds", "ctime_nanoseconds")
+                }
+
+            delta = [] if destination_after == destination_pin else ["ctime"]
+            if (
+                report.get("destination_file_after_open") != destination_after
+                or without_ctime(destination_after) != without_ctime(destination_pin)
+                or report.get("destination_metadata_delta") != delta
+            ):
+                raise ValueError(
+                    "destination post-open pin or ctime-only delta differs"
+                )
+        elif destination_after != destination_pin:
             raise ValueError("destination bytes/identity changed")
         reported_source = report.get("source_file")
         if (

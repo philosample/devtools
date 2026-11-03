@@ -77,6 +77,8 @@ class SameProcessSetOpenTests(unittest.TestCase):
         }
         if execute:
             report["same_process"] = True
+            report["destination_file_after_open"] = dict(report["destination_file"])
+            report["destination_metadata_delta"] = []
         if execute and save:
             receipt_path = command[command.index("--backup-receipt") + 1]
             backup = json.loads(Path(receipt_path).read_text())
@@ -381,7 +383,8 @@ class SameProcessSetOpenTests(unittest.TestCase):
         self.assertIn("opened?.processIdentifier == options.pid", body)
         self.assertIn("sameSetURL(raw, expected: destination)", body)
         self.assertIn("samePin(beforeOpenSource, expectedSource)", body)
-        self.assertIn("samePin(openedDestination, destinationPin)", body)
+        self.assertIn("sameOpenedDestination(destinationPin, openedDestination)", body)
+        self.assertIn("samePin(beforeOpenDestination, destinationPin)", body)
         for forbidden in (
             "postChord",
             "postKeyStroke",
@@ -408,6 +411,92 @@ class SameProcessSetOpenTests(unittest.TestCase):
             self.assertIn(required, wait)
         self.assertNotIn("press(", wait)
         self.assertIn("unchanged/no-op Save is not inferred complete", wait)
+
+    def test_only_destination_ctime_may_change_after_open(self):
+        def changed(command):
+            before = _read_set(self.destination, self.destination_sha)[1]
+            os.chmod(self.destination, self.destination.stat().st_mode & 0o777)
+            after = _read_set(self.destination, self.destination_sha)[1]
+            self.assertNotEqual(before, after)
+            report = self.report(execute=True)
+            report["destination_file"] = before
+            report["destination_metadata_delta"] = ["ctime"]
+            return report
+
+        result = self.call(native=changed, execute=True)
+        self.assertEqual(result["status"], "opened")
+        self.assertNotEqual(
+            result["destination_file"], result["destination_file_after_open"]
+        )
+        for field in (
+            "path",
+            "sha256",
+            "bytes",
+            "device",
+            "inode",
+            "mtime_seconds",
+            "mtime_nanoseconds",
+        ):
+            self.assertEqual(
+                result["destination_file"][field],
+                result["destination_file_after_open"][field],
+            )
+
+    def test_post_open_receipt_tampering_or_other_file_changes_stop(self):
+        for field in (
+            "path",
+            "sha256",
+            "bytes",
+            "device",
+            "inode",
+            "mtime_seconds",
+            "mtime_nanoseconds",
+            "ctime_seconds",
+            "ctime_nanoseconds",
+            "delta",
+            "missing-after",
+            "before-ctime",
+        ):
+            with self.subTest(field=field):
+                report = self.report(execute=True)
+                if field == "delta":
+                    report["destination_metadata_delta"] = ["ctime"]
+                elif field == "missing-after":
+                    del report["destination_file_after_open"]
+                elif field == "before-ctime":
+                    report["destination_file"]["ctime_seconds"] += 1
+                else:
+                    report["destination_file_after_open"][field] = "tampered"
+                self.assertEqual(self.call(report, execute=True)["status"], "stopped")
+
+        for change in ("mtime", "inode", "bytes"):
+            with self.subTest(actual_change=change):
+
+                def changed(command, change=change):
+                    before = _read_set(self.destination, self.destination_sha)[1]
+                    if change == "mtime":
+                        info = self.destination.stat()
+                        os.utime(
+                            self.destination,
+                            ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000),
+                        )
+                    elif change == "inode":
+                        replacement = self.root / "replacement.als"
+                        replacement.write_bytes(self.destination.read_bytes())
+                        os.replace(replacement, self.destination)
+                    else:
+                        report = self.report(execute=True)
+                        self.destination.write_bytes(b"tampered")
+                        return report
+                    report = self.report(execute=True)
+                    report["destination_file"] = before
+                    report["destination_metadata_delta"] = ["ctime"]
+                    return report
+
+                self.assertEqual(
+                    self.call(native=changed, execute=True)["status"], "stopped"
+                )
+                self.destination.write_bytes(b"reviewed-destination")
 
     @unittest.skipUnless(
         sys.platform == "darwin" and shutil.which("swiftc"),
@@ -447,6 +536,7 @@ class SameProcessSetOpenTests(unittest.TestCase):
                         "fileIdentity",
                         "setPin",
                         "samePin",
+                        "sameOpenedDestination",
                         "checkedSourceBackup",
                     )
                 ],
@@ -458,7 +548,10 @@ do {
     options.pid = pid_t(args[4])!; options.bundleID = args[5]
     options.sourceSHA256 = args[6]; options.destinationSHA256 = args[7]
     let backup = try checkedSourceBackup(args[3], source: source, destination: destination, options: options)
-    let result: [String: Any] = ["pin": try setPin(source), "backup": backup]
+    let before = try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: args[8]))) as! [String: Any]
+    let after = try setPin(destination)
+    let result: [String: Any] = ["pin": try setPin(source), "backup": backup,
+                               "destination": after, "matches": sameOpenedDestination(before, after)]
     print(String(data: try JSONSerialization.data(withJSONObject: result), encoding: .utf8)!)
 } catch { fputs(String(describing: error), stderr); exit(1) }
 """,
@@ -485,6 +578,9 @@ do {
             PID,
             BUNDLE,
         )
+        before = _read_set(self.destination, self.destination_sha)[1]
+        before_path = self.root / "destination-before.json"
+        before_path.write_text(json.dumps(before))
         command = [
             str(binary),
             str(self.source),
@@ -494,14 +590,47 @@ do {
             BUNDLE,
             self.source_sha,
             self.destination_sha,
+            str(before_path),
         ]
         checked = subprocess.run(
             command, check=False, capture_output=True, text=True, timeout=10
         )
         self.assertEqual(checked.returncode, 0, checked.stderr)
         self.assertEqual(
-            json.loads(checked.stdout), {"pin": pin, "backup": backup["backup"]["path"]}
+            json.loads(checked.stdout),
+            {
+                "pin": pin,
+                "backup": backup["backup"]["path"],
+                "destination": before,
+                "matches": True,
+            },
         )
+        os.chmod(self.destination, self.destination.stat().st_mode & 0o777)
+        after = _read_set(self.destination, self.destination_sha)[1]
+        self.assertNotEqual(before, after)
+        checked = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(json.loads(checked.stdout)["destination"], after)
+        self.assertTrue(json.loads(checked.stdout)["matches"])
+        for key in (
+            "path",
+            "sha256",
+            "bytes",
+            "device",
+            "inode",
+            "mtime_seconds",
+            "mtime_nanoseconds",
+        ):
+            altered = dict(before)
+            altered[key] = "tampered"
+            before_path.write_text(json.dumps(altered))
+            checked = subprocess.run(
+                command, check=False, capture_output=True, text=True, timeout=10
+            )
+            self.assertEqual(checked.returncode, 0, checked.stderr)
+            self.assertFalse(json.loads(checked.stdout)["matches"], key)
         Path(backup["backup"]["path"]).write_bytes(b"tampered-backup")
         self.assertEqual(
             subprocess.run(

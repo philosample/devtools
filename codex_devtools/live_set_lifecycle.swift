@@ -988,6 +988,16 @@ func samePin(_ left: [String: Any], _ right: [String: Any]) -> Bool {
     NSDictionary(dictionary: left).isEqual(to: right)
 }
 
+// Only the destination after the issued open may differ in ctime. Pre-open
+// approval and the retained source continue to require the complete pin.
+func sameOpenedDestination(_ before: [String: Any], _ after: [String: Any]) -> Bool {
+    var left = before, right = after
+    for key in ["ctime_seconds", "ctime_nanoseconds"] {
+        left.removeValue(forKey: key); right.removeValue(forKey: key)
+    }
+    return samePin(left, right)
+}
+
 func requireSameProcess(_ process: NSRunningApplication, options: Options) throws {
     try require(!process.isTerminated, "original Live process terminated; same-process open stopped")
     let running = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == options.bundleID }
@@ -1143,7 +1153,7 @@ func runOpenExisting(_ options: Options) throws -> [String: Any] {
             if let window = matches.first {
                 try require(focusedWindowIs(app, window), "exact destination Set is not focused")
                 let openedDestination = try setPin(destination), retainedSource = try setPin(source)
-                try require(samePin(openedDestination, destinationPin) && samePin(retainedSource, expectedSource), "Set bytes/identity changed during open")
+                try require(sameOpenedDestination(destinationPin, openedDestination) && samePin(retainedSource, expectedSource), "Set bytes/identity changed during open")
                 try requireSameProcess(process, options: options)
                 try ensureNoDialogs(app)
                 let finalDestinationWindow = try exactDocumentWindow(app, url: destination)
@@ -1152,7 +1162,10 @@ func runOpenExisting(_ options: Options) throws -> [String: Any] {
                 return ["format": "codex-devtools-live-set-open-v1", "status": "opened", "read_only": false,
                         "target": ["pid": options.pid, "bundle_identifier": options.bundleID], "same_process": true,
                         "source_set_url": source.absoluteString, "destination_set_url": destination.absoluteString,
-                        "source_file": expectedSource, "destination_file": destinationPin, "save_owned_source": options.saveOwnedSource,
+                        "source_file": expectedSource, "destination_file": destinationPin,
+                        "destination_file_after_open": openedDestination,
+                        "destination_metadata_delta": samePin(destinationPin, openedDestination) ? [] : ["ctime"],
+                        "save_owned_source": options.saveOwnedSource,
                         "backup_receipt": options.backupReceipt as Any? ?? NSNull(), "backup_file": backupPath as Any? ?? NSNull(),
                         "actions": openActions(readOnly: false),
                         "evidence_limit": "same-process AX document URL plus exact file bytes/identity; SDK/LOM handles must be invalidated, and M4L path/state/silence require independent proof"]

@@ -66,6 +66,13 @@ URL through NSWorkspace with the exact running app and new-instance creation off
 The callback must return the original PID. The exact destination AX document URL,
 focus, file hash and identity must be observed before `opened`; a new process,
 changed file, unexpected prompt or uncertain callback stops without cleanup.
+The complete destination pin remains strict before open. After open only a
+destination ctime change is permitted: path, hash, size, device/inode and mtime
+must still match. Receipts retain the approved `destination_file`, full
+`destination_file_after_open` and `destination_metadata_delta` (`[]` or `["ctime"]`),
+which the Python boundary verifies against fresh file observations. This records
+an observed metadata delta without attributing its cause. The source pin remains
+strict, including ctime. Missing or inconsistent before/after proof stops unknown.
 The native operation has a 180-second monotonic budget with a 240-second outer
 process deadline. Timeout or invalid native completion retains unknown action
 outcomes and the backup; neither implies cancellation or permits retry.
