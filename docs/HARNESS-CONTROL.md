@@ -16,7 +16,8 @@ const mailbox = createHarnessMailbox({
   commands: {
     configure: {count: {type: 'integer', min: 1, max: 100}},
     arm: {},
-    start: {mode: {enum: ['diagnostic', 'measured']}}
+    start: {mode: {enum: ['diagnostic', 'measured']}},
+    approve: {approval_id: {type: 'uuid'}}
   },
   timeoutMs: 10000, // 100..60000, monotonic receiver deadline
   leaseMs: 3000,   // 200..30000, publication freshness bound
@@ -48,7 +49,7 @@ authorize a later admission, even if a request UUID is reused. A check does not
 cancel a message already sent to another process or prove its effects absent;
 retain the domain's independent safety obligations and unknown-effect evidence.
 
-Capabilities allow at most 16 named commands and 32 required scalar arguments each. Rules are bounded finite numeric/integer ranges, boolean, or a finite string enum (32 entries, 128 characters each). No free-form scripts, expressions, paths, device ports or callbacks are accepted from command data. There are no optional/extra arguments. Domain capabilities must remain restricted to the test harness; do not expose general message forwarding or host control.
+Capabilities allow at most 16 named commands and 32 required scalar arguments each. Rules are bounded finite numeric/integer ranges, boolean, a finite string enum (32 entries, 128 characters each), or a canonical lowercase RFC 4122 UUIDv4. No general string type, free-form scripts, expressions, paths, device ports or callbacks are accepted from command data. There are no optional/extra arguments. Domain capabilities must remain restricted to the test harness; do not expose general message forwarding or host control.
 
 ## Select and submit from Python
 
@@ -124,7 +125,7 @@ file hashes and inventory in Python and again in actual Node immediately before
 mutation. The reviewed `harness_mailbox.cjs` retains admission-bound
 `assertActive()` and accepts up to 64 component pins, including the 37 pins in
 the Coupled254 capture package. The helper is pinned at SHA-256
-`f4ea00b6590bbc9bc0c864b84cb528c1abcb9e2f165ef5a9a10acb1623e32280`.
+`2b5062ca694251b8f38fe88407ec756bf3234d472078f10c977f89e8fdabcd1e`.
 
 The runner uses that helper's existing `reconciliation: 'target-unloaded'` option
 to make one inert marker registration with the **old pins** and a single empty
