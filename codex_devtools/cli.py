@@ -246,6 +246,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="require all snapshots to be no older than this at verification time",
     )
+    settings_tab = ax_sub.add_parser(
+        "live-settings-tab",
+        help="inspect or explicitly open Settings on Live's Tempo & MIDI tab",
+    )
+    settings_tab.add_argument("--pid", type=int, required=True)
+    settings_tab.add_argument("--expected-bundle-id", required=True)
+    settings_tab.add_argument("--window-title", required=True)
+    settings_tab.add_argument(
+        "--expected-generation",
+        help="process generation token from a prior read-only inspection; required with --execute",
+    )
+    settings_tab.add_argument(
+        "--execute",
+        action="store_true",
+        help="activate the exact visible Live window, open Settings, and press the Tempo & MIDI tab",
+    )
     lifecycle = ax_sub.add_parser(
         "live-set-lifecycle",
         help="inspect or explicitly save, quit and reopen one exact Live Set",
@@ -509,6 +525,18 @@ def main(argv: list[str] | None = None) -> int:
             )
             _json_out(result)
             return 0 if result["valid"] else 1
+        if args.group == "ax" and args.action == "live-settings-tab":
+            from .live_settings_tab import run_live_settings_tab
+
+            result = run_live_settings_tab(
+                args.pid,
+                expected_bundle_id=args.expected_bundle_id,
+                window_title=args.window_title,
+                expected_generation=args.expected_generation,
+                execute=args.execute,
+            )
+            _json_out(result)
+            return 1 if result["status"] == "stopped" else 0
         if args.group == "ax" and args.action == "live-set-lifecycle":
             from .live_set_lifecycle import run_lifecycle
 
