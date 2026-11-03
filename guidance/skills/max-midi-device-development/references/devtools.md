@@ -52,7 +52,7 @@ python3 -m codex_devtools ax live-transport \
 
 After any Set-switch attempt, invalidate SDK/LOM and device-bound M4L handles even when Live retains the same PID. Rebind through fresh observations and verify the exact `live_set.file_path`, full graph/session, component pins, routing and quiet state. `opened` proves the same-process document URL and file observations only; it does not prove M4L recall, silence, dependency resolution, wire events or hardware behavior.
 
-For a separate clean quit/reopen lifecycle test that requires a new process, use `ax live-set-lifecycle` and read `docs/LIVE-SET-LIFECYCLE.md`. It saves a new sibling through Save As, quits normally, and requires a new PID for reopen; its receipt proves host lifecycle, not recall. Do not restart Live solely to recover a CUA or SDK bridge.
+For a separate clean quit/reopen lifecycle test that requires a new process, use `ax live-set-lifecycle` and read `docs/LIVE-SET-LIFECYCLE.md`. It saves a new sibling through Save As, quits normally, and requires a new PID for reopen; its receipt proves host lifecycle, not recall. A stopped/unknown receipt requires current-state inspection before any repeat. Do not restart Live solely to recover a CUA or SDK bridge.
 
 ```sh
 python3 -m codex_devtools ax live-set-lifecycle \
@@ -62,4 +62,4 @@ python3 -m codex_devtools ax live-set-lifecycle \
   --app "/Applications/Exact Live.app"
 ```
 
-Review the `ready` receipt before repeating the exact command with `--execute` when a process-boundary recall test is authorized. This path intentionally saves a new sibling, quits the current process normally, and reopens it through `NSWorkspace`; it is not a recovery step for an SDK, CUA or mailbox bridge. After `reopened`, verify M4L path, dependencies, state recall and quiet behavior independently.
+Review the `ready` receipt before repeating the exact command with `--execute` when a process-boundary recall test is authorized. This path intentionally saves a new sibling, quits the current process normally, and reopens it through `NSWorkspace`; it is not a recovery step for an SDK, CUA or mailbox bridge. After `reopened`, verify M4L path, dependencies, silent state recall and deterministic continuation independently.
