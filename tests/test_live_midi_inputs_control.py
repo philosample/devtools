@@ -1,4 +1,4 @@
-"""Source-only complete input matrices and action orchestration; no native AX calls."""
+"""Captured label shapes with synthetic states/identities; no native AX calls."""
 
 import copy
 import json
@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_devtools.cli import build_parser
+from codex_devtools.live_midi_ax import ROWS
 from codex_devtools.live_midi_inputs_control import (
+    FLAGS,
     FORMAT,
     _native,
     inventory_hash,
@@ -24,10 +26,10 @@ from codex_devtools.live_midi_inputs_control import (
 def matrix():
     rows = []
     for name, flags in (
-        ("IAC Driver (Studio Capture)", (1, 0, 1)),
-        ("DIN port 2", (0, 1, 0)),
+        ("TR-8S", (1, 0, 1)),
+        ("TR-8S (TR-8S CTRL)", (0, 1, 0)),
     ):
-        for flag, value in zip(("Track", "Sync", "Remote"), flags, strict=True):
+        for flag, value in zip(("Track", "Sync", "Remote Control"), flags, strict=True):
             rows.append(
                 {
                     "identity": str(len(rows) + 10),
@@ -39,8 +41,9 @@ def matrix():
                 }
             )
     for description, value in (
-        ("IAC Driver (Studio Capture): MIDI Output: Track", 1),
+        (ROWS["output_track"], 1),
         ("DIN port 2: MIDI Output: Sync", 1),
+        (ROWS["output_remote"], 0),
         ("Other Settings checkbox", 0),
     ):
         rows.append(
@@ -74,7 +77,7 @@ def matrix():
         },
         "settings_window": {"title": "Settings", "identity": "settings-123"},
         "expected_input_count": 2,
-        "input_order": ["IAC Driver (Studio Capture)", "DIN port 2"],
+        "input_order": ["TR-8S", "TR-8S (TR-8S CTRL)"],
         "checkboxes": rows,
     }
     return seal(result)
@@ -124,6 +127,27 @@ class InventoryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     validate(seal(baseline))
 
+    def test_raw_remote_control_label_matches_existing_six_switch_contract(self):
+        self.assertEqual(FLAGS, ("Track", "Sync", "Remote Control"))
+        self.assertTrue(ROWS["input_remote"].endswith(": MIDI Input: Remote Control"))
+        baseline = matrix()
+        self.assertEqual(
+            baseline["checkboxes"][2]["description"],
+            "TR-8S: MIDI Input: Remote Control",
+        )
+        self.assertEqual(
+            baseline["checkboxes"][5]["description"],
+            "TR-8S (TR-8S CTRL): MIDI Input: Remote Control",
+        )
+        validate(baseline)
+        baseline["checkboxes"][2]["description"] = "TR-8S: MIDI Input: Remote"
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            validate(seal(baseline))
+        baseline = matrix()
+        baseline["checkboxes"].pop(2)
+        with self.assertRaisesRegex(ValueError, "partial"):
+            validate(seal(baseline))
+
     def test_hash_and_cross_schema_rejected(self):
         baseline = matrix()
         baseline["checkboxes"][0]["value"] = 0
@@ -151,6 +175,7 @@ class InventoryTests(unittest.TestCase):
         for mutation in (
             lambda b: b["checkboxes"][7].update(value=0),
             lambda b: b["checkboxes"][8].update(value=1),
+            lambda b: b["checkboxes"][9].update(value=1),
             lambda b: b["target"].update(launch_date="new process"),
             lambda b: b["checkboxes"][0].update(identity="replacement"),
             lambda b: b["settings_window"].update(identity="replacement"),
@@ -305,6 +330,8 @@ class NativePolicySourceTests(unittest.TestCase):
                 source
                 + r"""
 options.expectedCount = 2
+precondition(inputFlags == Set(["Track", "Sync", "Remote Control"]))
+precondition(!inputFlags.contains("Remote"), "unobserved short alias must fail")
 let (_, baseline) = try inputJSON(CommandLine.arguments[1])
 try compareInputs(baseline, baseline)
 var changed = baseline

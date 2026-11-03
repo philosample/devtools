@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .live_midi_ax import ROWS as STUDIO_CAPTURE_ROWS
 from .live_midi_sync_control import (
     _replace_owned_json,
     _safe_new_path,
@@ -21,7 +22,10 @@ from .live_midi_sync_control import (
 
 FORMAT = "codex-devtools-live-midi-inputs-baseline-v1"
 RECEIPT_FORMAT = "codex-devtools-live-midi-inputs-receipt-v1"
-FLAGS = ("Track", "Sync", "Remote")
+FLAGS = tuple(
+    STUDIO_CAPTURE_ROWS[f"input_{flag}"].rpartition(": MIDI Input: ")[2]
+    for flag in ("track", "sync", "remote")
+)
 MAX_SECONDS = 180
 MAX_CHECKBOXES = 512
 

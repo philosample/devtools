@@ -500,6 +500,7 @@ func run() throws -> [String: Any] {
 // Input mode deliberately uses the same bounded AX read/press/focus primitives above.
 // Its separate complete inventory protects every Settings checkbox, including outputs.
 let inputFormat = "codex-devtools-live-midi-inputs-baseline-v1"
+let inputFlags = Set(["Track", "Sync", "Remote Control"])
 
 func inputInventory(_ app: AXUIElement) throws -> ([String: Any], AXUIElement, [String: AXUIElement]) {
     let process = try targetCheck(options.pid, bundleID: options.bundleID)
@@ -548,7 +549,7 @@ func inputInventory(_ app: AXUIElement) throws -> ([String: Any], AXUIElement, [
                 let parts = description.components(separatedBy: ": MIDI Input: ")
                 guard parts.count == 2, !parts[0].isEmpty,
                       parts[0] == parts[0].trimmingCharacters(in: .whitespacesAndNewlines),
-                      ["Track", "Sync", "Remote"].contains(parts[1]),
+                      inputFlags.contains(parts[1]),
                       isEnabled || value == 0 else {
                     throw SyncFailure(message: "ambiguous or unmodifiable input checkbox")
                 }
@@ -566,7 +567,7 @@ func inputInventory(_ app: AXUIElement) throws -> ([String: Any], AXUIElement, [
         queue.append(contentsOf: children.map { ($0, depth + 1) })
     }
     guard groups.count == options.expectedCount,
-          groups.values.allSatisfy({ $0 == Set(["Track", "Sync", "Remote"]) }) else {
+          groups.values.allSatisfy({ $0 == inputFlags }) else {
         throw SyncFailure(message: "input groups are missing, partial or differ from caller count")
     }
     let formatter = ISO8601DateFormatter()

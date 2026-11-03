@@ -1,8 +1,8 @@
 # Live MIDI input isolation and exact restoration
 
 `ax live-midi-inputs` is a separate command/schema from `ax live-midi-sync`.
-It inventories **every input row's Track, Sync and Remote flag** and every other
-Settings checkbox. Inspect is read-only; actions require explicit `--execute`.
+It inventories **every input row's Track, Sync and Remote Control flag** and
+every other Settings checkbox. Inspect is read-only; actions require explicit `--execute`.
 No MIDI is sent. No Set, output setting, app lifecycle, keyboard, AppleScript or
 screen-coordinate action is involved.
 
@@ -10,8 +10,10 @@ screen-coordinate action is involved.
 
 The operator must independently discover the actual input row count using a
 complete `ax snapshot --pid PID --window-title Settings`, grouping the exact
-`: MIDI Input: Track`, `: MIDI Input: Sync`, and `: MIDI Input: Remote` checkbox
-descriptions by device name. The known output count is **not** an input count.
+`: MIDI Input: Track`, `: MIDI Input: Sync`, and
+`: MIDI Input: Remote Control` checkbox descriptions by device name. `Remote Control` is the raw English AX label,
+matching the existing six-switch verifier; the shorter `Remote` alias is rejected.
+The known output count is **not** an input count.
 A missing/partial/ambiguous group, duplicate identity, unreadable checkbox,
 disabled On input, wrong PID/bundle or truncated tree blocks use. Disabled Off
 inputs may be recorded and are never pressed.

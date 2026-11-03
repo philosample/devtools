@@ -280,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     midi_sync.add_argument("--max-baseline-age-seconds", type=float, default=300.0)
     midi_inputs = ax_sub.add_parser(
         "live-midi-inputs",
-        help="inspect or explicitly isolate and restore all MIDI Input Track/Sync/Remote controls",
+        help="inspect or explicitly isolate and restore MIDI input Track, Sync and Remote Control flags",
     )
     midi_inputs.add_argument("--pid", type=int, required=True)
     midi_inputs.add_argument("--expected-bundle-id", required=True)
