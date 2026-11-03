@@ -1,7 +1,6 @@
 import hashlib
 import json
 import plistlib
-import subprocess
 import tempfile
 import threading
 import time
@@ -10,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_devtools.midi_capture import (
+    _validate_ready_marker,
     _wait_for_final_capture,
     capture,
     make_template,
@@ -165,7 +165,24 @@ class CaptureSaveSettlementTests(unittest.TestCase):
                     plistlib.dumps({"version": 2}, fmt=plistlib.FMT_BINARY)
                 )
                 Path(command[3]).write_bytes(template_bytes)
-                return subprocess.CompletedProcess(command, 0, "closed", "")
+                Path(command[8]).write_text(command[9])
+
+                class Process:
+                    args = command
+                    returncode = None
+                    pid = 12345
+
+                    def poll(self):
+                        return self.returncode
+
+                    def communicate(self, timeout=None):
+                        self.returncode = 0
+                        return "closed", ""
+
+                    def kill(self):
+                        self.returncode = -9
+
+                return Process()
 
             real_wait = _wait_for_final_capture
 
@@ -177,7 +194,8 @@ class CaptureSaveSettlementTests(unittest.TestCase):
             with (
                 patch("codex_devtools.midi_capture.sys.platform", "darwin"),
                 patch(
-                    "codex_devtools.midi_capture.subprocess.run", side_effect=automation
+                    "codex_devtools.midi_capture.subprocess.Popen",
+                    side_effect=automation,
                 ),
                 patch(
                     "codex_devtools.midi_capture._wait_for_final_capture",
@@ -195,6 +213,276 @@ class CaptureSaveSettlementTests(unittest.TestCase):
                 receipt["capture_sha256"],
                 hashlib.sha256(saved_capture.read_bytes()).hexdigest(),
             )
+
+
+class CaptureReadyMarkerTests(unittest.TestCase):
+    class LiveProcess:
+        def __init__(self, returncode=None):
+            self.returncode = returncode
+            self.pid = 789
+
+        def poll(self):
+            return self.returncode
+
+    def test_valid_marker_is_tied_to_live_run_and_preflight_source(self):
+        source_identity = {"portInputStream": [123]}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            preflight = root / "preflight.mmon"
+            preflight.write_bytes(
+                plistlib.dumps(
+                    {
+                        "version": 2,
+                        "streamSettings": {
+                            "portInputStream": [{"uniqueID": 123}],
+                            "spyingInputStream": [],
+                        },
+                    },
+                    fmt=plistlib.FMT_BINARY,
+                )
+            )
+            expected = {
+                "schema": "devtools-midi-capture-ready-v1",
+                "run_id": "run-123",
+                "capture_process_pid": 456,
+                "capture_file": "capture-run.mmon",
+                "capture_document_url": "file:///tmp/capture-run.mmon",
+                "template_sha256": "a" * 64,
+                "configured_source_identity": source_identity,
+            }
+            marker = root / "capture-ready.json"
+            marker.write_text(json.dumps(expected))
+
+            ready = _validate_ready_marker(
+                marker,
+                expected,
+                self.LiveProcess(),
+                preflight,
+                source_identity,
+            )
+
+            self.assertEqual(ready["run_id"], "run-123")
+            self.assertEqual(ready["capture_process_pid"], 456)
+            self.assertEqual(ready["automation_process_pid"], 789)
+            self.assertEqual(
+                ready["preflight_sha256"],
+                hashlib.sha256(preflight.read_bytes()).hexdigest(),
+            )
+
+    def test_partial_stale_mismatched_and_exited_markers_fail_closed(self):
+        source_identity = {"portInputStream": [123]}
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            preflight = root / "preflight.mmon"
+            preflight.write_bytes(
+                plistlib.dumps(
+                    {
+                        "version": 2,
+                        "streamSettings": {
+                            "portInputStream": [{"uniqueID": 123}],
+                        },
+                    },
+                    fmt=plistlib.FMT_BINARY,
+                )
+            )
+            expected = {
+                "schema": "devtools-midi-capture-ready-v1",
+                "run_id": "current-run",
+                "capture_process_pid": 456,
+                "capture_file": "capture-run.mmon",
+                "capture_document_url": "file:///tmp/capture-run.mmon",
+                "template_sha256": "a" * 64,
+                "configured_source_identity": source_identity,
+            }
+            marker = root / "capture-ready.json"
+            cases = (
+                ("partial", "{", self.LiveProcess(), "incomplete"),
+                (
+                    "stale run",
+                    json.dumps({**expected, "run_id": "previous-run"}),
+                    self.LiveProcess(),
+                    "does not match",
+                ),
+                (
+                    "wrong process",
+                    json.dumps({**expected, "capture_process_pid": 789}),
+                    self.LiveProcess(),
+                    "does not match",
+                ),
+                (
+                    "process already exited",
+                    json.dumps(expected),
+                    self.LiveProcess(returncode=0),
+                    "exited before readiness",
+                ),
+            )
+            for label, contents, process, message in cases:
+                with self.subTest(label=label):
+                    marker.write_text(contents)
+                    with self.assertRaisesRegex(ValueError, message):
+                        _validate_ready_marker(
+                            marker,
+                            expected,
+                            process,
+                            preflight,
+                            source_identity,
+                        )
+            marker.write_text(json.dumps(expected))
+            with self.assertRaisesRegex(ValueError, "differ from configured"):
+                _validate_ready_marker(
+                    marker,
+                    expected,
+                    self.LiveProcess(),
+                    preflight,
+                    {"portInputStream": [999]},
+                )
+
+    def test_applescript_publishes_marker_after_clear_at_capture_start(self):
+        script = (
+            Path(__file__).parents[1] / "codex_devtools" / "midi_capture.applescript"
+        ).read_text()
+        clear_position = script.index('click button "Clear" of eventContainer')
+        boundary_position = script.index("set startedAt to (current date)")
+        publish_position = script.index("set readyMarkerTempPath")
+        capture_wait_position = script.index("delay secondsToCapture")
+        self.assertLess(clear_position, boundary_position)
+        self.assertLess(boundary_position, publish_position)
+        self.assertLess(publish_position, capture_wait_position)
+        self.assertIn("/bin/ln ", script)
+
+
+class CaptureReadyAdmissionIntegrationTests(unittest.TestCase):
+    @staticmethod
+    def template_bytes(source_id=123):
+        return plistlib.dumps(
+            {
+                "version": 2,
+                "streamSettings": {
+                    "portInputStream": [{"uniqueID": source_id, "name": "IAC"}],
+                },
+            },
+            fmt=plistlib.FMT_BINARY,
+        )
+
+    @staticmethod
+    def preflight_bytes(source_id=123):
+        return plistlib.dumps(
+            {
+                "version": 2,
+                "streamSettings": {
+                    "portInputStream": [{"uniqueID": source_id, "name": "IAC"}],
+                    "spyingInputStream": [],
+                },
+            },
+            fmt=plistlib.FMT_BINARY,
+        )
+
+    class FakeProcess:
+        def __init__(self, command, *, exit_before_publication=False):
+            self.args = command
+            self.pid = 12345
+            self.returncode = None
+            self.poll_count = 0
+            self.exit_before_publication = exit_before_publication
+
+        def poll(self):
+            self.poll_count += 1
+            if self.exit_before_publication and self.poll_count >= 3:
+                self.returncode = 0
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = 0
+            return "closed", ""
+
+        def kill(self):
+            self.returncode = -9
+
+    def run_mocked_capture(
+        self, root, preflight_source_id=123, *, exit_before_ready=False
+    ):
+        template = root / "template.mmon"
+        template.write_bytes(self.template_bytes())
+        out = root / "capture-run"
+        processes = []
+
+        def launch(command, **kwargs):
+            Path(command[3]).write_bytes(self.preflight_bytes(preflight_source_id))
+            Path(command[8]).write_text(command[9])
+            process = self.FakeProcess(
+                command, exit_before_publication=exit_before_ready
+            )
+            processes.append(process)
+            return process
+
+        def settled_capture(path):
+            return (
+                {
+                    "events": [],
+                    "settings": {
+                        "streamSettings": {
+                            "portInputStream": [],
+                            "spyingInputStream": [],
+                        }
+                    },
+                },
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+
+        with (
+            patch("codex_devtools.midi_capture.sys.platform", "darwin"),
+            patch("codex_devtools.midi_capture.subprocess.Popen", side_effect=launch),
+            patch(
+                "codex_devtools.midi_capture._wait_for_final_capture",
+                side_effect=settled_capture,
+            ),
+        ):
+            result = capture(template, out, seconds=1)
+        return out, result, processes
+
+    def test_capture_publishes_validated_ready_only_after_live_source_check(self):
+        with tempfile.TemporaryDirectory() as folder:
+            out, receipt, processes = self.run_mocked_capture(Path(folder))
+
+            self.assertEqual(receipt["status"], "captured")
+            self.assertEqual(
+                receipt["ready"]["source_identity"], {"portInputStream": [123]}
+            )
+            self.assertEqual(
+                receipt["ready"]["automation_process_pid"], processes[0].pid
+            )
+            self.assertEqual(
+                receipt["ready"]["preflight_sha256"],
+                hashlib.sha256((out / "preflight.mmon").read_bytes()).hexdigest(),
+            )
+            self.assertGreaterEqual(processes[0].poll_count, 3)
+            saved_receipt = json.loads((out / "receipt.json").read_text())
+            self.assertEqual(saved_receipt["ready"], receipt["ready"])
+
+    def test_preflight_source_mismatch_never_publishes_ready(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with self.assertRaisesRegex(ValueError, "partial evidence retained"):
+                self.run_mocked_capture(root, preflight_source_id=999)
+
+            out = root / "capture-run"
+            receipt = json.loads((out / "receipt.json").read_text())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertNotIn("ready", receipt)
+            self.assertTrue((out / "capture-ready.json").is_file())
+            self.assertIn("ready_marker_sha256", receipt)
+
+    def test_exited_automation_never_publishes_ready(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with self.assertRaisesRegex(ValueError, "before validated readiness"):
+                self.run_mocked_capture(root, exit_before_ready=True)
+
+            out = root / "capture-run"
+            receipt = json.loads((out / "receipt.json").read_text())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertNotIn("ready", receipt)
 
 
 if __name__ == "__main__":

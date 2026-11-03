@@ -29,6 +29,30 @@ Example expectations:
 
 Rules match exact subsets; each needs at least one selector and count bound. `report` exits 1 on failed assertions. It reports note balance within the captured window, CC ranges, invalids and per-origin clock intervals. Unmatched notes can be explained by capture boundaries; they do not by themselves prove stuck notes. Clock summaries use only known reference-second timestamps; historical host ticks are preserved without guessing units. Clock intervals describe archived MIDI timestamps, not physical delivery latency or guaranteed arrival order. UI capture windows have start/stop uncertainty and input-disconnect overhead; they are not sample-accurate timing gates. No loss detector beyond the buffer warning is claimed.
 
+Every capture run also exposes `capture-ready.json` in that new run directory.
+MIDI Monitor writes this JSON marker exclusively and atomically immediately after
+the selected document's Clear action and capture start boundary. It identifies
+the run UUID, owning CLI PID, capture filename and document URL, template hash,
+and configured source IDs. This raw marker is a boundary observation only; it
+is never permission to release stimuli because it precedes Python's validation
+of the saved preflight document.
+
+An external orchestrator must wait until `receipt.json` contains a valid `ready`
+object, then admit stimuli only while its exact capture child is still live. It
+must require `receipt.status == "running"`, `ready.schema ==
+"devtools-midi-capture-ready-v1"`, and match `ready.run_id` and
+`ready.capture_process_pid` to the marker and top-level receipt. It must also
+match `ready.automation_process_pid` to the exact `osascript` child PID it
+started and confirm that child has not exited. The `ready.source_identity` must
+match `receipt.configured_source_identity` and the marker's configured source
+IDs; `ready.preflight_sha256` must match the current `preflight.mmon` bytes, and
+the marker's template hash must match `receipt.template_sha256`. If the receipt
+is incomplete or any comparison fails, keep waiting or fail closed. A malformed,
+stale, mismatched or partial raw marker never authorizes a trigger. The handshake
+establishes the post-Clear capture boundary and validated source configuration;
+it does not prove that a MIDI source is delivering events or that a downstream
+app receives them.
+
 ## Studio Capture IAC setup
 
 Create a dedicated port in Audio MIDI Setup → MIDI Studio → IAC Driver. The studio machine now has `Studio Capture`, with the IAC driver online. Bringing IAC online also exposes pre-existing ports; no old ports were removed. CoreMIDI inventory verified the new source.

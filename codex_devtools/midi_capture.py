@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import plistlib
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from .midi_monitor import parse_document, write_csv, write_json
 _CAPTURE_SAVE_TIMEOUT_SECONDS = 30.0
 _CAPTURE_SAVE_STABLE_SECONDS = 0.5
 _CAPTURE_SAVE_POLL_SECONDS = 0.1
+_READY_MARKER_NAME = "capture-ready.json"
 
 
 def source_identity(settings: dict, *, require_source: bool = True) -> dict:
@@ -175,6 +178,74 @@ def _wait_for_final_capture(
         time.sleep(min(poll_interval, remaining))
 
 
+def _validate_ready_marker(
+    marker_path: Path,
+    expected: dict,
+    capture_process,
+    preflight_path: Path,
+    configured_source_identity: dict,
+) -> dict:
+    """Validate the atomic post-Clear marker against this live capture run."""
+    if marker_path.is_symlink():
+        raise ValueError("capture-ready marker must not be a symlink")
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("capture-ready marker is missing or incomplete") from exc
+    if marker != expected:
+        raise ValueError("capture-ready marker does not match this run")
+    if capture_process.poll() is not None:
+        raise ValueError("capture process exited before readiness was validated")
+    preflight = parse_document(preflight_path)
+    preflight_hash = hashlib.sha256(preflight_path.read_bytes()).hexdigest()
+    if preflight["document_sha256"] != preflight_hash:
+        raise ValueError("preflight document changed while it was being validated")
+    resolved_settings = preflight["settings"].get("streamSettings", {})
+    if source_identity(resolved_settings) != configured_source_identity:
+        raise ValueError(
+            "ready marker preflight sources differ from configured sources"
+        )
+    if capture_process.poll() is not None:
+        raise ValueError("capture process exited during readiness validation")
+    return {
+        "schema": "devtools-midi-capture-ready-v1",
+        "marker_file": marker_path.name,
+        "run_id": expected["run_id"],
+        "capture_process_pid": expected["capture_process_pid"],
+        "automation_process_pid": capture_process.pid,
+        "preflight_sha256": preflight_hash,
+        "source_identity": configured_source_identity,
+    }
+
+
+def _wait_for_ready_marker(
+    marker_path: Path,
+    expected: dict,
+    capture_process,
+    preflight_path: Path,
+    configured_source_identity: dict,
+    *,
+    timeout: float,
+    poll_interval: float = 0.02,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    while True:
+        if marker_path.exists():
+            return _validate_ready_marker(
+                marker_path,
+                expected,
+                capture_process,
+                preflight_path,
+                configured_source_identity,
+            )
+        if capture_process.poll() is not None:
+            raise ValueError("capture process exited before capture-ready marker")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("capture-ready marker was not written before timeout")
+        time.sleep(min(poll_interval, remaining))
+
+
 def capture(
     template: Path, out: Path, seconds: float, max_events: int = 100000
 ) -> dict:
@@ -209,6 +280,7 @@ def capture(
             settings.get("streamSettings", {})
         ),
         "capture_file": name,
+        "run_id": str(uuid.uuid4()),
         "timing_note": "UI-controlled capture; disconnecting inputs adds boundary uncertainty",
     }
     info = Path("/Applications/MIDI Monitor.app/Contents/Info.plist")
@@ -217,14 +289,28 @@ def capture(
             "CFBundleShortVersionString"
         )
     receipt_path = out / "receipt.json"
+    marker_path = out / _READY_MARKER_NAME
+    capture_process_pid = os.getpid()
+    marker = {
+        "schema": "devtools-midi-capture-ready-v1",
+        "run_id": receipt["run_id"],
+        "capture_process_pid": capture_process_pid,
+        "capture_file": name,
+        "capture_document_url": document.as_uri(),
+        "template_sha256": receipt["template_sha256"],
+        "configured_source_identity": receipt["configured_source_identity"],
+    }
+    receipt["capture_process_pid"] = capture_process_pid
+    receipt["ready_marker_file"] = marker_path.name
 
     def save():
         receipt_path.write_text(json.dumps(receipt, indent=2) + "\n")
 
     save()
     started = time.monotonic()
+    process = None
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
                 "/usr/bin/osascript",
                 str(script),
@@ -234,11 +320,38 @@ def capture(
                 str(seconds),
                 str(max_events),
                 document.as_uri(),
+                str(marker_path),
+                json.dumps(marker, separators=(",", ":")),
             ],
-            check=False,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=seconds + 60,
+        )
+        capture_deadline = started + seconds + 60
+        ready_receipt = _wait_for_ready_marker(
+            marker_path,
+            marker,
+            process,
+            out / "preflight.mmon",
+            receipt["configured_source_identity"],
+            timeout=max(0, capture_deadline - time.monotonic()),
+        )
+        if process.poll() is not None:
+            raise ValueError(
+                "capture process exited before validated readiness was published"
+            )
+        receipt["ready"] = ready_receipt
+        save()
+        try:
+            stdout, stderr = process.communicate(
+                timeout=max(0, capture_deadline - time.monotonic())
+            )
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+            raise
+        result = subprocess.CompletedProcess(
+            process.args, process.returncode, stdout, stderr
         )
         receipt["adapter_stdout"] = result.stdout.strip()
         if result.returncode:
@@ -274,6 +387,9 @@ def capture(
         )
         return receipt
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate()
         receipt["status"] = "failed"
         receipt["error"] = str(exc)
         raise ValueError(f"{exc}; partial evidence retained at {out}") from exc
@@ -285,6 +401,7 @@ def capture(
             ("preflight_sha256", out / "preflight.mmon"),
             ("events_json_sha256", out / "events.json"),
             ("events_csv_sha256", out / "events.csv"),
+            ("ready_marker_sha256", marker_path),
         ):
             if artifact.is_file() and key not in receipt:
                 receipt[key] = hashlib.sha256(artifact.read_bytes()).hexdigest()
