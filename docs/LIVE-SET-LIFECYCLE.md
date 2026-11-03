@@ -49,6 +49,21 @@ While Go To Folder is open, the focused AX window must be the unique
 the exact `PathTextField` must be found inside that sheet and be the focused
 element before Return. The command verifies that the sheet child disappears
 after Return before continuing to Save controls.
+
+After the sheet disappears, Save readiness has a five-second monotonic budget
+within the unchanged 240-second outer command deadline. Each condition-driven
+poll refreshes the same `save-panel`, exact Live PID/bundle and foreground/focus,
+filename, Where folder leaf, source URL/file metadata and absent destination.
+Missing, duplicate or changed controls, a reappearing sheet, modal prompt, changed
+identity or file drift stop immediately. Only positive enabled state on the one
+`Save`/`OKButton` authorizes the single Save press; disabled or unavailable enabled
+state waits for a fresh observation and never grants permission. No menu, field,
+keyboard or Save action is repeated by this wait. A readiness timeout leaves Save
+`not_attempted` and the prior menu outcome unchanged; the panel is left for
+operator inspection. This handles a later enabled observation after valid field
+readback without asserting why an earlier panel state was disabled. Source
+contracts and compilation do not establish native timing or Save success.
+
 During Save panel scans, AX elements that have become invalid are skipped as
 stale file-list rows. Browser `AXScrollArea`, `AXTable`, `AXOutline`, `AXRow`, and
 `AXColumn` subtrees are omitted because they do not contain the Save-panel chrome
