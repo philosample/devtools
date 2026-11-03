@@ -100,4 +100,6 @@ For native CUA sessions, the explicit app-handle [Live Set Save As helper](docs/
 
 `ax live-set-lifecycle` performs read-only preflight by default. Its explicit `--execute` mode uses native AX menu/control actions, a PID-targeted Go To Folder chord, normal Quit, and `NSWorkspace` to reopen one exact new sibling Set. It stops on ambiguous dialogs/actions or uncertain outcomes; offline tests and compile checks do not run Live. See [Guarded Live Set lifecycle](docs/LIVE-SET-LIFECYCLE.md).
 
+`ax live-set-open` reuses that native helper for one pinned existing destination in the same running Live process. Preflight is read-only; explicit `--save-owned-source` requires an exclusive hash-verified pre-save backup and positive Save completion before the single open. It never answers prompts or restarts Live. See [Guarded same-process Set open](docs/LIVE-SET-OPEN.md).
+
 `ax live-transport` inspects one exact Set by default and offers explicit bounded Play or Stop via native AX. Play is limited to 1–15 seconds, requires all 21 MIDI Output Sync controls off, and launches an independent helper that attempts Stop at a monotonic deadline. Neither inspect nor this source/tooling implementation establishes MIDI delivery or hardware behavior. See [Guarded Live transport control](docs/LIVE-TRANSPORT-CONTROL.md).

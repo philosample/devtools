@@ -257,6 +257,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="perform guarded Save As, Quit and LaunchServices reopen; default only inspects",
     )
+    set_open = ax_sub.add_parser(
+        "live-set-open",
+        help="inspect or explicitly open a pinned existing Set in the same Live process",
+    )
+    set_open.add_argument("--pid", required=True, type=int)
+    set_open.add_argument("--expected-bundle-id", required=True)
+    set_open.add_argument("--source-set", required=True, type=Path)
+    set_open.add_argument("--destination-set", required=True, type=Path)
+    set_open.add_argument("--source-sha256", required=True)
+    set_open.add_argument("--destination-sha256", required=True)
+    set_open.add_argument("--app", required=True, type=Path)
+    set_open.add_argument("--save-owned-source", action="store_true")
+    set_open.add_argument("--backup-root", type=Path)
+    set_open.add_argument("--execute", action="store_true")
     midi_sync = ax_sub.add_parser(
         "live-midi-sync",
         help="inspect or explicitly isolate and restore exact MIDI Output Sync controls",
@@ -484,6 +498,23 @@ def main(argv: list[str] | None = None) -> int:
                 source_set=args.source_set,
                 destination_set=args.destination_set,
                 app_bundle=args.app,
+                execute=args.execute,
+            )
+            _json_out(result)
+            return 1 if result["status"] == "stopped" else 0
+        if args.group == "ax" and args.action == "live-set-open":
+            from .live_set_open import run_set_open
+
+            result = run_set_open(
+                args.pid,
+                expected_bundle_id=args.expected_bundle_id,
+                source_set=args.source_set,
+                destination_set=args.destination_set,
+                source_sha256=args.source_sha256,
+                destination_sha256=args.destination_sha256,
+                app_bundle=args.app,
+                save_owned_source=args.save_owned_source,
+                backup_root=args.backup_root,
                 execute=args.execute,
             )
             _json_out(result)
