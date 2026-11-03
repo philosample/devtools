@@ -239,6 +239,39 @@ class LiveSettingsTabPolicyTests(unittest.TestCase):
         self.assertEqual(set(result["actions"].values()), {"not_attempted"})
         self.assertFalse(result["manual_inspection_required"])
 
+    def test_settings_menu_press_rechecks_desktop_windows_after_fresh_target_validation(
+        self,
+    ):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools/live_settings_tab.swift"
+        )
+        text = source.read_text(encoding="utf-8")
+        press_function = text[
+            text.index("func press(") : text.index("struct ScreenWindow")
+        ]
+        self.assertLess(
+            press_function.index("enabled(element)"),
+            press_function.index("actionNames(element)"),
+        )
+        self.assertLess(
+            press_function.index("actionNames(element)"),
+            press_function.index("beforePress?()"),
+        )
+        self.assertLess(
+            press_function.index("beforePress?()"),
+            press_function.index("AXUIElementPerformAction(element"),
+        )
+
+        menu_press = text.index('try press(freshMenuItem, action: "settings_menu") {')
+        callback_end = text.index("\n    }\n    _ = try targetProcess()", menu_press)
+        callback = text[menu_press:callback_end]
+        self.assertIn(
+            "currentDesktopWindow(pid: options.pid, expectedTitle: options.windowTitle)",
+            callback,
+        )
+        self.assertIn("existingSettingsWindow(app, pid: options.pid)", callback)
+
     def test_timeout_is_outcome_unknown_and_never_retried(self):
         with (
             patch(

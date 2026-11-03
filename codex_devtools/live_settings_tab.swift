@@ -375,6 +375,8 @@ func run() throws -> [String: Any] {
     let freshMenuItem = try exactSettingsMenuItem(app)
     try press(freshMenuItem, action: "settings_menu") {
         _ = try targetProcess()
+        _ = try currentDesktopWindow(pid: options.pid, expectedTitle: options.windowTitle)
+        _ = try existingSettingsWindow(app, pid: options.pid)
         try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid &&
                     (try isFocused(app, window: sourceWindow)),
                     "exact Live PID/window lost foreground before menu press")
