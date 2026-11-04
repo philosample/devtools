@@ -443,6 +443,81 @@ class LiveQuitPolicyTests(unittest.TestCase):
         self.assertTrue(result["manual_inspection_required"])
         self.assertEqual(native.call_count, 1)
 
+    @staticmethod
+    def modeled_termination_wait(observations, deadline):
+        for now, terminated, _ax_state in observations:
+            if now >= deadline:
+                return False
+            if terminated:
+                return True
+        return False
+
+    def test_transient_ax_unavailable_then_process_exit_is_terminated(self):
+        source = Path(__file__).parents[1] / "codex_devtools/live_quit.swift"
+        text = source.read_text(encoding="utf-8")
+        wait = text[
+            text.index("func waitForTermination(") : text.index("func verifyAppBundle(")
+        ]
+        self.assertNotIn("AX", wait)
+        self.assertIn("process.isTerminated", wait)
+        self.assertIn("guard beforeProbe < deadline else { return false }", wait)
+        self.assertIn("guard now < deadline else { return false }", wait)
+        self.assertIn("RunLoop.current.run(until:", wait)
+        self.assertIn("waitForTermination(current, deadline: deadline)", text)
+        self.assertIn("quitAccepted = current.terminate()", text)
+
+        # AX disappearance is deliberately irrelevant to the passive wait.
+        observations = [
+            (10, False, "AX unavailable"),
+            (40, False, "AX unavailable"),
+            (70, True, "process exited"),
+        ]
+        self.assertTrue(self.modeled_termination_wait(observations, deadline=100))
+
+    def test_live_process_with_prompt_until_deadline_stays_unknown(self):
+        source = Path(__file__).parents[1] / "codex_devtools/live_quit.swift"
+        text = source.read_text(encoding="utf-8")
+        wait = text[
+            text.index("func waitForTermination(") : text.index("func verifyAppBundle(")
+        ]
+        self.assertIn("guard beforeProbe < deadline else { return false }", wait)
+        self.assertIn('phase = "quit-deadline"', text)
+        self.assertIn('return receipt(status: "stopped", error:', text)
+        self.assertIn(
+            '"outcome": didTerminate ? "terminated" : quitRequested ? "unknown"', text
+        )
+        self.assertIn(
+            '"manual_inspection_required": quitRequested && !didTerminate', text
+        )
+
+        observations = [
+            (10, False, "save prompt remains open"),
+            (50, False, "save prompt remains open"),
+            (99, False, "save prompt remains open"),
+        ]
+        self.assertFalse(self.modeled_termination_wait(observations, deadline=100))
+
+    def test_expired_deadline_cannot_claim_termination(self):
+        source = Path(__file__).parents[1] / "codex_devtools/live_quit.swift"
+        text = source.read_text(encoding="utf-8")
+        wait = text[
+            text.index("func waitForTermination(") : text.index("func verifyAppBundle(")
+        ]
+        deadline_guard = wait.index(
+            "guard beforeProbe < deadline else { return false }"
+        )
+        termination_probe = wait.index("let terminated = process.isTerminated")
+        success = wait.index("if terminated { return true }")
+        after_probe_deadline_guard = wait.index(
+            "guard now < deadline else { return false }"
+        )
+        self.assertLess(deadline_guard, termination_probe)
+        self.assertLess(termination_probe, after_probe_deadline_guard)
+        self.assertLess(after_probe_deadline_guard, success)
+
+        observations = [(100, True, "process exited at deadline")]
+        self.assertFalse(self.modeled_termination_wait(observations, deadline=100))
+
     def test_pre_request_refusal_receipt_keeps_quit_not_attempted(self):
         receipt = self.native_receipt(execute=True, status="ready")
         receipt.update(status="stopped", phase="identity")
@@ -520,7 +595,7 @@ class LiveQuitPolicyTests(unittest.TestCase):
         self.assertIn("clock_gettime(CLOCK_MONOTONIC, &value)", text)
         self.assertIn("AXUIElementSetMessagingTimeout(element, timeout)", text)
         self.assertIn("Double(remaining) / nanosecondsPerSecond", text)
-        self.assertIn("guard now < deadline else { break }", text)
+        self.assertIn("guard now < deadline else { return false }", text)
         self.assertNotIn("deadline - DispatchTime.now().uptimeNanoseconds", text)
         wrapper = Path(__file__).parents[1] / "codex_devtools/live_quit_control.py"
         wrapper_text = wrapper.read_text(encoding="utf-8")

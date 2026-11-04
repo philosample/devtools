@@ -26,9 +26,12 @@ Set pinning, AX inspection, the final guard immediately before
 hashing happens inside the deadline-bounded helper process. Each AX request is
 capped by the time remaining. Python and Swift read the same Darwin
 `CLOCK_MONOTONIC` coordinate; a clock-only compiled probe is covered by the
-focused tests. A refusal before termination is
-`stopped/not_attempted`; uncertainty after the request, a dialog, AX failure,
-or timeout is `stopped/unknown` and requires manual inspection before any retry.
+focused tests. A refusal before termination is `stopped/not_attempted`. After
+the request, the helper observes only the target process's termination state
+under that same deadline. AX window disappearance during shutdown does not
+establish termination or a prompt; if the process is still running at the
+deadline, the result is `stopped/unknown` and requires manual inspection before
+any retry.
 
 The helper verifies the PID, `com.ableton.live` bundle, exact `.app` and
 `Contents/MacOS/Live` paths, and launch-date generation token. It opens the

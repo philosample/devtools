@@ -203,6 +203,21 @@ func sameTargetProcess(_ first: NSRunningApplication, _ second: NSRunningApplica
         firstGeneration == secondGeneration
 }
 
+func waitForTermination(_ process: NSRunningApplication, deadline: UInt64) throws -> Bool {
+    while true {
+        let beforeProbe = try monotonicNow()
+        guard beforeProbe < deadline else { return false }
+        let terminated = process.isTerminated
+        let now = try monotonicNow()
+        guard now < deadline else { return false }
+        if terminated { return true }
+        let remaining = deadline - now
+        let sleepSeconds = min(0.1, Double(remaining) / nanosecondsPerSecond)
+        guard sleepSeconds > 0 else { return false }
+        RunLoop.current.run(until: Date().addingTimeInterval(sleepSeconds))
+    }
+}
+
 func verifyAppBundle() throws {
     let path = try lexicalPath(options.appPath, suffix: ".app")
     try verifyRealDirectories(path)
@@ -469,30 +484,10 @@ func run() throws -> [String: Any] {
     phase = "normal-quit-request"
     quitRequested = true
     quitAccepted = current.terminate()
-    while true {
-        let beforeProbe = try monotonicNow()
-        guard beforeProbe < deadline else { break }
-        if process.isTerminated {
-            didTerminate = true
-            phase = "complete"
-            return receipt(status: "terminated")
-        }
-        do {
-            _ = try appWindows(AXUIElementCreateApplication(options.pid))
-        } catch {
-            if (try? monotonicNow()).map({ $0 >= deadline }) == true {
-                phase = "quit-deadline"
-                return receipt(status: "stopped", error: "normal quit AX observation crossed the monotonic deadline")
-            }
-            phase = "quit-prompt-or-dialog"
-            return receipt(status: "stopped", error: "normal quit exposed an AX dialog or became unreadable; no prompt was accepted")
-        }
-        let now = try monotonicNow()
-        guard now < deadline else { break }
-        let remaining = deadline - now
-        let sleepSeconds = min(0.1, Double(remaining) / nanosecondsPerSecond)
-        guard sleepSeconds > 0 else { break }
-        RunLoop.current.run(until: Date().addingTimeInterval(sleepSeconds))
+    if try waitForTermination(current, deadline: deadline) {
+        didTerminate = true
+        phase = "complete"
+        return receipt(status: "terminated")
     }
     phase = "quit-deadline"
     return receipt(status: "stopped", error: "normal quit did not terminate the exact PID before the monotonic deadline")
