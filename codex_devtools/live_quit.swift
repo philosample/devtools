@@ -61,6 +61,7 @@ func require(_ condition: @autoclosure () throws -> Bool, _ message: String) thr
 }
 
 func monotonicNow() throws -> UInt64 {
+    // Keep the cross-process deadline in Python's CLOCK_MONOTONIC coordinate.
     var value = timespec()
     guard clock_gettime(CLOCK_MONOTONIC, &value) == 0,
           value.tv_sec >= 0, value.tv_nsec >= 0 else {

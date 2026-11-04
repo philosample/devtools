@@ -24,7 +24,9 @@ command entry and passes that absolute deadline into Swift; helper startup,
 Set pinning, AX inspection, the final guard immediately before
 `NSRunningApplication.terminate()`, and termination readback share it. Set
 hashing happens inside the deadline-bounded helper process. Each AX request is
-capped by the time remaining. A refusal before termination is
+capped by the time remaining. Python and Swift read the same Darwin
+`CLOCK_MONOTONIC` coordinate; a clock-only compiled probe is covered by the
+focused tests. A refusal before termination is
 `stopped/not_attempted`; uncertainty after the request, a dialog, AX failure,
 or timeout is `stopped/unknown` and requires manual inspection before any retry.
 

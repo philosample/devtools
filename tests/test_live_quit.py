@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -330,9 +331,13 @@ class LiveQuitPolicyTests(unittest.TestCase):
             ),
             patch("codex_devtools.live_quit_control.DEADLINE_SECONDS", 0.25),
             patch(
-                "codex_devtools.live_quit_control.time.monotonic_ns",
-                side_effect=lambda: next(monotonic_values),
-            ),
+                "codex_devtools.live_quit_control.time.clock_gettime_ns",
+                side_effect=lambda clock_id: (
+                    next(monotonic_values)
+                    if clock_id == time.CLOCK_MONOTONIC
+                    else self.fail("wrapper requested a different clock")
+                ),
+            ) as clock_read,
             patch(
                 "codex_devtools.live_quit_control.subprocess.run",
                 return_value=completed,
@@ -354,6 +359,33 @@ class LiveQuitPolicyTests(unittest.TestCase):
         deadline_index = command.index("--deadline-monotonic-ns")
         self.assertEqual(command[deadline_index + 1], str(start_ns + 250_000_000))
         self.assertAlmostEqual(native.call_args.kwargs["timeout"], 0.2)
+        self.assertEqual(clock_read.call_count, 5)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Darwin clock-coordinate check")
+    def test_swift_clock_samples_are_bracketed_by_python_clock_gettime(self):
+        probe = Path(__file__).with_name("live_quit_clock_probe.swift")
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as directory:
+            binary = Path(directory) / "live-quit-clock-probe"
+            subprocess.run(
+                ["/usr/bin/swiftc", str(probe), "-o", str(binary)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            for _ in range(5):
+                before = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+                result = subprocess.run(
+                    [str(binary)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                after = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+                swift_sample = int(result.stdout.strip())
+                self.assertLessEqual(before, swift_sample)
+                self.assertLessEqual(swift_sample, after)
 
     def test_outer_timeout_is_unknown_and_requires_manual_inspection(self):
         with (
@@ -490,6 +522,10 @@ class LiveQuitPolicyTests(unittest.TestCase):
         self.assertIn("Double(remaining) / nanosecondsPerSecond", text)
         self.assertIn("guard now < deadline else { break }", text)
         self.assertNotIn("deadline - DispatchTime.now().uptimeNanoseconds", text)
+        wrapper = Path(__file__).parents[1] / "codex_devtools/live_quit_control.py"
+        wrapper_text = wrapper.read_text(encoding="utf-8")
+        self.assertIn("time.clock_gettime_ns(time.CLOCK_MONOTONIC)", wrapper_text)
+        self.assertNotIn("time.monotonic_ns()", wrapper_text)
         self.assertIn("process.bundleURL?.path == options.appPath", text)
         self.assertIn(
             'process.executableURL?.path == options.appPath + "/Contents/MacOS/Live"',

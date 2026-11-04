@@ -19,6 +19,11 @@ _GENERATION = re.compile(r"^[1-9][0-9]{5,24}$")
 _INTEGER = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
+def _monotonic_ns() -> int:
+    """Read Darwin CLOCK_MONOTONIC, shared with the Swift helper."""
+    return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+
+
 def _normalized_absolute(path: Path, *, suffix: str) -> Path:
     supplied = Path(os.path.expanduser(os.fspath(path)))
     raw = str(supplied)
@@ -203,7 +208,7 @@ def run_live_quit(
     execute: bool = False,
 ) -> dict:
     """Inspect by default; issue exactly one normal quit only with ``execute``."""
-    deadline_ns = time.monotonic_ns() + int(DEADLINE_SECONDS * NANOSECONDS_PER_SECOND)
+    deadline_ns = _monotonic_ns() + int(DEADLINE_SECONDS * NANOSECONDS_PER_SECOND)
     if platform.system() != "Darwin":
         raise ValueError("native Live normal quit requires macOS")
     if type(pid) is not int or not 1 <= pid <= 2_147_483_647:
@@ -233,7 +238,7 @@ def run_live_quit(
         "device": source_device,
         "inode": source_inode,
     }
-    remaining_ns = deadline_ns - time.monotonic_ns()
+    remaining_ns = deadline_ns - _monotonic_ns()
     if remaining_ns <= 0:
         return _not_attempted_deadline_receipt(
             pid=pid,
@@ -269,7 +274,7 @@ def run_live_quit(
     ]
     if execute:
         command.append("--execute")
-    remaining_ns = deadline_ns - time.monotonic_ns()
+    remaining_ns = deadline_ns - _monotonic_ns()
     if remaining_ns <= 0:
         return _not_attempted_deadline_receipt(
             pid=pid,
@@ -303,7 +308,7 @@ def run_live_quit(
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"native Live quit helper failed: {error}") from error
-    if time.monotonic_ns() >= deadline_ns:
+    if _monotonic_ns() >= deadline_ns:
         if execute:
             return _unknown_receipt(
                 pid=pid,
@@ -379,7 +384,7 @@ def run_live_quit(
         raise ValueError(
             "native Live quit helper returned an invalid or inconsistent receipt"
         )
-    if time.monotonic_ns() >= deadline_ns:
+    if _monotonic_ns() >= deadline_ns:
         if execute:
             return _unknown_receipt(
                 pid=pid,
