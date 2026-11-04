@@ -7,7 +7,8 @@ import Foundation
 
 let receiptFormat = "codex-devtools-live-quit-v1"
 let maxSetBytes: Int64 = 128 * 1024 * 1024
-let quitTimeoutNanoseconds: UInt64 = 25_000_000_000
+let nanosecondsPerSecond: Double = 1_000_000_000
+let nanosecondsPerSecondInteger: UInt64 = 1_000_000_000
 let maxWindows = 64
 let maxElements = 1500
 let maxDepth = 12
@@ -21,6 +22,7 @@ struct Options {
     var sha256 = ""
     var device = ""
     var inode = ""
+    var deadlineMonotonicNanoseconds: UInt64 = 0
     var execute = false
 }
 
@@ -58,6 +60,21 @@ func require(_ condition: @autoclosure () throws -> Bool, _ message: String) thr
     if try !condition() { throw QuitFailure(phase: phase, message: message) }
 }
 
+func monotonicNow() throws -> UInt64 {
+    var value = timespec()
+    guard clock_gettime(CLOCK_MONOTONIC, &value) == 0,
+          value.tv_sec >= 0, value.tv_nsec >= 0 else {
+        throw QuitFailure(phase: phase, message: "system monotonic clock is unavailable")
+    }
+    return UInt64(value.tv_sec) * nanosecondsPerSecondInteger + UInt64(value.tv_nsec)
+}
+
+func requireBeforeDeadline(_ deadline: UInt64, _ message: String) throws -> UInt64 {
+    let now = try monotonicNow()
+    try require(now < deadline, message)
+    return now
+}
+
 func parseOptions() throws -> Options {
     var result = Options()
     var index = 1
@@ -65,7 +82,7 @@ func parseOptions() throws -> Options {
     while index < args.count {
         let key = args[index]
         if key == "--help" {
-            print("Usage: live_quit.swift --pid PID --bundle-id com.ableton.live --app /Applications/Live.app --generation TOKEN --set /path/Source.als --sha256 HASH --device N --inode N [--execute]")
+            print("Usage: live_quit.swift --pid PID --bundle-id com.ableton.live --app /Applications/Live.app --generation TOKEN --set /path/Source.als --sha256 HASH --device N --inode N --deadline-monotonic-ns N [--execute]")
             exit(0)
         }
         if key == "--execute" {
@@ -90,6 +107,11 @@ func parseOptions() throws -> Options {
         case "--sha256": result.sha256 = value
         case "--device": result.device = value
         case "--inode": result.inode = value
+        case "--deadline-monotonic-ns":
+            guard let parsed = UInt64(value), parsed > 0 else {
+                throw QuitFailure(phase: "arguments", message: "absolute monotonic deadline must be positive")
+            }
+            result.deadlineMonotonicNanoseconds = parsed
         default:
             throw QuitFailure(phase: "arguments", message: "unknown option: \(key)")
         }
@@ -98,7 +120,8 @@ func parseOptions() throws -> Options {
     guard result.pid > 0, result.bundleID == "com.ableton.live",
           !result.appPath.isEmpty, !result.generation.isEmpty,
           !result.setPath.isEmpty, result.sha256.count == 64,
-          !result.device.isEmpty, !result.inode.isEmpty else {
+          !result.device.isEmpty, !result.inode.isEmpty,
+          result.deadlineMonotonicNanoseconds > 0 else {
         throw QuitFailure(phase: "arguments", message: "exact process, app, generation and Set pins are required")
     }
     guard result.sha256.allSatisfy({ $0.isHexDigit && !$0.isUppercase }),
@@ -186,8 +209,12 @@ func setPin() throws -> [String: Any] {
     var count: Int64 = 0
     var buffer = [UInt8](repeating: 0, count: 65536)
     while true {
+        _ = try requireBeforeDeadline(options.deadlineMonotonicNanoseconds,
+                                      "normal quit monotonic deadline expired during Set read")
         let amount = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
         try require(amount >= 0, "selected Set read failed")
+        try require(monotonicNow() < options.deadlineMonotonicNanoseconds,
+                    "normal quit monotonic deadline expired during Set read")
         if amount == 0 { break }
         count += Int64(amount)
         try require(count <= maxSetBytes, "selected Set exceeded the bounded read size")
@@ -220,9 +247,17 @@ func setPin() throws -> [String: Any] {
 }
 
 func axValue(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
-    AXUIElementSetMessagingTimeout(element, 1.0)
+    let now = try requireBeforeDeadline(
+        options.deadlineMonotonicNanoseconds,
+        "normal quit monotonic deadline expired during AX inspection"
+    )
+    let remaining = options.deadlineMonotonicNanoseconds - now
+    let timeout = Float(min(1.0, Double(remaining) / nanosecondsPerSecond))
+    AXUIElementSetMessagingTimeout(element, timeout)
     var value: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+    try require(try monotonicNow() < options.deadlineMonotonicNanoseconds,
+                "normal quit monotonic deadline expired during AX read")
     if error == .success { return value }
     if error == .noValue { return nil }
     throw QuitFailure(phase: phase, message: "AX read \(attribute) failed (\(error.rawValue))")
@@ -338,7 +373,7 @@ func stoppedTransport(_ window: AXUIElement) throws -> TransportControls {
 }
 
 func verifyPreflight(deadline: UInt64) throws -> NSRunningApplication {
-    try require(DispatchTime.now().uptimeNanoseconds < deadline, "quit preflight deadline expired")
+    _ = try requireBeforeDeadline(deadline, "quit preflight deadline expired")
     _ = try targetProcess()
     try verifyAppBundle()
     let pin = try setPin()
@@ -349,7 +384,7 @@ func verifyPreflight(deadline: UInt64) throws -> NSRunningApplication {
     let window = try exactSetWindow(app, setURL: setURL)
     let controls = try stoppedTransport(window)
     transportState = controls
-    try require(DispatchTime.now().uptimeNanoseconds < deadline, "quit preflight deadline expired")
+    _ = try requireBeforeDeadline(deadline, "quit preflight deadline expired")
     return try targetProcess()
 }
 
@@ -384,7 +419,7 @@ func receipt(status: String, error: String? = nil) -> [String: Any] {
 }
 
 func run() throws -> [String: Any] {
-    let deadline = DispatchTime.now().uptimeNanoseconds + quitTimeoutNanoseconds
+    let deadline = options.deadlineMonotonicNanoseconds
     phase = "preflight"
     let process = try verifyPreflight(deadline: deadline)
     if !options.execute {
@@ -394,18 +429,18 @@ func run() throws -> [String: Any] {
 
     phase = "final-guard"
     _ = try verifyPreflight(deadline: deadline)
-    try require(DispatchTime.now().uptimeNanoseconds < deadline,
-                "quit deadline expired before normal termination request")
+    _ = try requireBeforeDeadline(deadline, "quit deadline expired before normal termination request")
     let current = try targetProcess()
     try require(current === process && !current.isTerminated,
                 "exact Live process changed immediately before normal termination")
-    try require(DispatchTime.now().uptimeNanoseconds < deadline,
-                "quit deadline expired immediately before normal termination")
+    _ = try requireBeforeDeadline(deadline, "quit deadline expired immediately before normal termination")
 
     phase = "normal-quit-request"
     quitRequested = true
     quitAccepted = process.terminate()
-    while DispatchTime.now().uptimeNanoseconds < deadline {
+    while true {
+        let beforeProbe = try monotonicNow()
+        guard beforeProbe < deadline else { break }
         if process.isTerminated {
             didTerminate = true
             phase = "complete"
@@ -414,11 +449,19 @@ func run() throws -> [String: Any] {
         do {
             _ = try appWindows(AXUIElementCreateApplication(options.pid))
         } catch {
+            if (try? monotonicNow()).map({ $0 >= deadline }) == true {
+                phase = "quit-deadline"
+                return receipt(status: "stopped", error: "normal quit AX observation crossed the monotonic deadline")
+            }
             phase = "quit-prompt-or-dialog"
             return receipt(status: "stopped", error: "normal quit exposed an AX dialog or became unreadable; no prompt was accepted")
         }
-        let remaining = deadline - DispatchTime.now().uptimeNanoseconds
-        RunLoop.current.run(until: Date().addingTimeInterval(min(0.1, Double(remaining) / 1_000_000_000)))
+        let now = try monotonicNow()
+        guard now < deadline else { break }
+        let remaining = deadline - now
+        let sleepSeconds = min(0.1, Double(remaining) / nanosecondsPerSecond)
+        guard sleepSeconds > 0 else { break }
+        RunLoop.current.run(until: Date().addingTimeInterval(sleepSeconds))
     }
     phase = "quit-deadline"
     return receipt(status: "stopped", error: "normal quit did not terminate the exact PID before the monotonic deadline")

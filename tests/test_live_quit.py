@@ -5,6 +5,7 @@ import io
 import json
 import subprocess
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -14,7 +15,6 @@ from codex_devtools.cli import main
 from codex_devtools.live_quit_control import (
     FORMAT,
     LIVE_BUNDLE_ID,
-    _stable_source_pin,
     run_live_quit,
 )
 
@@ -60,7 +60,13 @@ class LiveQuitPolicyTests(unittest.TestCase):
         return result, native
 
     def native_receipt(self, *, execute=False, status="ready"):
-        pin = _stable_source_pin(self.source, self.sha, self.device, self.inode)
+        pin = {
+            "path": str(self.source),
+            "sha256": self.sha,
+            "bytes": self.source.stat().st_size,
+            "device": self.device,
+            "inode": self.inode,
+        }
         requested = status in {"terminated", "stopped"} and execute
         terminated = status == "terminated"
         return {
@@ -93,24 +99,6 @@ class LiveQuitPolicyTests(unittest.TestCase):
             "manual_inspection_required": requested and not terminated,
         }
 
-    def test_source_pin_rejects_hash_device_and_inode_drift(self):
-        for sha256, device, inode in (
-            ("0" * 64, self.device, self.inode),
-            (self.sha, str(int(self.device) + 1), self.inode),
-            (self.sha, self.device, str(int(self.inode) + 1)),
-        ):
-            with (
-                self.subTest(device=device, inode=inode),
-                self.assertRaises(ValueError),
-            ):
-                _stable_source_pin(self.source, sha256, device, inode)
-
-    def test_symlink_source_is_rejected(self):
-        link = self.root / "Alias.als"
-        link.symlink_to(self.source)
-        with self.assertRaisesRegex(ValueError, "regular file"):
-            _stable_source_pin(link, self.sha, self.device, self.inode)
-
     def test_input_rejections_happen_before_native_helper(self):
         with (
             patch(
@@ -137,7 +125,7 @@ class LiveQuitPolicyTests(unittest.TestCase):
                     app_bundle=self.app,
                     expected_generation=GENERATION,
                     source_set=self.source,
-                    source_sha256="0" * 64,
+                    source_sha256="z" * 64,
                     source_device=self.device,
                     source_inode=self.inode,
                 )
@@ -197,6 +185,175 @@ class LiveQuitPolicyTests(unittest.TestCase):
         command = native.call_args.args[0]
         self.assertEqual(command.count("--execute"), 1)
         self.assertEqual(result["quit"]["outcome"], "terminated")
+
+    def test_changed_native_source_pin_becomes_structured_unknown(self):
+        receipt = self.native_receipt(execute=True, status="terminated")
+        receipt["source_file"]["sha256"] = "0" * 64
+        completed = subprocess.CompletedProcess([], 0, json.dumps(receipt), "")
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_quit_control.subprocess.run",
+                return_value=completed,
+            ),
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+                execute=True,
+            )
+        self.assertEqual(result["quit"]["outcome"], "unknown")
+        self.assertTrue(result["manual_inspection_required"])
+
+    def test_execute_ready_receipt_becomes_structured_unknown(self):
+        receipt = self.native_receipt(execute=True, status="ready")
+        completed = subprocess.CompletedProcess([], 0, json.dumps(receipt), "")
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_quit_control.subprocess.run",
+                return_value=completed,
+            ),
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+                execute=True,
+            )
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["quit"]["outcome"], "unknown")
+        self.assertIsNone(result["quit"]["requested"])
+        self.assertTrue(result["manual_inspection_required"])
+
+    def test_malformed_execute_status_and_receipt_types_become_unknown(self):
+        for malformed in ([], {}, None):
+            with self.subTest(malformed=malformed):
+                receipt = self.native_receipt(execute=True, status="terminated")
+                receipt["status"] = malformed
+                completed = subprocess.CompletedProcess([], 0, json.dumps(receipt), "")
+                with (
+                    patch(
+                        "codex_devtools.live_quit_control.platform.system",
+                        return_value="Darwin",
+                    ),
+                    patch(
+                        "codex_devtools.live_quit_control.subprocess.run",
+                        return_value=completed,
+                    ),
+                ):
+                    result = run_live_quit(
+                        PID,
+                        expected_bundle_id=LIVE_BUNDLE_ID,
+                        app_bundle=self.app,
+                        expected_generation=GENERATION,
+                        source_set=self.source,
+                        source_sha256=self.sha,
+                        source_device=self.device,
+                        source_inode=self.inode,
+                        execute=True,
+                    )
+                self.assertEqual(result["quit"]["outcome"], "unknown")
+                self.assertTrue(result["manual_inspection_required"])
+
+    def test_wrapper_deadline_includes_admission_and_refuses_late_helper_start(self):
+        from codex_devtools import live_quit_control
+
+        normalize = live_quit_control._normalized_absolute
+
+        def delayed_normalize(path, *, suffix):
+            time.sleep(0.02)
+            return normalize(path, suffix=suffix)
+
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch("codex_devtools.live_quit_control.DEADLINE_SECONDS", 0.005),
+            patch(
+                "codex_devtools.live_quit_control._normalized_absolute",
+                side_effect=delayed_normalize,
+            ),
+            patch("codex_devtools.live_quit_control.subprocess.run") as native,
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+                execute=True,
+            )
+        self.assertEqual(result["phase"], "admission-deadline")
+        self.assertEqual(result["quit"]["outcome"], "not_attempted")
+        self.assertFalse(result["manual_inspection_required"])
+        native.assert_not_called()
+
+    def test_same_absolute_deadline_is_passed_with_only_remaining_timeout(self):
+        receipt = self.native_receipt(execute=True, status="terminated")
+        completed = subprocess.CompletedProcess([], 0, json.dumps(receipt), "")
+        start_ns = 10_000_000_000
+        monotonic_values = iter(
+            [
+                start_ns,
+                start_ns + 10_000_000,
+                start_ns + 50_000_000,
+                start_ns + 80_000_000,
+                start_ns + 100_000_000,
+            ]
+        )
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch("codex_devtools.live_quit_control.DEADLINE_SECONDS", 0.25),
+            patch(
+                "codex_devtools.live_quit_control.time.monotonic_ns",
+                side_effect=lambda: next(monotonic_values),
+            ),
+            patch(
+                "codex_devtools.live_quit_control.subprocess.run",
+                return_value=completed,
+            ) as native,
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+                execute=True,
+            )
+        self.assertEqual(result["status"], "terminated")
+        command = native.call_args.args[0]
+        deadline_index = command.index("--deadline-monotonic-ns")
+        self.assertEqual(command[deadline_index + 1], str(start_ns + 250_000_000))
+        self.assertAlmostEqual(native.call_args.kwargs["timeout"], 0.2)
 
     def test_outer_timeout_is_unknown_and_requires_manual_inspection(self):
         with (
@@ -325,9 +482,14 @@ class LiveQuitPolicyTests(unittest.TestCase):
         request = text.index("quitAccepted = process.terminate()", final_check)
         self.assertLess(final_check, request)
         self.assertIn(
-            "let deadline = DispatchTime.now().uptimeNanoseconds + quitTimeoutNanoseconds",
+            "let deadline = options.deadlineMonotonicNanoseconds",
             text,
         )
+        self.assertIn("clock_gettime(CLOCK_MONOTONIC, &value)", text)
+        self.assertIn("AXUIElementSetMessagingTimeout(element, timeout)", text)
+        self.assertIn("Double(remaining) / nanosecondsPerSecond", text)
+        self.assertIn("guard now < deadline else { break }", text)
+        self.assertNotIn("deadline - DispatchTime.now().uptimeNanoseconds", text)
         self.assertIn("process.bundleURL?.path == options.appPath", text)
         self.assertIn(
             'process.executableURL?.path == options.appPath + "/Contents/MacOS/Live"',

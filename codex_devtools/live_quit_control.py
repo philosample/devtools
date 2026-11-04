@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import platform
 import re
-import stat
 import subprocess
+import time
 from pathlib import Path
 
 FORMAT = "codex-devtools-live-quit-v1"
 LIVE_BUNDLE_ID = "com.ableton.live"
-MAX_SET_BYTES = 128 * 1024 * 1024
-NATIVE_TIMEOUT_SECONDS = 35
+DEADLINE_SECONDS = 25.0
+NANOSECONDS_PER_SECOND = 1_000_000_000
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _GENERATION = re.compile(r"^[1-9][0-9]{5,24}$")
 _INTEGER = re.compile(r"^(0|[1-9][0-9]*)$")
@@ -34,96 +33,6 @@ def _normalized_absolute(path: Path, *, suffix: str) -> Path:
     return supplied
 
 
-def _real_directory_chain(path: Path) -> None:
-    for component in (Path("/"), *path.parents[::-1], path):
-        try:
-            info = component.lstat()
-        except OSError as error:
-            raise ValueError(f"path component is unavailable: {component}") from error
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise ValueError(
-                "path components must be real directories, without symlinks"
-            )
-
-
-def _stable_source_pin(
-    path: Path, expected_sha256: str, expected_device: str, expected_inode: str
-) -> dict[str, str | int]:
-    path = _normalized_absolute(path, suffix=".als")
-    _real_directory_chain(path.parent)
-    try:
-        before = path.lstat()
-        if not stat.S_ISREG(before.st_mode):
-            raise ValueError("source Set must be a regular file, not a symlink")
-        if before.st_size <= 0 or before.st_size > MAX_SET_BYTES:
-            raise ValueError("source Set must contain 1 byte to 128 MiB")
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError as error:
-        raise ValueError(f"cannot open exact source Set: {error}") from error
-
-    digest = hashlib.sha256()
-    count = 0
-    try:
-        opened_before = os.fstat(fd)
-        if not stat.S_ISREG(opened_before.st_mode):
-            raise ValueError("opened source Set is not a regular file")
-        while True:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            digest.update(chunk)
-            count += len(chunk)
-            if count > MAX_SET_BYTES:
-                raise ValueError("source Set exceeds 128 MiB")
-        opened_after = os.fstat(fd)
-        current = path.lstat()
-    finally:
-        os.close(fd)
-
-    def identity(item: os.stat_result) -> tuple[int, int, int, int, int, int]:
-        return (
-            item.st_dev,
-            item.st_ino,
-            item.st_size,
-            item.st_mtime_ns,
-            item.st_ctime_ns,
-            item.st_mode,
-        )
-
-    if identity(opened_before) != identity(opened_after) or identity(
-        opened_before
-    ) != identity(current):
-        raise ValueError("source Set changed while its stable pin was read")
-    actual_hash = digest.hexdigest()
-    if actual_hash != expected_sha256:
-        raise ValueError("source Set SHA-256 differs from the reviewed pin")
-    if (
-        str(opened_before.st_dev) != expected_device
-        or str(opened_before.st_ino) != expected_inode
-    ):
-        raise ValueError("source Set device/inode differs from the reviewed pin")
-    return {
-        "path": str(path),
-        "sha256": actual_hash,
-        "bytes": count,
-        "device": str(opened_before.st_dev),
-        "inode": str(opened_before.st_ino),
-    }
-
-
-def _validate_app(app_bundle: Path) -> Path:
-    app = _normalized_absolute(app_bundle, suffix=".app")
-    try:
-        info = app.lstat()
-    except OSError as error:
-        raise ValueError(f"Live.app bundle is unavailable: {error}") from error
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        raise ValueError("Live.app must be an exact real .app directory")
-    if app.resolve(strict=True) != app:
-        raise ValueError("Live.app path components must not be symbolic links")
-    return app
-
-
 def _unknown_receipt(
     *,
     pid: int,
@@ -134,7 +43,7 @@ def _unknown_receipt(
     execute: bool,
     phase: str,
     error: str,
-    source_pin: dict[str, str | int],
+    expected_pin: dict[str, str],
 ) -> dict:
     return {
         "format": FORMAT,
@@ -149,7 +58,8 @@ def _unknown_receipt(
             "process_generation": generation,
         },
         "source_set_url": source.as_uri(),
-        "source_file": source_pin,
+        "expected_set_pin": expected_pin,
+        "source_file": None,
         "quit": {
             "requested": None if execute else False,
             "accepted": None,
@@ -163,6 +73,34 @@ def _unknown_receipt(
     }
 
 
+def _not_attempted_deadline_receipt(
+    *,
+    pid: int,
+    bundle_id: str,
+    app: Path,
+    generation: str,
+    source: Path,
+    expected_pin: dict[str, str],
+    execute: bool,
+    phase: str = "admission-deadline",
+    error: str = "the original monotonic deadline expired before native preflight",
+) -> dict:
+    report = _unknown_receipt(
+        pid=pid,
+        bundle_id=bundle_id,
+        app=app,
+        generation=generation,
+        source=source,
+        execute=execute,
+        phase=phase,
+        error=error,
+        expected_pin=expected_pin,
+    )
+    report["quit"].update(requested=False, outcome="not_attempted")
+    report["manual_inspection_required"] = False
+    return report
+
+
 def _valid_report(
     value: object,
     *,
@@ -171,11 +109,14 @@ def _valid_report(
     app: Path,
     generation: str,
     source: Path,
-    source_pin: dict[str, str | int],
+    expected_pin: dict[str, str],
     execute: bool,
     returncode: int,
 ) -> bool:
     if not isinstance(value, dict) or value.get("format") != FORMAT:
+        return False
+    status = value.get("status")
+    if not isinstance(status, str):
         return False
     quit_state = value.get("quit")
     if not isinstance(quit_state, dict) or quit_state.get("force_quit") is not False:
@@ -189,26 +130,28 @@ def _valid_report(
         or value.get("source_set_url") != source.as_uri()
     ):
         return False
+    source_file = value.get("source_file")
+    source_pin_matches = (
+        isinstance(source_file, dict)
+        and source_file.get("path") == str(source)
+        and source_file.get("sha256") == expected_pin["sha256"]
+        and source_file.get("device") == expected_pin["device"]
+        and source_file.get("inode") == expected_pin["inode"]
+        and type(source_file.get("bytes")) is int
+        and source_file["bytes"] > 0
+    )
     exact_target = (
         target.get("bundle_identifier") == bundle_id
         and target.get("app_path") == str(app)
         and target.get("executable_path") == str(app / "Contents/MacOS/Live")
         and target.get("process_generation") == generation
-        and value.get("source_file") == source_pin
+        and source_pin_matches
     )
-    if value.get("status") in {"ready", "terminated"} and not exact_target:
+    if status in {"ready", "terminated"} and not exact_target:
         return False
     if execute:
-        status = value.get("status")
         if status == "ready":
-            return (
-                returncode == 0
-                and quit_state.get("outcome") == "not_attempted"
-                and quit_state.get("requested") is False
-                and quit_state.get("accepted") is None
-                and quit_state.get("terminated") is False
-                and value.get("manual_inspection_required") is False
-            )
+            return False
         if status == "terminated":
             return (
                 returncode == 0
@@ -260,6 +203,7 @@ def run_live_quit(
     execute: bool = False,
 ) -> dict:
     """Inspect by default; issue exactly one normal quit only with ``execute``."""
+    deadline_ns = time.monotonic_ns() + int(DEADLINE_SECONDS * NANOSECONDS_PER_SECOND)
     if platform.system() != "Darwin":
         raise ValueError("native Live normal quit requires macOS")
     if type(pid) is not int or not 1 <= pid <= 2_147_483_647:
@@ -281,9 +225,25 @@ def run_live_quit(
     if not isinstance(source_inode, str) or not _INTEGER.fullmatch(source_inode):
         raise ValueError("source inode must be the decimal inode pin from inspection")
 
-    app = _validate_app(app_bundle)
+    app = _normalized_absolute(app_bundle, suffix=".app")
     source = _normalized_absolute(source_set, suffix=".als")
-    source_pin = _stable_source_pin(source, source_sha256, source_device, source_inode)
+    expected_pin = {
+        "path": str(source),
+        "sha256": source_sha256,
+        "device": source_device,
+        "inode": source_inode,
+    }
+    remaining_ns = deadline_ns - time.monotonic_ns()
+    if remaining_ns <= 0:
+        return _not_attempted_deadline_receipt(
+            pid=pid,
+            bundle_id=expected_bundle_id,
+            app=app,
+            generation=expected_generation,
+            source=source,
+            expected_pin=expected_pin,
+            execute=execute,
+        )
     script = Path(__file__).with_name("live_quit.swift")
     command = [
         "/usr/bin/swift",
@@ -299,21 +259,35 @@ def run_live_quit(
         "--set",
         str(source),
         "--sha256",
-        str(source_pin["sha256"]),
+        source_sha256,
         "--device",
-        str(source_pin["device"]),
+        source_device,
         "--inode",
-        str(source_pin["inode"]),
+        source_inode,
+        "--deadline-monotonic-ns",
+        str(deadline_ns),
     ]
     if execute:
         command.append("--execute")
+    remaining_ns = deadline_ns - time.monotonic_ns()
+    if remaining_ns <= 0:
+        return _not_attempted_deadline_receipt(
+            pid=pid,
+            bundle_id=expected_bundle_id,
+            app=app,
+            generation=expected_generation,
+            source=source,
+            expected_pin=expected_pin,
+            execute=execute,
+        )
+    timeout_seconds = remaining_ns / NANOSECONDS_PER_SECOND
     try:
         result = subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
-            timeout=NATIVE_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired:
         return _unknown_receipt(
@@ -322,17 +296,14 @@ def run_live_quit(
             app=app,
             generation=expected_generation,
             source=source,
-            source_pin=source_pin,
+            expected_pin=expected_pin,
             execute=execute,
             phase="outer-timeout",
             error="native helper exceeded its outer bound; quit outcome is unknown",
         )
     except (OSError, subprocess.SubprocessError) as error:
         raise ValueError(f"native Live quit helper failed: {error}") from error
-    try:
-        report = json.loads(result.stdout)
-    except json.JSONDecodeError as error:
-        message = result.stderr.strip()[-2000:]
+    if time.monotonic_ns() >= deadline_ns:
         if execute:
             return _unknown_receipt(
                 pid=pid,
@@ -340,7 +311,36 @@ def run_live_quit(
                 app=app,
                 generation=expected_generation,
                 source=source,
-                source_pin=source_pin,
+                expected_pin=expected_pin,
+                execute=True,
+                phase="outer-deadline",
+                error="the original monotonic deadline expired before receipt delivery",
+            )
+        return _not_attempted_deadline_receipt(
+            pid=pid,
+            bundle_id=expected_bundle_id,
+            app=app,
+            generation=expected_generation,
+            source=source,
+            expected_pin=expected_pin,
+            execute=False,
+            phase="outer-deadline",
+            error="the original monotonic deadline expired before receipt delivery",
+        )
+    try:
+        report = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        message = (
+            result.stderr.strip()[-2000:] if isinstance(result.stderr, str) else ""
+        )
+        if execute:
+            return _unknown_receipt(
+                pid=pid,
+                bundle_id=expected_bundle_id,
+                app=app,
+                generation=expected_generation,
+                source=source,
+                expected_pin=expected_pin,
                 execute=True,
                 phase="native-invalid-receipt",
                 error=message
@@ -349,17 +349,21 @@ def run_live_quit(
         raise ValueError(
             message or "native Live quit helper returned invalid JSON"
         ) from error
-    if not _valid_report(
-        report,
-        pid=pid,
-        bundle_id=expected_bundle_id,
-        app=app,
-        generation=expected_generation,
-        source=source,
-        source_pin=source_pin,
-        execute=execute,
-        returncode=result.returncode,
-    ):
+    try:
+        valid_report = _valid_report(
+            report,
+            pid=pid,
+            bundle_id=expected_bundle_id,
+            app=app,
+            generation=expected_generation,
+            source=source,
+            expected_pin=expected_pin,
+            execute=execute,
+            returncode=result.returncode,
+        )
+    except (KeyError, TypeError, ValueError):
+        valid_report = False
+    if not valid_report:
         if execute:
             return _unknown_receipt(
                 pid=pid,
@@ -367,12 +371,36 @@ def run_live_quit(
                 app=app,
                 generation=expected_generation,
                 source=source,
-                source_pin=source_pin,
+                expected_pin=expected_pin,
                 execute=True,
                 phase="native-invalid-receipt",
                 error="native helper receipt did not prove the quit outcome; inspect Live before continuing",
             )
         raise ValueError(
             "native Live quit helper returned an invalid or inconsistent receipt"
+        )
+    if time.monotonic_ns() >= deadline_ns:
+        if execute:
+            return _unknown_receipt(
+                pid=pid,
+                bundle_id=expected_bundle_id,
+                app=app,
+                generation=expected_generation,
+                source=source,
+                expected_pin=expected_pin,
+                execute=True,
+                phase="outer-deadline",
+                error="the original monotonic deadline expired before receipt validation completed",
+            )
+        return _not_attempted_deadline_receipt(
+            pid=pid,
+            bundle_id=expected_bundle_id,
+            app=app,
+            generation=expected_generation,
+            source=source,
+            expected_pin=expected_pin,
+            execute=False,
+            phase="outer-deadline",
+            error="the original monotonic deadline expired before receipt validation completed",
         )
     return report

@@ -19,10 +19,14 @@ python3 -m codex_devtools ax live-quit \
 
 Only after reviewing a `ready` receipt, repeat the exact command with
 `--execute`. A successful execution reports `requested`, `accepted`, and
-`terminated` separately. The native helper uses one 25-second monotonic deadline
-for preflight, the final guard immediately before `NSRunningApplication.terminate()`,
-and termination readback. It returns `unknown` after an uncertain request,
-dialog, AX failure, or timeout; inspect Live manually and do not retry blindly.
+`terminated` separately. The wrapper starts one 25-second monotonic deadline at
+command entry and passes that absolute deadline into Swift; helper startup,
+Set pinning, AX inspection, the final guard immediately before
+`NSRunningApplication.terminate()`, and termination readback share it. Set
+hashing happens inside the deadline-bounded helper process. Each AX request is
+capped by the time remaining. A refusal before termination is
+`stopped/not_attempted`; uncertainty after the request, a dialog, AX failure,
+or timeout is `stopped/unknown` and requires manual inspection before any retry.
 
 The helper verifies the PID, `com.ableton.live` bundle, exact `.app` and
 `Contents/MacOS/Live` paths, and launch-date generation token. It opens the
