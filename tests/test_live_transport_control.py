@@ -85,6 +85,12 @@ def transport_report(path, action, *, seconds=None, status="complete"):
         "play": {"attempted": True, "outcome": "known"},
         "stop": {"attempted": True, "outcome": "known"},
     }
+    if action == "reset-position":
+        rows = {
+            "settings_close": {"attempted": True, "outcome": "known"},
+            "reset_stop_first": {"attempted": True, "outcome": "known"},
+            "reset_stop_second": {"attempted": True, "outcome": "known"},
+        }
     if action == "stop":
         rows = {
             "settings_close": {"attempted": False, "outcome": "not_attempted"},
@@ -133,6 +139,15 @@ def transport_report(path, action, *, seconds=None, status="complete"):
         "play_for_seconds": seconds,
         "actions": rows,
         "manual_inspection_required": False,
+        **(
+            {
+                "position_before": "3.1.1",
+                "position": "1.1.1",
+                "position_readback": "verified",
+            }
+            if action == "reset-position"
+            else {}
+        ),
     }
 
 
@@ -176,6 +191,24 @@ class LiveTransportControlTests(unittest.TestCase):
         )
         self.assertEqual(explicit.action, "live-transport")
         self.assertEqual(explicit.operation, "play")
+        reset = parser.parse_args(
+            [
+                "ax",
+                "live-transport",
+                "--pid",
+                str(PID),
+                "--expected-bundle-id",
+                BUNDLE,
+                "--set",
+                "/private/tmp/recall.als",
+                "--execute",
+                "--action",
+                "reset-position",
+                "--expected-output-count",
+                "21",
+            ]
+        )
+        self.assertEqual(reset.operation, "reset-position")
 
     def test_cli_routes_default_inspection_to_transport_handler(self):
         output = io.StringIO()
@@ -707,6 +740,205 @@ class LiveTransportControlTests(unittest.TestCase):
             self.assertEqual(report["status"], "complete")
             self.assertEqual(report["actions"]["stop"]["outcome"], "verified_noop")
 
+    def test_reset_position_requires_complete_sync_baseline_and_passes_exact_count(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "reset.json"
+            events = []
+            commands = []
+            native = transport_report(set_path, "reset-position")
+            completed = subprocess.CompletedProcess(
+                args=["native"], returncode=0, stdout=json.dumps(native), stderr=""
+            )
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    side_effect=lambda *_args: (
+                        events.append("compile")
+                        or subprocess.CompletedProcess(["swiftc"], 0, "", "")
+                    ),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.run_live_midi_sync",
+                    side_effect=lambda *_args, **_kwargs: (
+                        events.append("sync-inspect") or baseline(count=23)
+                    ),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    side_effect=lambda command, **_kwargs: (
+                        commands.append(command)
+                        or events.append("native-reset")
+                        or completed
+                    ),
+                ),
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="reset-position",
+                    expected_count=23,
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(events, ["compile", "sync-inspect", "native-reset"])
+        self.assertEqual(report, saved)
+        self.assertEqual(report["position_readback"], "verified")
+        self.assertEqual(report["position"], "1.1.1")
+        self.assertEqual(report["actions"]["reset_stop_first"]["outcome"], "known")
+        self.assertEqual(report["actions"]["reset_stop_second"]["outcome"], "known")
+        command = commands[0]
+        self.assertIn("--baseline-sha256", command)
+        self.assertEqual(command[command.index("--expected-count") + 1], "23")
+        self.assertIn("--action", command)
+        self.assertEqual(command[command.index("--action") + 1], "reset-position")
+        self.assertNotIn("--play-for-seconds", command)
+
+    def test_reset_position_refuses_sync_enabled_without_native_mutation(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "reset.json"
+            values = {f"Output {index:02d}": 0 for index in range(21)}
+            values["Output 00"] = 1
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.run_live_midi_sync",
+                    return_value=baseline(values),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run"
+                ) as native_run,
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="reset-position",
+                    expected_count=21,
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+        native_run.assert_not_called()
+        self.assertEqual(report, saved)
+        self.assertEqual(report["phase"], "output-isolation-preflight")
+        self.assertFalse(report["manual_inspection_required"])
+        self.assertTrue(all(not row["attempted"] for row in report["actions"].values()))
+
+    def test_reset_position_report_preserves_unknown_and_bad_readback(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            set_path = Path(temporary) / "recall.als"
+            set_path.write_bytes(b"test Set")
+            kwargs = {
+                "action": "reset-position",
+                "pid": PID,
+                "bundle_id": BUNDLE,
+                "set_path": set_path,
+                "play_for_seconds": None,
+                "returncode": 1,
+            }
+            unknown = transport_report(set_path, "reset-position", status="stopped")
+            unknown["phase"] = "reset-position-stop-2"
+            unknown["actions"]["reset_stop_second"] = {
+                "attempted": True,
+                "outcome": "unknown",
+            }
+            unknown["position"] = "3.1.1"
+            unknown["position_readback"] = "unknown"
+            unknown["manual_inspection_required"] = True
+            unknown["error"] = "AXPress outcome uncertain"
+            self.assertTrue(_valid_report(unknown, **kwargs))
+
+            bad_position = transport_report(
+                set_path, "reset-position", status="stopped"
+            )
+            bad_position["position"] = "3.1.1"
+            bad_position["position_readback"] = "mismatch"
+            bad_position["manual_inspection_required"] = True
+            bad_position["error"] = "position did not reset"
+            self.assertTrue(_valid_report(bad_position, **kwargs))
+
+            unsafe_preflight = transport_report(
+                set_path, "reset-position", status="stopped"
+            )
+            unsafe_preflight["phase"] = "reset-position-preflight"
+            unsafe_preflight["actions"] = {
+                name: {"attempted": False, "outcome": "not_attempted"}
+                for name in (
+                    "settings_close",
+                    "reset_stop_first",
+                    "reset_stop_second",
+                )
+            }
+            unsafe_preflight["manual_inspection_required"] = False
+            unsafe_preflight["transport"]["play"] = 1
+            unsafe_preflight["error"] = "reset-position requires stopped transport"
+            self.assertTrue(_valid_report(unsafe_preflight, **kwargs))
+
+    def test_reset_position_timeout_keeps_every_action_uncertain(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "reset-timeout.json"
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.run_live_midi_sync",
+                    return_value=baseline(),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    side_effect=subprocess.TimeoutExpired("native", 240),
+                ),
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="reset-position",
+                    expected_count=21,
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(report, saved)
+        self.assertEqual(report["position_readback"], "unknown")
+        self.assertTrue(report["manual_inspection_required"])
+        self.assertTrue(
+            all(
+                row == {"attempted": True, "outcome": "unknown"}
+                for row in report["actions"].values()
+            )
+        )
+
     def test_native_stop_preflight_refusal_preserves_known_not_attempted_receipt(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)
@@ -1161,6 +1393,36 @@ precondition(!late && lateClock.reads == 1)
         self.assertLess(attempted_gate, deadline_wait)
         self.assertLess(deadline_wait, timed_stop)
         self.assertLess(timed_stop, stop_ack)
+
+    def test_reset_position_has_fixed_double_stop_and_independent_safe_readback(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        reset = source.split('phase = "reset-position-baseline"', maxsplit=1)[1]
+        self.assertIn("try checkedBaseline()", reset)
+        for gate in (
+            'initialState["play"] as? Int == 0',
+            'initialState["link"] as? Int == 0',
+            'initialState["arrangement_record"] as? Int == 0',
+            'initialState["session_record"] as? Int == 0',
+        ):
+            self.assertIn(gate, reset)
+        first_stop = reset.index('"reset_stop_first", "reset_stop_second"')
+        readback = reset.index('phase = "reset-position-readback"')
+        stopped_gate = reset.index('initialState["play"] as? Int == 0')
+        action_gate = reset.index('controls["Play"]?.value == 0')
+        self.assertLess(stopped_gate, first_stop)
+        self.assertLess(action_gate, first_stop)
+        self.assertLess(first_stop, readback)
+        self.assertIn('"Transport.ArrangementPosition.Bars"', source)
+        self.assertIn('"Transport.ArrangementPosition.Beats"', source)
+        self.assertIn('"Transport.ArrangementPosition.Subdivisions"', source)
+        self.assertIn('finalPosition == "1.1.1"', reset)
+        self.assertIn('finalState["play"] as? Int == 0', reset)
+        self.assertNotIn("AXUIElementSetAttributeValue", source)
+        self.assertNotIn("Transport.Start", source)
 
 
 if __name__ == "__main__":
