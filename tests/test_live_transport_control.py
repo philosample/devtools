@@ -895,6 +895,74 @@ class LiveTransportControlTests(unittest.TestCase):
             unsafe_preflight["error"] = "reset-position requires stopped transport"
             self.assertTrue(_valid_report(unsafe_preflight, **kwargs))
 
+    def test_reset_position_preserves_verified_position_and_known_stops_if_play_restarts(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "reset-unsafe-play.json"
+            native = transport_report(set_path, "reset-position", status="stopped")
+            native["phase"] = "reset-position-readback"
+            native["transport"]["play"] = 1
+            native["manual_inspection_required"] = True
+            native["error"] = "Play changed after reset-position"
+            completed = subprocess.CompletedProcess(
+                args=["native"], returncode=1, stdout=json.dumps(native), stderr=""
+            )
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.run_live_midi_sync",
+                    return_value=baseline(),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    return_value=completed,
+                ),
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="reset-position",
+                    expected_count=21,
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+            kwargs = {
+                "action": "reset-position",
+                "pid": PID,
+                "bundle_id": BUNDLE,
+                "set_path": set_path,
+                "play_for_seconds": None,
+                "returncode": 1,
+            }
+            self.assertTrue(_valid_report(native, **kwargs))
+            self.assertEqual(report, native)
+            self.assertEqual(report, saved)
+            self.assertEqual(report["transport"]["play"], 1)
+            self.assertEqual(report["position_readback"], "verified")
+            self.assertEqual(report["position"], "1.1.1")
+            self.assertEqual(report["actions"]["reset_stop_first"]["outcome"], "known")
+            self.assertEqual(report["actions"]["reset_stop_second"]["outcome"], "known")
+            self.assertTrue(report["manual_inspection_required"])
+
+            unsafe_complete = {**native, "status": "complete", "phase": "complete"}
+            self.assertFalse(
+                _valid_report(unsafe_complete, **{**kwargs, "returncode": 0})
+            )
+
     def test_reset_position_timeout_keeps_every_action_uncertain(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)

@@ -187,6 +187,23 @@ def _valid_report(
     reset_position_attempted = action == "reset-position" and any(
         row["attempted"] for name, row in rows.items() if name != "settings_close"
     )
+    if (
+        action == "reset-position"
+        and transport is not None
+        and (
+            not isinstance(transport, dict)
+            or any(
+                type(transport.get(name)) is not int or transport[name] not in (0, 1)
+                for name in ("play", *monitored_states)
+            )
+        )
+    ):
+        return False
+    reset_transport_needs_review = (
+        reset_position_attempted
+        and isinstance(transport, dict)
+        and any(transport.get(name) == 1 for name in ("play", *monitored_states))
+    )
     reset_position_uncertain = reset_position_attempted and (
         unknown
         or report.get("position_readback") != "verified"
@@ -196,6 +213,7 @@ def _valid_report(
         unknown
         or play_attempted_without_verified_stop
         or transport_state_needs_review
+        or reset_transport_needs_review
         or reset_position_uncertain
     ):
         return False
