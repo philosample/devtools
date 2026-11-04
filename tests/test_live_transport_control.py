@@ -19,8 +19,8 @@ PID = 58198
 BUNDLE = "com.ableton.live"
 
 
-def baseline(values=None):
-    names = [f"Output {index:02d}" for index in range(21)]
+def baseline(values=None, *, count=21):
+    names = [f"Output {index:02d}" for index in range(count)]
     values = values or {name: 0 for name in names}
     return {
         "format": "codex-devtools-live-midi-sync-baseline-v1",
@@ -35,7 +35,7 @@ def baseline(values=None):
             "bundle_identifier": BUNDLE,
         },
         "settings_window": {"title": "Settings", "index": 0},
-        "expected_output_count": 21,
+        "expected_output_count": count,
         "bounds": {
             "elements_observed": 120,
             "max_depth": 12,
@@ -423,6 +423,106 @@ class LiveTransportControlTests(unittest.TestCase):
         self.assertIn("--baseline-sha256", command)
         self.assertIn("--expected-count", command)
 
+    def test_play_accepts_caller_count_23_only_for_23_observed_rows(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "play.json"
+            events = []
+            native_commands = []
+            native = transport_report(set_path, "play", seconds=3)
+            completed = subprocess.CompletedProcess(
+                args=["native"], returncode=0, stdout=json.dumps(native), stderr=""
+            )
+
+            def inspect_sync(_pid, *, expected_bundle_id, expected_count):
+                events.append(("sync-inspect", expected_bundle_id, expected_count))
+                return baseline(count=expected_count)
+
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.run_live_midi_sync",
+                    side_effect=inspect_sync,
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    side_effect=lambda *args, **_kwargs: (
+                        native_commands.append(args[0]) or completed
+                    ),
+                ),
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="play",
+                    play_for_seconds=3,
+                    expected_count=23,
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+
+        self.assertEqual(events, [("sync-inspect", BUNDLE, 23)])
+        self.assertEqual(report["status"], "complete")
+        command = native_commands[0]
+        self.assertEqual(command[command.index("--expected-count") + 1], "23")
+
+    def test_play_refuses_observed_sync_row_count_mismatch_before_native_helper(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "play.json"
+            sync_counts = []
+
+            def inspect_sync(_pid, *, expected_bundle_id, expected_count):
+                sync_counts.append(expected_count)
+                return baseline(count=22)
+
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.run_live_midi_sync",
+                    side_effect=inspect_sync,
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run"
+                ) as native_run,
+            ):
+                report = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="play",
+                    play_for_seconds=3,
+                    expected_count=23,
+                    receipt_path=receipt_path,
+                    execute=True,
+                )
+
+        native_run.assert_not_called()
+        self.assertEqual(sync_counts, [23])
+        self.assertEqual(report["status"], "stopped")
+        self.assertEqual(report["phase"], "output-isolation-preflight")
+        self.assertIn("row count", report["error"])
+        self.assertTrue(all(not row["attempted"] for row in report["actions"].values()))
+
     def test_play_refuses_output_sync_on_and_does_not_launch_helper(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)
@@ -731,9 +831,13 @@ class LiveTransportControlTests(unittest.TestCase):
             set_path = root / "recall.als"
             set_path.write_bytes(b"test Set")
             for duration, expected_count, message in (
-                (0, 21, "duration"),
-                (16, 21, "duration"),
-                (1, 20, "expected output count 21"),
+                (0, 23, "duration"),
+                (16, 23, "duration"),
+                (1, None, "expected output count"),
+                (1, 0, "expected output count"),
+                (1, -1, "expected output count"),
+                (1, 129, "expected output count"),
+                (1, True, "expected output count"),
             ):
                 with (
                     patch(

@@ -19,9 +19,9 @@ from .live_midi_sync_control import (
 )
 
 FORMAT = "codex-devtools-live-transport-receipt-v1"
-OUTPUT_COUNT_FOR_TEST01 = 21
 MIN_PLAY_SECONDS = 1
 MAX_PLAY_SECONDS = 15
+MAX_EXPECTED_OUTPUT_COUNT = 128
 COMPILE_TIMEOUT_SECONDS = 60
 NATIVE_TIMEOUT_SECONDS = 240
 
@@ -330,10 +330,10 @@ def run_live_transport(
                 )
             if (
                 type(expected_count) is not int
-                or expected_count != OUTPUT_COUNT_FOR_TEST01
+                or not 1 <= expected_count <= MAX_EXPECTED_OUTPUT_COUNT
             ):
                 raise ValueError(
-                    "Play requires the independently supplied expected output count 21"
+                    "Play requires an independently supplied expected output count from 1 to 128"
                 )
         elif play_for_seconds is not None or expected_count is not None:
             raise ValueError(
@@ -388,11 +388,20 @@ def run_live_transport(
                     baseline = run_live_midi_sync(
                         pid,
                         expected_bundle_id=expected_bundle_id,
-                        expected_count=OUTPUT_COUNT_FOR_TEST01,
+                        expected_count=expected_count,
                     )
-                    if not all(row.get("value") == 0 for row in baseline["outputs"]):
+                    outputs = baseline.get("outputs")
+                    if (
+                        baseline.get("expected_output_count") != expected_count
+                        or not isinstance(outputs, list)
+                        or len(outputs) != expected_count
+                    ):
                         raise ValueError(
-                            "all 21 output Sync controls must be off before Play"
+                            f"output Sync row count does not match expected {expected_count}"
+                        )
+                    if not all(row.get("value") == 0 for row in outputs):
+                        raise ValueError(
+                            f"all {expected_count} output Sync controls must be off before Play"
                         )
                     baseline_path = temporary_dir / "baseline.json"
                     _write_new_json(baseline_path, baseline)
