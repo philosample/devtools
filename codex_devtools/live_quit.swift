@@ -31,6 +31,15 @@ struct QuitFailure: Error {
     let message: String
 }
 
+struct AXReadFailure: Error, CustomStringConvertible {
+    let attribute: String
+    let code: AXError
+
+    var description: String {
+        "AX read \(attribute) failed (\(code.rawValue))"
+    }
+}
+
 struct TransportControls {
     let play: Int
     let link: Int
@@ -261,7 +270,7 @@ func axValue(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {
                 "normal quit monotonic deadline expired during AX read")
     if error == .success { return value }
     if error == .noValue { return nil }
-    throw QuitFailure(phase: phase, message: "AX read \(attribute) failed (\(error.rawValue))")
+    throw AXReadFailure(attribute: attribute, code: error)
 }
 
 func stringValue(_ element: AXUIElement, _ attribute: String) throws -> String? {
@@ -269,6 +278,16 @@ func stringValue(_ element: AXUIElement, _ attribute: String) throws -> String? 
     if let string = value as? String { return string }
     if let url = value as? URL { return url.absoluteString }
     return nil
+}
+
+func optionalDescription(_ element: AXUIElement) throws -> String? {
+    do {
+        return try stringValue(element, kAXDescriptionAttribute as String)
+    } catch let failure as AXReadFailure
+        where failure.attribute == (kAXDescriptionAttribute as String) &&
+              failure.code == .attributeUnsupported {
+        return nil
+    }
 }
 
 func role(_ element: AXUIElement) throws -> String {
@@ -356,7 +375,7 @@ func stoppedTransport(_ window: AXUIElement) throws -> TransportControls {
     ]
     var found: [String: AXUIElement] = [:]
     for element in try tree(window) {
-        let description = try stringValue(element, kAXDescriptionAttribute as String) ?? ""
+        let description = try optionalDescription(element) ?? ""
         guard let definition = definitions.first(where: { $0.0 == description }) else { continue }
         try require(found[description] == nil, "duplicate exact transport control: \(description)")
         try require(try stringValue(element, "AXIdentifier") == definition.1,

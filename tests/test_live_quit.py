@@ -539,6 +539,47 @@ class LiveQuitPolicyTests(unittest.TestCase):
         self.assertNotIn("terminateNow", text)
         self.assertIn('"force_quit": false', text)
 
+    def test_unavailable_unrelated_descriptions_do_not_hide_required_controls(self):
+        source = Path(__file__).parents[1] / "codex_devtools/live_quit.swift"
+        text = source.read_text(encoding="utf-8")
+        optional = text[
+            text.index("func optionalDescription(") : text.index("func role(")
+        ]
+        self.assertIn("catch let failure as AXReadFailure", optional)
+        self.assertIn("failure.code == .attributeUnsupported", optional)
+        self.assertIn(
+            "failure.attribute == (kAXDescriptionAttribute as String)", optional
+        )
+        self.assertNotIn("catch {", optional)
+        self.assertIn("return nil", optional)
+        self.assertIn("if error == .noValue { return nil }", text)
+
+        traversal = text[text.index("func tree(") : text.index("func checkboxValue(")]
+        self.assertIn("while !queue.isEmpty", traversal)
+        self.assertIn("result.count <= maxElements", traversal)
+        self.assertIn("depth < maxDepth", traversal)
+        self.assertIn("queue.append(contentsOf: children.map", traversal)
+
+        transport = text[
+            text.index("func stoppedTransport(") : text.index("func verifyPreflight(")
+        ]
+        self.assertIn("for element in try tree(window)", transport)
+        self.assertIn('try optionalDescription(element) ?? ""', transport)
+        for description, identifier in (
+            ("Play", "Transport.Play"),
+            ("Link", "Transport.AbletonLink"),
+            ("Arrangement Record", "Transport.GlobalRecord"),
+            ("Session Record", "Transport.SessionRecord"),
+        ):
+            self.assertIn(f'("{description}", "{identifier}")', transport)
+        self.assertIn("found.count == definitions.count", transport)
+        self.assertIn("duplicate exact transport control", transport)
+        self.assertIn("transport \\(description) identifier changed", transport)
+        self.assertIn(
+            "play == 0 && link == 0 && arrangement == 0 && session == 0",
+            transport,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

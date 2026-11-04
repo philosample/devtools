@@ -36,8 +36,11 @@ selected Set without following symlinks and confirms its regular-file status,
 stable SHA-256, device and inode. It requires the exact current `AXDocument`
 URL, one matching Set window, no modal/dialog/sheet/popover windows, and
 readable stopped Play, Link, Arrangement Record, and Session Record controls.
-It repeats all of those checks before the single normal quit request. No AX
-activation or other UI action is sent. A pre-request refusal reports
+Unsupported or valueless `AXDescription` attributes on unrelated tree elements
+are skipped while the bounded traversal continues; the four exact control
+descriptions, identifiers and stopped values remain required. It repeats all
+of those checks before the single normal quit request. No AX activation or
+other UI action is sent. A pre-request refusal reports
 `not_attempted`; a dialog or timeout after the request reports `unknown` and
 requires manual inspection.
 
