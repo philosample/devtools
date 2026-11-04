@@ -191,6 +191,18 @@ func targetProcess() throws -> NSRunningApplication {
     return process
 }
 
+func sameTargetProcess(_ first: NSRunningApplication, _ second: NSRunningApplication) throws -> Bool {
+    try require(!first.isTerminated && !second.isTerminated,
+                "exact Live process terminated during final identity check")
+    let firstGeneration = try processGeneration(first)
+    let secondGeneration = try processGeneration(second)
+    return first.processIdentifier == second.processIdentifier &&
+        first.bundleIdentifier == second.bundleIdentifier &&
+        first.bundleURL?.path == second.bundleURL?.path &&
+        first.executableURL?.path == second.executableURL?.path &&
+        firstGeneration == secondGeneration
+}
+
 func verifyAppBundle() throws {
     let path = try lexicalPath(options.appPath, suffix: ".app")
     try verifyRealDirectories(path)
@@ -448,16 +460,15 @@ func run() throws -> [String: Any] {
     }
 
     phase = "final-guard"
-    _ = try verifyPreflight(deadline: deadline)
+    let current = try verifyPreflight(deadline: deadline)
     _ = try requireBeforeDeadline(deadline, "quit deadline expired before normal termination request")
-    let current = try targetProcess()
-    try require(current === process && !current.isTerminated,
+    try require(try sameTargetProcess(process, current),
                 "exact Live process changed immediately before normal termination")
     _ = try requireBeforeDeadline(deadline, "quit deadline expired immediately before normal termination")
 
     phase = "normal-quit-request"
     quitRequested = true
-    quitAccepted = process.terminate()
+    quitAccepted = current.terminate()
     while true {
         let beforeProbe = try monotonicNow()
         guard beforeProbe < deadline else { break }

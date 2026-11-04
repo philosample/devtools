@@ -509,9 +509,9 @@ class LiveQuitPolicyTests(unittest.TestCase):
         text = source.read_text(encoding="utf-8")
         final_guard = text.index('phase = "final-guard"')
         final_check = text.index(
-            "_ = try verifyPreflight(deadline: deadline)", final_guard
+            "let current = try verifyPreflight(deadline: deadline)", final_guard
         )
-        request = text.index("quitAccepted = process.terminate()", final_check)
+        request = text.index("quitAccepted = current.terminate()", final_check)
         self.assertLess(final_check, request)
         self.assertIn(
             "let deadline = options.deadlineMonotonicNanoseconds",
@@ -538,6 +538,66 @@ class LiveQuitPolicyTests(unittest.TestCase):
         self.assertNotIn("forceTerminate", text)
         self.assertNotIn("terminateNow", text)
         self.assertIn('"force_quit": false', text)
+
+    def test_final_guard_compares_process_identity_not_wrapper_reference(self):
+        source = Path(__file__).parents[1] / "codex_devtools/live_quit.swift"
+        text = source.read_text(encoding="utf-8")
+        identity = text[
+            text.index("func sameTargetProcess(") : text.index("func verifyAppBundle(")
+        ]
+        for comparison in (
+            "first.processIdentifier == second.processIdentifier",
+            "first.bundleIdentifier == second.bundleIdentifier",
+            "first.bundleURL?.path == second.bundleURL?.path",
+            "first.executableURL?.path == second.executableURL?.path",
+            "let firstGeneration = try processGeneration(first)",
+            "let secondGeneration = try processGeneration(second)",
+            "firstGeneration == secondGeneration",
+            "!first.isTerminated && !second.isTerminated",
+        ):
+            self.assertIn(comparison, identity)
+        self.assertNotIn("===", identity)
+
+        fields = (
+            "pid",
+            "bundle_identifier",
+            "bundle_path",
+            "executable_path",
+            "generation",
+        )
+        first = {
+            "wrapper": object(),
+            "pid": 700,
+            "bundle_identifier": LIVE_BUNDLE_ID,
+            "bundle_path": str(self.app),
+            "executable_path": str(self.app / "Contents/MacOS/Live"),
+            "generation": GENERATION,
+            "terminated": False,
+        }
+        second = first.copy()
+        second["wrapper"] = object()
+
+        def same_identity(left, right):
+            return (
+                not left["terminated"]
+                and not right["terminated"]
+                and all(left[field] == right[field] for field in fields)
+            )
+
+        self.assertIsNot(first["wrapper"], second["wrapper"])
+        self.assertTrue(same_identity(first, second))
+        for field in fields:
+            different = second.copy()
+            different[field] = f"different-{field}"
+            self.assertFalse(same_identity(first, different), field)
+
+        final_guard = text[text.index('phase = "final-guard"') :]
+        self.assertIn(
+            "let current = try verifyPreflight(deadline: deadline)", final_guard
+        )
+        self.assertIn("sameTargetProcess(process, current)", final_guard)
+        self.assertIn("quitAccepted = current.terminate()", final_guard)
+        self.assertNotIn("quitAccepted = process.terminate()", final_guard)
 
     def test_unavailable_unrelated_descriptions_do_not_hide_required_controls(self):
         source = Path(__file__).parents[1] / "codex_devtools/live_quit.swift"
