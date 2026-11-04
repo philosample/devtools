@@ -33,6 +33,7 @@ python3 -m codex_devtools deploy rollback /tmp/deployment-backup/receipt.json
 python3 -m codex_devtools ableton inspect-set-device-refs path/to/selected.als
 python3 -m codex_devtools ableton inspect-set-device-refs path/to/selected.als \
   --expect-amxd-path path/to/expected-device.amxd --expect-amxd-sha256 <sha256>
+python3 -m codex_devtools ax live-quit --help
 python3 -m codex_devtools ax snapshot --pid 1234 --window-title Settings
 python3 -m codex_devtools ax live-midi-sync --pid 1234 \
   --expected-bundle-id com.ableton.live --expected-count 21 --out /private/tmp/live-sync.json
@@ -68,6 +69,8 @@ static source evidence, not native compilation or window-opening proof. See
 `deploy` is an explicit per-file deployment workflow. Its tracked manifest contains logical relative paths, while local roots and hash snapshots live in the plan outside the repository. Planning does not write into either root. Apply requires all planned hashes to remain current, creates exact-byte backups and a receipt, and atomically replaces only listed files. Rollback restores prior files or removes files created by that receipt only if their deployed hashes still match. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the manifest contract and recovery behavior.
 
 `ableton inspect-set-device-refs` reads one explicitly selected gzip-compressed `.als` file. It reports the compressed Set hash, deduplicated raw `FileRef/Path` values, and current local file hashes for AMXD paths. Optional expected path/hash arguments require the Set's sole distinct AMXD path to resolve to that exact file and digest. The command does not scan folders, write a Set, or launch Live. See [Ableton Set reference inspection](docs/ABLETON-SET-DEVICE-REFS.md) for the supported XML subset and limits.
+
+`ax live-quit` inspects one exact Live process, app generation, saved Set file pin, current AX document URL, and stopped transport. It requests normal termination only with `--execute`; it never force-quits, launches Live, writes preferences, or accepts dialogs. The disk hash does not establish that the in-memory Set has no unsaved work. See [Guarded Live normal quit](docs/LIVE-QUIT.md) for the receipt contract and evidence limits.
 
 `ax snapshot` reads the current macOS Accessibility tree for one explicit PID. It reports application identity, all visible window titles and a bounded set of roles, titles, descriptions, identifiers, help, scalar values and enabled states. `--window-title` requires one exact window-title match before walking that window's tree. It performs attribute reads only, requires Accessibility permission to be already trusted, never requests permission, and applies a two-second AX message timeout. The timestamp is when the snapshot was assembled; separate AX reads are not an atomic transaction. A truncated tree is marked in the JSON. This is a diagnostic observation, not proof of a particular app setting: callers must match the exact control description/role/value and re-observe after any change. It does not click, press, set values, use AppleEvents, change preferences or establish MIDI delivery/isolation. See [native Accessibility snapshots](docs/AX-SNAPSHOT.md).
 

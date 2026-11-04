@@ -1,0 +1,346 @@
+"""Guarded normal-quit policy tests; no Live or AX actions are run."""
+
+import hashlib
+import io
+import json
+import subprocess
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+from unittest.mock import patch
+
+from codex_devtools.cli import main
+from codex_devtools.live_quit_control import (
+    FORMAT,
+    LIVE_BUNDLE_ID,
+    _stable_source_pin,
+    run_live_quit,
+)
+
+PID = 12345
+GENERATION = "1700000000123456"
+
+
+class LiveQuitPolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir="/private/tmp")
+        self.root = Path(self.temp.name)
+        self.app = self.root / "Ableton Live Beta.app"
+        self.app.mkdir()
+        self.source = self.root / "Owned.als"
+        self.source.write_bytes(b"stable saved Set bytes")
+        info = self.source.stat()
+        self.sha = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        self.device = str(info.st_dev)
+        self.inode = str(info.st_ino)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def call(self, **changes):
+        args = {
+            "expected_bundle_id": LIVE_BUNDLE_ID,
+            "app_bundle": self.app,
+            "expected_generation": GENERATION,
+            "source_set": self.source,
+            "source_sha256": self.sha,
+            "source_device": self.device,
+            "source_inode": self.inode,
+        }
+        args.update(changes)
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch("codex_devtools.live_quit_control.subprocess.run") as native,
+        ):
+            result = run_live_quit(PID, **args)
+        return result, native
+
+    def native_receipt(self, *, execute=False, status="ready"):
+        pin = _stable_source_pin(self.source, self.sha, self.device, self.inode)
+        requested = status in {"terminated", "stopped"} and execute
+        terminated = status == "terminated"
+        return {
+            "format": FORMAT,
+            "status": status,
+            "phase": "complete"
+            if status in {"ready", "terminated"}
+            else "quit-deadline",
+            "read_only": not execute,
+            "target": {
+                "pid": PID,
+                "bundle_identifier": LIVE_BUNDLE_ID,
+                "app_path": str(self.app),
+                "executable_path": str(self.app / "Contents/MacOS/Live"),
+                "process_generation": GENERATION,
+            },
+            "source_set_url": self.source.as_uri(),
+            "source_file": pin,
+            "quit": {
+                "requested": requested,
+                "accepted": True if terminated or requested else None,
+                "terminated": terminated,
+                "outcome": "terminated"
+                if terminated
+                else "unknown"
+                if requested
+                else "not_attempted",
+                "force_quit": False,
+            },
+            "manual_inspection_required": requested and not terminated,
+        }
+
+    def test_source_pin_rejects_hash_device_and_inode_drift(self):
+        for sha256, device, inode in (
+            ("0" * 64, self.device, self.inode),
+            (self.sha, str(int(self.device) + 1), self.inode),
+            (self.sha, self.device, str(int(self.inode) + 1)),
+        ):
+            with (
+                self.subTest(device=device, inode=inode),
+                self.assertRaises(ValueError),
+            ):
+                _stable_source_pin(self.source, sha256, device, inode)
+
+    def test_symlink_source_is_rejected(self):
+        link = self.root / "Alias.als"
+        link.symlink_to(self.source)
+        with self.assertRaisesRegex(ValueError, "regular file"):
+            _stable_source_pin(link, self.sha, self.device, self.inode)
+
+    def test_input_rejections_happen_before_native_helper(self):
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch("codex_devtools.live_quit_control.subprocess.run") as native,
+        ):
+            with self.assertRaisesRegex(ValueError, "bundle identifier"):
+                run_live_quit(
+                    PID,
+                    expected_bundle_id="com.other.app",
+                    app_bundle=self.app,
+                    expected_generation=GENERATION,
+                    source_set=self.source,
+                    source_sha256=self.sha,
+                    source_device=self.device,
+                    source_inode=self.inode,
+                )
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                run_live_quit(
+                    PID,
+                    expected_bundle_id=LIVE_BUNDLE_ID,
+                    app_bundle=self.app,
+                    expected_generation=GENERATION,
+                    source_set=self.source,
+                    source_sha256="0" * 64,
+                    source_device=self.device,
+                    source_inode=self.inode,
+                )
+            native.assert_not_called()
+
+    def test_default_is_read_only_and_never_passes_execute(self):
+        receipt = self.native_receipt()
+        completed = subprocess.CompletedProcess([], 0, json.dumps(receipt), "")
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_quit_control.subprocess.run",
+                return_value=completed,
+            ) as native,
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+            )
+        self.assertEqual(result["status"], "ready")
+        self.assertTrue(result["read_only"])
+        self.assertNotIn("--execute", native.call_args.args[0])
+
+    def test_explicit_execute_passes_one_opt_in_and_validates_termination_receipt(self):
+        receipt = self.native_receipt(execute=True, status="terminated")
+        completed = subprocess.CompletedProcess([], 0, json.dumps(receipt), "")
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_quit_control.subprocess.run",
+                return_value=completed,
+            ) as native,
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+                execute=True,
+            )
+        command = native.call_args.args[0]
+        self.assertEqual(command.count("--execute"), 1)
+        self.assertEqual(result["quit"]["outcome"], "terminated")
+
+    def test_outer_timeout_is_unknown_and_requires_manual_inspection(self):
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_quit_control.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("swift", 35),
+            ),
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+                execute=True,
+            )
+        self.assertEqual(result["quit"]["outcome"], "unknown")
+        self.assertIsNone(result["quit"]["requested"])
+        self.assertTrue(result["manual_inspection_required"])
+        self.assertFalse(result["quit"]["force_quit"])
+
+    def test_native_dialog_after_request_stays_unknown_without_retry(self):
+        receipt = self.native_receipt(execute=True, status="stopped")
+        completed = subprocess.CompletedProcess([], 1, json.dumps(receipt), "")
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_quit_control.subprocess.run",
+                return_value=completed,
+            ) as native,
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+                execute=True,
+            )
+        self.assertTrue(result["quit"]["requested"])
+        self.assertEqual(result["quit"]["outcome"], "unknown")
+        self.assertTrue(result["manual_inspection_required"])
+        self.assertEqual(native.call_count, 1)
+
+    def test_pre_request_refusal_receipt_keeps_quit_not_attempted(self):
+        receipt = self.native_receipt(execute=True, status="ready")
+        receipt.update(status="stopped", phase="identity")
+        completed = subprocess.CompletedProcess([], 1, json.dumps(receipt), "")
+        with (
+            patch(
+                "codex_devtools.live_quit_control.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_quit_control.subprocess.run",
+                return_value=completed,
+            ),
+        ):
+            result = run_live_quit(
+                PID,
+                expected_bundle_id=LIVE_BUNDLE_ID,
+                app_bundle=self.app,
+                expected_generation=GENERATION,
+                source_set=self.source,
+                source_sha256=self.sha,
+                source_device=self.device,
+                source_inode=self.inode,
+                execute=True,
+            )
+        self.assertFalse(result["quit"]["requested"])
+        self.assertEqual(result["quit"]["outcome"], "not_attempted")
+        self.assertFalse(result["manual_inspection_required"])
+
+    def test_cli_defaults_to_read_only_and_only_executes_with_flag(self):
+        args = [
+            "ax",
+            "live-quit",
+            "--pid",
+            str(PID),
+            "--expected-bundle-id",
+            LIVE_BUNDLE_ID,
+            "--app",
+            str(self.app),
+            "--expected-generation",
+            GENERATION,
+            "--set",
+            str(self.source),
+            "--source-sha256",
+            self.sha,
+            "--source-device",
+            self.device,
+            "--source-inode",
+            self.inode,
+        ]
+        with patch(
+            "codex_devtools.live_quit_control.run_live_quit",
+            return_value={"status": "ready"},
+        ) as run:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(args), 0)
+            self.assertFalse(run.call_args.kwargs["execute"])
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main([*args, "--execute"]), 0)
+            self.assertTrue(run.call_args.kwargs["execute"])
+
+    def test_swift_checks_full_guards_again_before_single_normal_quit(self):
+        source = Path(__file__).parents[1] / "codex_devtools/live_quit.swift"
+        text = source.read_text(encoding="utf-8")
+        final_guard = text.index('phase = "final-guard"')
+        final_check = text.index(
+            "_ = try verifyPreflight(deadline: deadline)", final_guard
+        )
+        request = text.index("quitAccepted = process.terminate()", final_check)
+        self.assertLess(final_check, request)
+        self.assertIn(
+            "let deadline = DispatchTime.now().uptimeNanoseconds + quitTimeoutNanoseconds",
+            text,
+        )
+        self.assertIn("process.bundleURL?.path == options.appPath", text)
+        self.assertIn(
+            'process.executableURL?.path == options.appPath + "/Contents/MacOS/Live"',
+            text,
+        )
+        self.assertIn("expectedHash == options.sha256", text)
+        self.assertIn(
+            "play == 0 && link == 0 && arrangement == 0 && session == 0", text
+        )
+        self.assertNotIn("forceTerminate", text)
+        self.assertNotIn("terminateNow", text)
+        self.assertIn('"force_quit": false', text)
+
+
+if __name__ == "__main__":
+    unittest.main()
