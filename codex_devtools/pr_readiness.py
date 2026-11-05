@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -150,29 +151,33 @@ def _receipt_bytes(root: Path, reference: str) -> bytes:
     if relative.is_absolute():
         raise ValueError("receipt reference must be relative")
 
-    path = root
-    for part in parts[:-1]:
-        path = path / part
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            raise ValueError("receipt path contains a symlink or non-directory")
-    path = path / parts[-1]
-    metadata = path.lstat()
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("receipt must be a regular, non-symlink file")
-    if metadata.st_size > MAX_RECEIPT_BYTES:
-        raise ValueError(f"receipt exceeds {MAX_RECEIPT_BYTES} bytes")
+    required_flags = ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK")
+    if any(not hasattr(os, name) for name in required_flags):
+        raise ValueError("platform lacks safe receipt path-opening flags")
+    nofollow = os.O_NOFOLLOW
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
+    directory_descriptor = os.open(root, directory_flags)
+    try:
+        for part in parts[:-1]:
+            child_descriptor = os.open(
+                part, directory_flags, dir_fd=directory_descriptor
+            )
+            os.close(directory_descriptor)
+            directory_descriptor = child_descriptor
+        descriptor = os.open(
+            parts[-1],
+            os.O_RDONLY | nofollow | os.O_NONBLOCK,
+            dir_fd=directory_descriptor,
+        )
+    finally:
+        os.close(directory_descriptor)
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_dev != metadata.st_dev
-            or opened.st_ino != metadata.st_ino
-        ):
-            raise ValueError("receipt changed while it was opened")
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("receipt must be a regular file")
+        if opened.st_size > MAX_RECEIPT_BYTES:
+            raise ValueError(f"receipt exceeds {MAX_RECEIPT_BYTES} bytes")
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             raw = stream.read(MAX_RECEIPT_BYTES + 1)
     finally:
@@ -255,8 +260,14 @@ def _verify_receipts(
             status, reason = "unknown", "receipt file is missing"
         except PermissionError:
             status, reason = "unknown", "receipt file is not readable"
-        except OSError:
-            status, reason = "unknown", "receipt file could not be read"
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                status, reason = (
+                    "failed",
+                    "receipt path contains a symlink or non-directory",
+                )
+            else:
+                status, reason = "unknown", "receipt file could not be read"
         except ValueError as exc:
             status, reason = "failed", str(exc)
         else:

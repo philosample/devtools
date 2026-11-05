@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -20,6 +21,7 @@ HEAD = "2" * 40
 COMPONENT = "3" * 64
 RECEIPT = "4" * 64
 BODY = "PR description"
+REAL_OS_OPEN = os.open
 
 
 class PRReadinessTests(unittest.TestCase):
@@ -376,6 +378,71 @@ class PRReadinessTests(unittest.TestCase):
                 )
                 self.assertEqual(code, 1)
                 self.assertEqual(report["receipt_verification"]["status"], "failed")
+
+    @patch("codex_devtools.pr_readiness.os.open")
+    def test_leaf_replaced_with_fifo_is_opened_nonblocking_then_rejected(
+        self, open_mock
+    ):
+        replaced = False
+
+        def replace_leaf(name, flags, mode=0o777, *, dir_fd=None):
+            nonlocal replaced
+            if name == "unit.json" and dir_fd is not None and not replaced:
+                replaced = True
+                os.unlink(name, dir_fd=dir_fd)
+                os.mkfifo(name, mode=0o600, dir_fd=dir_fd)
+                self.assertTrue(flags & os.O_NONBLOCK)
+            if dir_fd is None:
+                return REAL_OS_OPEN(name, flags, mode)
+            return REAL_OS_OPEN(name, flags, mode, dir_fd=dir_fd)
+
+        open_mock.side_effect = replace_leaf
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertTrue(replaced)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["receipt_verification"]["status"], "failed")
+        self.assertIn(
+            "regular file", report["receipt_verification"]["receipts"][0]["reason"]
+        )
+
+    @patch("codex_devtools.pr_readiness.os.open")
+    def test_intermediate_directory_replaced_with_symlink_is_not_followed(
+        self, open_mock
+    ):
+        directory = self.root / "receipts"
+        backup = self.root / "receipts-original"
+        replaced = False
+
+        def replace_parent(name, flags, mode=0o777, *, dir_fd=None):
+            nonlocal replaced
+            if name == "receipts" and dir_fd is not None and not replaced:
+                replaced = True
+                directory.rename(backup)
+                directory.symlink_to(backup, target_is_directory=True)
+                self.assertTrue(flags & os.O_DIRECTORY)
+                self.assertTrue(flags & os.O_NOFOLLOW)
+            if dir_fd is None:
+                return REAL_OS_OPEN(name, flags, mode)
+            return REAL_OS_OPEN(name, flags, mode, dir_fd=dir_fd)
+
+        open_mock.side_effect = replace_parent
+        try:
+            report, code = pr_readiness.plan_check(
+                self.policy_path, self.evidence_path, self.plan
+            )
+        finally:
+            if directory.is_symlink():
+                directory.unlink()
+            if backup.exists():
+                backup.rename(directory)
+        self.assertTrue(replaced)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["receipt_verification"]["status"], "failed")
+        self.assertNotEqual(
+            report["receipt_verification"]["receipts"][0]["status"], "verified"
+        )
 
     def test_unknown_fields_duplicate_keys_and_malformed_json_fail_closed(self):
         self.policy["unreviewed"] = True
