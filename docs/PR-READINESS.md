@@ -10,6 +10,13 @@ adds one fixed, read-only `gh pr view` query and compares the current PR number,
 head, base, state and description hash with the declaration. GitHub review
 decision is reported as observed metadata only.
 
+The report exposes blocking `unknown` gates for GitHub required CI checks,
+review submissions/unresolved thread findings, and actual receipt-content/hash
+verification. The command does not fetch check runs or review threads, or
+retrieve receipts. An observed `CHANGES_REQUESTED` adds its own blocking
+`review_disposition` gate. These declarations cannot establish that review
+findings are resolved or that required CI passed.
+
 Both commands require policy schema `codex-devtools-pr-policy-v1`, evidence
 schema `codex-devtools-pr-evidence-v1`, and a byte-hashed plan file. Policy
 fields are closed: repository/PR/body pins, plan identity and hash, component
@@ -23,5 +30,6 @@ checks, and active holds block the declaration check.
 This increment has no independent authenticated coordinator identity boundary.
 Consequently `review-ready` always reports `ready: false` and coordinator
 approval `unknown`, including when GitHub reports `APPROVED`. Same-account
-reviews and worker-authored chat/model labels cannot attest approval. A future
-trusted approval boundary and documentation pilot are separate issue #75 gates.
+reviews and worker-authored chat/model labels cannot attest approval. Required
+checks, review findings/thread state, receipt verification, a future trusted
+approval boundary and documentation pilot remain separate issue #75 gates.

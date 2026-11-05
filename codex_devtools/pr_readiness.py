@@ -494,6 +494,30 @@ def review_ready(
     plan_path: Path,
 ) -> tuple[dict[str, Any], int]:
     blockers: list[dict[str, str]] = []
+    unverified_gates = [
+        {
+            "gate": "github_required_checks",
+            "status": "unknown",
+            "reason": "required GitHub CI check state is not fetched by this increment",
+            "owner": "coordinator",
+            "next_action": "add a bounded read-only required-check snapshot in a later increment",
+        },
+        {
+            "gate": "review_findings",
+            "status": "unknown",
+            "reason": "review submissions and unresolved review-thread state are not fetched",
+            "owner": "coordinator",
+            "next_action": "add a bounded read-only review and thread snapshot in a later increment",
+        },
+        {
+            "gate": "receipt_verification",
+            "status": "unknown",
+            "reason": "declared receipt contents and hashes are not retrieved or verified",
+            "owner": "evidence owner",
+            "next_action": "retrieve each pinned receipt and verify its content hash in a later increment",
+        },
+    ]
+    blockers.extend(unverified_gates)
     try:
         data, pins = _inputs(policy_path, evidence_path, plan_path)
         blockers.extend(data["blockers"])
@@ -520,6 +544,15 @@ def review_ready(
             }
         )
     if remote is not None:
+        if remote["reviewDecision"] == "CHANGES_REQUESTED":
+            blockers.append(
+                {
+                    "gate": "review_disposition",
+                    "reason": "GitHub reports CHANGES_REQUESTED; unresolved findings are not fetched here",
+                    "owner": "coordinator",
+                    "next_action": "inspect and resolve the current review findings",
+                }
+            )
         if remote["state"] != "OPEN":
             blockers.append(
                 {
@@ -595,9 +628,11 @@ def review_ready(
         "github_review_decision_observed": remote["reviewDecision"] if remote else None,
         "github_state_observed": remote["state"] if remote else None,
         "blockers": blockers,
+        "unverified_gates": unverified_gates,
         "limitations": [
             "GitHub reviewDecision is informational only and does not authenticate the coordinator under shared identity",
-            "receipt references are hash-pinned declarations and are not dereferenced by this increment",
+            "required GitHub checks and unresolved review-thread state are not fetched by this increment",
+            "receipt references are hash-pinned declarations but receipt content and hashes are not retrieved or verified",
             "this read-only report provides no merge authorization",
         ],
     }

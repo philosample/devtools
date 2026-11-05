@@ -275,6 +275,15 @@ class PRReadinessTests(unittest.TestCase):
         self.assertIn(
             "coordinator_approval", {item["gate"] for item in report["blockers"]}
         )
+        unknown = {item["gate"]: item for item in report["unverified_gates"]}
+        self.assertEqual(
+            set(unknown),
+            {"github_required_checks", "review_findings", "receipt_verification"},
+        )
+        self.assertTrue(all(item["status"] == "unknown" for item in unknown.values()))
+        self.assertTrue(
+            set(unknown).issubset({item["gate"] for item in report["blockers"]})
+        )
         self.assertEqual(
             run.call_args.args[0],
             [
@@ -290,6 +299,43 @@ class PRReadinessTests(unittest.TestCase):
         )
         self.assertEqual(run.call_args.kwargs["timeout"], 15)
         self.assertFalse((self.root / "command-was-executed").exists())
+
+    @patch("codex_devtools.pr_readiness.subprocess.run")
+    def test_changes_requested_adds_disposition_block_and_keeps_unverified_gates(
+        self, run
+    ):
+        run.return_value.returncode = 0
+        run.return_value.stdout = json.dumps(
+            {
+                "number": 75,
+                "headRefOid": HEAD,
+                "baseRefOid": BASE,
+                "body": BODY,
+                "state": "OPEN",
+                "reviewDecision": "CHANGES_REQUESTED",
+            }
+        )
+        local_report, local_code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(local_code, 0)
+        self.assertTrue(local_report["valid"])
+        report, code = pr_readiness.review_ready(
+            "philosample/devtools", 75, self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["github_review_decision_observed"], "CHANGES_REQUESTED")
+        self.assertEqual(report["coordinator_approval"]["status"], "unknown")
+        gates = {item["gate"] for item in report["blockers"]}
+        self.assertIn("review_disposition", gates)
+        self.assertTrue(
+            {
+                "github_required_checks",
+                "review_findings",
+                "receipt_verification",
+            }.issubset(gates)
+        )
+        self.assertIn("coordinator_approval", gates)
 
     @patch("codex_devtools.pr_readiness.subprocess.run")
     def test_remote_head_base_and_body_changes_are_independent_blockers(self, run):
