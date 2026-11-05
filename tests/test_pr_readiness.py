@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -122,6 +123,106 @@ class PRReadinessTests(unittest.TestCase):
     def save_inputs(self):
         self.write_json(self.policy_path, self.policy)
         self.write_json(self.evidence_path, self.evidence)
+
+    @staticmethod
+    def completed_json(value, returncode=0, stderr=""):
+        stdout = value if isinstance(value, str) else json.dumps(value)
+        return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+    @classmethod
+    def pr_response(
+        cls,
+        *,
+        head=HEAD,
+        base=BASE,
+        body=BODY,
+        decision="",
+        state="OPEN",
+        returncode=0,
+    ):
+        return cls.completed_json(
+            {
+                "number": 75,
+                "headRefOid": head,
+                "baseRefOid": base,
+                "body": body,
+                "state": state,
+                "reviewDecision": decision,
+            },
+            returncode,
+        )
+
+    @classmethod
+    def checks_response(cls, rows=None, *, returncode=0, stderr=""):
+        if rows is None:
+            rows = [
+                {
+                    "name": "unit",
+                    "bucket": "pass",
+                    "state": "SUCCESS",
+                    "workflow": "CI",
+                    "link": "https://github.com/philosample/devtools/actions/runs/1",
+                    "startedAt": "2026-11-05T12:00:00Z",
+                    "completedAt": "2026-11-05T12:01:00Z",
+                }
+            ]
+        return cls.completed_json(rows, returncode, stderr)
+
+    @classmethod
+    def thread_response(
+        cls,
+        nodes=None,
+        *,
+        has_next=False,
+        cursor=None,
+        head=HEAD,
+        base=BASE,
+        state="OPEN",
+        pr_id="PR_kwDOtest",
+    ):
+        return cls.completed_json(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": pr_id,
+                            "headRefOid": head,
+                            "baseRefOid": base,
+                            "state": state,
+                            "reviewThreads": {
+                                "nodes": nodes or [],
+                                "pageInfo": {
+                                    "hasNextPage": has_next,
+                                    "endCursor": cursor,
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+        )
+
+    def script_remote(
+        self,
+        run,
+        *,
+        decision="",
+        check_rows=None,
+        check_returncode=0,
+        check_stderr="",
+        thread_pages=None,
+        before=None,
+        after=None,
+    ):
+        thread_pages = thread_pages or [self.thread_response()]
+        run.side_effect = [
+            before or self.pr_response(decision=decision),
+            self.checks_response(
+                check_rows, returncode=check_returncode, stderr=check_stderr
+            ),
+            *thread_pages,
+            after or self.pr_response(decision=decision),
+        ]
 
     def test_plan_check_accepts_exact_closed_declarations_but_never_overall_ready(self):
         report, code = pr_readiness.plan_check(
@@ -253,18 +354,8 @@ class PRReadinessTests(unittest.TestCase):
     def test_review_ready_parses_actual_gh_json_shape_and_forged_approval_stays_blocked(
         self, run
     ):
-        # Raw JSON mirrors `gh pr view --json number,headRefOid,baseRefOid,body,state,reviewDecision`.
-        run.return_value.returncode = 0
-        run.return_value.stdout = json.dumps(
-            {
-                "number": 75,
-                "headRefOid": HEAD,
-                "baseRefOid": BASE,
-                "body": BODY,
-                "state": "OPEN",
-                "reviewDecision": "APPROVED",
-            }
-        )
+        # All responses are serialized payloads from the fixed gh/GraphQL queries.
+        self.script_remote(run, decision="APPROVED")
         report, code = pr_readiness.review_ready(
             "philosample/devtools", 75, self.policy_path, self.evidence_path, self.plan
         )
@@ -272,20 +363,15 @@ class PRReadinessTests(unittest.TestCase):
         self.assertFalse(report["ready"])
         self.assertEqual(report["github_review_decision_observed"], "APPROVED")
         self.assertEqual(report["coordinator_approval"]["status"], "unknown")
-        self.assertIn(
-            "coordinator_approval", {item["gate"] for item in report["blockers"]}
-        )
-        unknown = {item["gate"]: item for item in report["unverified_gates"]}
+        self.assertEqual(report["github_required_checks"]["status"], "passed")
+        self.assertEqual(report["review_threads"]["status"], "resolved")
+        gates = {item["gate"] for item in report["blockers"]}
+        self.assertIn("coordinator_approval", gates)
+        self.assertIn("receipt_verification", gates)
+        self.assertNotIn("github_required_checks", gates)
+        self.assertNotIn("review_findings", gates)
         self.assertEqual(
-            set(unknown),
-            {"github_required_checks", "review_findings", "receipt_verification"},
-        )
-        self.assertTrue(all(item["status"] == "unknown" for item in unknown.values()))
-        self.assertTrue(
-            set(unknown).issubset({item["gate"] for item in report["blockers"]})
-        )
-        self.assertEqual(
-            run.call_args.args[0],
+            run.call_args_list[0].args[0],
             [
                 "gh",
                 "pr",
@@ -297,24 +383,33 @@ class PRReadinessTests(unittest.TestCase):
                 "number,headRefOid,baseRefOid,body,state,reviewDecision",
             ],
         )
-        self.assertEqual(run.call_args.kwargs["timeout"], 15)
+        check_argv = run.call_args_list[1].args[0]
+        self.assertEqual(
+            check_argv[:7],
+            [
+                "gh",
+                "pr",
+                "checks",
+                "75",
+                "--repo",
+                "philosample/devtools",
+                "--required",
+            ],
+        )
+        self.assertIn(
+            "name,bucket,state,workflow,link,startedAt,completedAt", check_argv
+        )
+        graph_argv = run.call_args_list[2].args[0]
+        self.assertEqual(graph_argv[:3], ["gh", "api", "graphql"])
+        self.assertIn("PRReadinessReviewThreads", " ".join(graph_argv))
+        self.assertEqual(run.call_count, 4)
         self.assertFalse((self.root / "command-was-executed").exists())
 
     @patch("codex_devtools.pr_readiness.subprocess.run")
     def test_changes_requested_adds_disposition_block_and_keeps_unverified_gates(
         self, run
     ):
-        run.return_value.returncode = 0
-        run.return_value.stdout = json.dumps(
-            {
-                "number": 75,
-                "headRefOid": HEAD,
-                "baseRefOid": BASE,
-                "body": BODY,
-                "state": "OPEN",
-                "reviewDecision": "CHANGES_REQUESTED",
-            }
-        )
+        self.script_remote(run, decision="CHANGES_REQUESTED")
         local_report, local_code = pr_readiness.plan_check(
             self.policy_path, self.evidence_path, self.plan
         )
@@ -328,47 +423,37 @@ class PRReadinessTests(unittest.TestCase):
         self.assertEqual(report["coordinator_approval"]["status"], "unknown")
         gates = {item["gate"] for item in report["blockers"]}
         self.assertIn("review_disposition", gates)
-        self.assertTrue(
-            {
-                "github_required_checks",
-                "review_findings",
-                "receipt_verification",
-            }.issubset(gates)
-        )
+        self.assertNotIn("github_required_checks", gates)
+        self.assertNotIn("review_findings", gates)
         self.assertIn("coordinator_approval", gates)
 
     @patch("codex_devtools.pr_readiness.subprocess.run")
     def test_remote_head_base_and_body_changes_are_independent_blockers(self, run):
-        run.return_value.returncode = 0
-        run.return_value.stdout = json.dumps(
-            {
-                "number": 75,
-                "headRefOid": "5" * 40,
-                "baseRefOid": "6" * 40,
-                "body": "edited PR description",
-                "state": "OPEN",
-                "reviewDecision": "REVIEW_REQUIRED",
-            }
+        self.script_remote(
+            run,
+            before=self.pr_response(),
+            after=self.pr_response(
+                head="5" * 40, base="6" * 40, body="edited PR description"
+            ),
         )
         report, _ = pr_readiness.review_ready(
             "philosample/devtools", 75, self.policy_path, self.evidence_path, self.plan
         )
         gates = {item["gate"] for item in report["blockers"]}
-        self.assertTrue({"head_pin", "base_pin", "body_pin"}.issubset(gates))
+        self.assertTrue(
+            {
+                "pr_snapshot_stability",
+                "github_required_checks",
+                "review_findings",
+            }.issubset(gates)
+        )
+        self.assertFalse({"head_pin", "base_pin", "body_pin"}.intersection(gates))
+        self.assertEqual(report["github_required_checks"]["status"], "unknown")
+        self.assertEqual(report["review_threads"]["status"], "unknown")
 
     @patch("codex_devtools.pr_readiness.subprocess.run")
     def test_cli_uses_read_only_review_command(self, run):
-        run.return_value.returncode = 0
-        run.return_value.stdout = json.dumps(
-            {
-                "number": 75,
-                "headRefOid": HEAD,
-                "baseRefOid": BASE,
-                "body": BODY,
-                "state": "OPEN",
-                "reviewDecision": "",
-            }
-        )
+        self.script_remote(run)
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             code = main(
@@ -388,8 +473,239 @@ class PRReadinessTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(code, 1)
-        self.assertFalse(json.loads(output.getvalue())["ready"])
-        self.assertEqual(run.call_count, 1)
+        report = json.loads(output.getvalue())
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["github_required_checks"]["status"], "passed")
+        self.assertEqual(report["review_threads"]["status"], "resolved")
+        self.assertEqual(run.call_count, 4)
+
+    @patch("codex_devtools.pr_readiness.subprocess.run")
+    def test_required_check_pass_fail_pending_skip_neutral_and_unknown(self, run):
+        cases = (
+            ("pass", "SUCCESS", 0, "passed"),
+            ("fail", "FAILURE", 1, "failed"),
+            ("pending", "PENDING", 8, "pending"),
+            ("skipping", "SKIPPED", 0, "skipped_or_neutral"),
+            ("skipping", "NEUTRAL", 0, "skipped_or_neutral"),
+            ("future-bucket", "SUCCESS", 0, "unknown"),
+        )
+        for bucket, state, returncode, expected in cases:
+            with self.subTest(bucket=bucket, state=state):
+                row = {
+                    "name": "required-build",
+                    "bucket": bucket,
+                    "state": state,
+                    "workflow": "CI",
+                    "link": "https://github.com/example/run/1",
+                    "startedAt": None,
+                    "completedAt": None,
+                }
+                self.script_remote(
+                    run,
+                    check_rows=[row],
+                    check_returncode=returncode,
+                    thread_pages=[self.thread_response()],
+                )
+                report, code = pr_readiness.review_ready(
+                    "philosample/devtools",
+                    75,
+                    self.policy_path,
+                    self.evidence_path,
+                    self.plan,
+                )
+                self.assertEqual(code, 1)
+                if expected == "unknown":
+                    self.assertEqual(
+                        report["github_required_checks"]["status"], "unknown"
+                    )
+                else:
+                    self.assertEqual(
+                        report["github_required_checks"]["checks"][0]["status"],
+                        expected,
+                    )
+                self.assertFalse(report["ready"])
+                if expected == "passed":
+                    self.assertNotIn(
+                        "github_required_checks",
+                        {item["gate"] for item in report["blockers"]},
+                    )
+                elif expected == "unknown":
+                    self.assertIn(
+                        "github_required_checks",
+                        {item["gate"] for item in report["blockers"]},
+                    )
+                else:
+                    self.assertIn(
+                        "required_check", {item["gate"] for item in report["blockers"]}
+                    )
+
+    @patch("codex_devtools.pr_readiness.subprocess.run")
+    def test_no_required_checks_and_permission_failures_remain_unknown(self, run):
+        for rows, returncode, stderr in (
+            ([], 1, "no checks reported"),
+            ("", 1, "no checks reported on this branch"),
+            ("", 4, "HTTP 403: Resource not accessible"),
+        ):
+            with self.subTest(returncode=returncode):
+                self.script_remote(
+                    run,
+                    check_rows=rows,
+                    check_returncode=returncode,
+                    check_stderr=stderr,
+                )
+                report, _ = pr_readiness.review_ready(
+                    "philosample/devtools",
+                    75,
+                    self.policy_path,
+                    self.evidence_path,
+                    self.plan,
+                )
+                self.assertEqual(report["github_required_checks"]["status"], "unknown")
+                gate = next(
+                    item
+                    for item in report["unverified_gates"]
+                    if item["gate"] == "github_required_checks"
+                )
+                self.assertEqual(gate["status"], "unknown")
+
+        bounded_rows = [
+            {
+                "name": f"required-{index}",
+                "bucket": "pass",
+                "state": "SUCCESS",
+                "workflow": "CI",
+                "link": f"https://github.com/example/run/{index}",
+            }
+            for index in range(pr_readiness.MAX_ITEMS)
+        ]
+        self.script_remote(run, check_rows=bounded_rows)
+        report, _ = pr_readiness.review_ready(
+            "philosample/devtools", 75, self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(report["github_required_checks"]["status"], "unknown")
+        self.assertIn(
+            "github_required_checks", {item["gate"] for item in report["blockers"]}
+        )
+
+    @patch("codex_devtools.pr_readiness.subprocess.run")
+    def test_unresolved_and_resolved_thread_serialization(self, run):
+        for resolved, expected in ((False, "unresolved"), (True, "resolved")):
+            with self.subTest(resolved=resolved):
+                self.script_remote(
+                    run,
+                    thread_pages=[
+                        self.thread_response(
+                            [{"id": "PRRT_kwDOtest1", "isResolved": resolved}]
+                        )
+                    ],
+                )
+                report, _ = pr_readiness.review_ready(
+                    "philosample/devtools",
+                    75,
+                    self.policy_path,
+                    self.evidence_path,
+                    self.plan,
+                )
+                self.assertEqual(report["review_threads"]["status"], expected)
+                self.assertEqual(report["review_threads"]["total"], 1)
+                finding_gates = [
+                    item
+                    for item in report["blockers"]
+                    if item["gate"] == "review_findings"
+                ]
+                self.assertEqual(bool(finding_gates), not resolved)
+
+    @patch("codex_devtools.pr_readiness.subprocess.run")
+    def test_review_thread_pagination_is_followed_and_truncation_stays_unknown(
+        self, run
+    ):
+        first_nodes = [
+            {"id": f"PRRT_kwDO{i:04d}", "isResolved": True} for i in range(100)
+        ]
+        self.script_remote(
+            run,
+            thread_pages=[
+                self.thread_response(first_nodes, has_next=True, cursor="cursor-1"),
+                self.thread_response([{"id": "PRRT_kwDO0100", "isResolved": True}]),
+            ],
+        )
+        report, _ = pr_readiness.review_ready(
+            "philosample/devtools", 75, self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(report["review_threads"]["status"], "resolved")
+        self.assertTrue(report["review_threads"]["complete"])
+        self.assertEqual(report["review_threads"]["pages"], 2)
+        self.assertEqual(report["review_threads"]["total"], 101)
+        second_graphql_argv = run.call_args_list[3].args[0]
+        self.assertIn("after=cursor-1", second_graphql_argv)
+
+        pages = [
+            self.thread_response(
+                [{"id": f"PRRT_page{index}", "isResolved": True}],
+                has_next=True,
+                cursor=f"cursor-{index}",
+            )
+            for index in range(1, pr_readiness.MAX_REVIEW_THREAD_PAGES + 1)
+        ]
+        self.script_remote(run, thread_pages=pages)
+        truncated, _ = pr_readiness.review_ready(
+            "philosample/devtools", 75, self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(truncated["review_threads"]["status"], "unknown")
+        self.assertFalse(truncated["review_threads"]["complete"])
+        self.assertIn(
+            "review_findings", {item["gate"] for item in truncated["blockers"]}
+        )
+
+    @patch("codex_devtools.pr_readiness.subprocess.run")
+    def test_graphql_permission_or_partial_error_remains_unknown(self, run):
+        denied = subprocess.CompletedProcess([], 1, "", "HTTP 403")
+        self.script_remote(run, thread_pages=[denied])
+        report, _ = pr_readiness.review_ready(
+            "philosample/devtools", 75, self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(report["review_threads"]["status"], "unknown")
+        self.assertIn("review_findings", {item["gate"] for item in report["blockers"]})
+
+        partial = self.completed_json(
+            {
+                "data": {"repository": None},
+                "errors": [{"message": "permission denied"}],
+            }
+        )
+        self.script_remote(run, thread_pages=[partial])
+        report, _ = pr_readiness.review_ready(
+            "philosample/devtools", 75, self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(report["review_threads"]["status"], "unknown")
+
+    @patch("codex_devtools.pr_readiness.subprocess.run")
+    def test_each_pr_pin_changing_across_reads_invalidates_remote_results(self, run):
+        changes = (
+            {"head": "5" * 40},
+            {"base": "6" * 40},
+            {"body": "updated description"},
+        )
+        for changed in changes:
+            with self.subTest(changed=tuple(changed)):
+                self.script_remote(
+                    run,
+                    before=self.pr_response(),
+                    after=self.pr_response(**changed),
+                )
+                report, _ = pr_readiness.review_ready(
+                    "philosample/devtools",
+                    75,
+                    self.policy_path,
+                    self.evidence_path,
+                    self.plan,
+                )
+                gates = {item["gate"] for item in report["blockers"]}
+                self.assertIn("pr_snapshot_stability", gates)
+                self.assertIn("github_required_checks", gates)
+                self.assertIn("review_findings", gates)
+                self.assertEqual(report["github_required_checks"]["status"], "unknown")
+                self.assertEqual(report["review_threads"]["status"], "unknown")
 
 
 if __name__ == "__main__":
