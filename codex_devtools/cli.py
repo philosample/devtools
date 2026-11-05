@@ -26,6 +26,13 @@ def _json_out(value) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def _json_line(value) -> None:
+    print(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        flush=True,
+    )
+
+
 def _manifest(root: Path, destination: Path) -> dict:
     if not root.is_dir():
         raise ValueError(f"manifest root is not a directory: {root}")
@@ -162,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     undo.add_argument("receipt", type=Path)
     midi = commands.add_parser(
         "midi",
-        help="capture MIDI Monitor input or inspect/run isolated transport checks",
+        help="capture MIDI input or inspect/run isolated transport checks",
     )
     midi_sub = midi.add_subparsers(dest="action", required=True)
     midi_sub.add_parser(
@@ -219,6 +226,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=3.0,
         help="callback wait bound in seconds (0.05–30)",
     )
+    source_capture = midi_sub.add_parser(
+        "source-capture",
+        help="passively capture raw MIDI packets from one pinned CoreMIDI source",
+    )
+    source_capture.add_argument("--source-uid", required=True, type=int)
+    source_capture.add_argument("--out", required=True, type=Path)
+    source_capture.add_argument("--seconds", type=float, default=5.0)
+    source_capture.add_argument("--max-events", type=int, default=256)
+    source_capture.add_argument("--max-bytes", type=int, default=4096)
     ax = commands.add_parser(
         "ax", help="inspect macOS Accessibility and perform explicit bounded controls"
     )
@@ -738,6 +754,19 @@ def main(argv: list[str] | None = None) -> int:
                 result = loopback(args.out, args.timeout)
                 _json_out(result)
                 return 0 if result["status"] == "passed" else 1
+            if args.action == "source-capture":
+                from .midi_source_capture import capture_source
+
+                result = capture_source(
+                    args.out,
+                    args.source_uid,
+                    args.seconds,
+                    args.max_events,
+                    args.max_bytes,
+                    on_ready=_json_line,
+                )
+                _json_out(result)
+                return 0 if result["status"] == "captured" else 1
         if args.group == "max" and args.action == "inspect":
             report = inventory(args.path)
             if args.json:
