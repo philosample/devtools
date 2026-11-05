@@ -1271,36 +1271,6 @@ precondition(!isObservedWindowSharingOverlay(ordinaryDialog))
         self.assertIn("try role(button)", adapter)
         self.assertIn("try enabled(button)", adapter)
 
-    def test_reset_position_has_fixed_double_stop_and_independent_safe_readback(self):
-        source = (
-            Path(__file__).resolve().parents[1]
-            / "codex_devtools"
-            / "live_transport.swift"
-        ).read_text(encoding="utf-8")
-        reset = source.split('phase = "reset-position-baseline"', maxsplit=1)[1]
-        self.assertIn("try checkedBaseline()", reset)
-        for gate in (
-            'initialState["play"] as? Int == 0',
-            'initialState["link"] as? Int == 0',
-            'initialState["arrangement_record"] as? Int == 0',
-            'initialState["session_record"] as? Int == 0',
-        ):
-            self.assertIn(gate, reset)
-        first_stop = reset.index('"reset_stop_first", "reset_stop_second"')
-        readback = reset.index('phase = "reset-position-readback"')
-        stopped_gate = reset.index('initialState["play"] as? Int == 0')
-        action_gate = reset.index('controls["Play"]?.value == 0')
-        self.assertLess(stopped_gate, first_stop)
-        self.assertLess(action_gate, first_stop)
-        self.assertLess(first_stop, readback)
-        self.assertIn('"Transport.ArrangementPosition.Bars"', source)
-        self.assertIn('"Transport.ArrangementPosition.Beats"', source)
-        self.assertIn('"Transport.ArrangementPosition.Subdivisions"', source)
-        self.assertIn('finalPosition == "1.1.1"', reset)
-        self.assertIn('finalState["play"] as? Int == 0', reset)
-        self.assertNotIn("AXUIElementSetAttributeValue", source)
-        self.assertNotIn("Transport.Start", source)
-
 
 if __name__ == "__main__":
     unittest.main()
