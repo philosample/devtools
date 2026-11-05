@@ -1,9 +1,10 @@
 # Pull request readiness declarations
 
 `python3 -m codex_devtools pr plan-check --policy policy.json --evidence evidence.json --plan plan.md`
-validates closed, bounded JSON declarations and exact pins. It does not execute
-declared commands or dereference receipt paths. A valid declaration is not an
-overall readiness decision.
+validates closed, bounded JSON declarations and exact pins, and checks each
+explicit local receipt path against its byte hash and versioned content schema.
+It does not execute declared commands or retrieve receipts from a network. A
+valid declaration is not an overall readiness decision.
 
 `python3 -m codex_devtools pr review-ready --repo OWNER/REPO --number N --policy policy.json --evidence evidence.json --plan plan.md`
 reads the PR snapshot before and after fixed read-only GitHub observations and
@@ -25,18 +26,32 @@ threads block; inaccessible, malformed, inconsistent or truncated results
 remain unknown. `CHANGES_REQUESTED` adds its own blocking
 `review_disposition` gate even if thread reads are complete.
 
-Receipt references are still declarations only: actual receipt content and
-hashes are not retrieved or verified, so the `receipt_verification` gate stays
-unknown. `review-ready` also keeps coordinator approval unknown and
-`ready:false` regardless of GitHub's `reviewDecision`.
+Each declared receipt is read only from its explicit relative path beside the
+evidence file. The target must be a bounded regular file with no symlink in the
+receipt-relative path; reads are limited to 64 KiB. No glob discovery, network
+fetch, command execution, or arbitrary log parsing occurs. Exact file bytes
+must match `receipt_sha256`, and JSON must use the closed
+`codex-devtools-pr-check-receipt-v1` schema. It binds `check_id`, `level`,
+base/head/component pins, command, environment, result, exit code, and test
+count to the corresponding evidence row. Missing, malformed, oversized,
+symlinked, hash-mismatched, content-mismatched, or zero-test test receipts
+block. Missing required evidence rows also block.
+
+The report exposes receipt status as `verified`, `failed`, or `unknown` and
+removes the receipt unknown gate only after every declared receipt is verified.
+This proves local byte/content consistency only; it does not authenticate the
+receipt writer or establish independent test provenance. `review-ready` keeps
+coordinator approval unknown and `ready:false` regardless of GitHub's
+`reviewDecision`.
 
 Both commands require policy schema `codex-devtools-pr-policy-v1`, evidence
 schema `codex-devtools-pr-evidence-v1`, and a byte-hashed plan file. Policy
 fields are closed: repository/PR/body pins, plan identity and hash, component
 hashes, coordinator-selected test-level reasoning, required checks and holds.
 Evidence rows pin the exact base/head/component hashes and include result,
-exit code, test count, receipt hash, environment, limitations, owner and next
-action. Unknown fields, duplicate JSON keys, malformed or oversized input,
+exit code, test count, local receipt reference/hash, environment, limitations,
+owner and next action. Unknown fields, duplicate JSON keys, malformed or
+oversized input,
 missing/stale/wrong pins, zero discovered tests, failed/skipped/unknown required
 checks, and active holds block the declaration check.
 
