@@ -415,7 +415,10 @@ console.log(mailbox.descriptorPath);
                 "run",
                 side_effect=add_empty_actor_before_runner,
             ),
-            self.assertRaisesRegex(ValueError, "actor retained"),
+            self.assertRaisesRegex(
+                ValueError,
+                "reconciliation runner refused or failed; inspect evidence; actor retained",
+            ),
         ):
             self.call(descriptor)
         self.assertTrue((descriptor.parent / "actor").is_dir())
@@ -424,6 +427,10 @@ console.log(mailbox.descriptorPath);
         self.assertEqual((self.root / "owner/identity.json").read_bytes(), owner_before)
         self.assertFalse((self.output / "marker.json").exists())
         self.assertFalse(self.count.exists())
+        self.assertIn(
+            "expired READY owner has unresolved command/actor",
+            (self.output / "node.stderr").read_text(),
+        )
         outcome = json.loads((self.output / "outcome.json").read_text())
         self.assertEqual(outcome["status"], "unknown")
         self.assertTrue((self.root / "reconciliation-actor").is_dir())
