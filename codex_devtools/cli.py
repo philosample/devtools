@@ -374,19 +374,36 @@ def build_parser() -> argparse.ArgumentParser:
     midi_inputs.add_argument("--max-baseline-age-seconds", type=float, default=300.0)
     live_transport = ax_sub.add_parser(
         "live-transport",
-        help="inspect or explicitly play briefly or stop one exact Live Set",
+        help="inspect or explicitly play, stop, or reset position on one exact Live Set",
     )
     live_transport.add_argument("--pid", required=True, type=int)
     live_transport.add_argument("--expected-bundle-id", required=True)
     live_transport.add_argument("--set", dest="set_path", required=True, type=Path)
-    live_transport.add_argument("--action", dest="operation", choices=("play", "stop"))
+    live_transport.add_argument(
+        "--action", dest="operation", choices=("play", "stop", "reset-position")
+    )
     live_transport.add_argument("--play-for-seconds", type=int)
     live_transport.add_argument("--expected-output-count", type=int)
     live_transport.add_argument("--receipt", type=Path)
     live_transport.add_argument(
         "--execute",
         action="store_true",
-        help="allow the selected bounded Play or Stop action",
+        help="allow the selected bounded Play, Stop, or reset-position action",
+    )
+    live_quit = ax_sub.add_parser(
+        "live-quit",
+        help="inspect or explicitly request normal quit for one exact stopped Live Set",
+    )
+    live_quit.add_argument("--pid", required=True, type=int)
+    live_quit.add_argument("--expected-bundle-id", required=True)
+    live_quit.add_argument("--app", required=True, type=Path)
+    live_quit.add_argument("--expected-generation", required=True)
+    live_quit.add_argument("--set", dest="set_path", required=True, type=Path)
+    live_quit.add_argument("--source-sha256", required=True)
+    live_quit.add_argument("--source-device", required=True)
+    live_quit.add_argument("--source-inode", required=True)
+    live_quit.add_argument(
+        "--execute", action="store_true", help="request one normal quit after preflight"
     )
     runtime = commands.add_parser("runtime", help="discover existing local runtimes")
     runtime_sub = runtime.add_subparsers(dest="action", required=True)
@@ -712,6 +729,22 @@ def main(argv: list[str] | None = None) -> int:
                 play_for_seconds=args.play_for_seconds,
                 expected_count=args.expected_output_count,
                 receipt_path=args.receipt,
+                execute=args.execute,
+            )
+            _json_out(result)
+            return 1 if result["status"] == "stopped" else 0
+        if args.group == "ax" and args.action == "live-quit":
+            from .live_quit_control import run_live_quit
+
+            result = run_live_quit(
+                args.pid,
+                expected_bundle_id=args.expected_bundle_id,
+                app_bundle=args.app,
+                expected_generation=args.expected_generation,
+                source_set=args.set_path,
+                source_sha256=args.source_sha256,
+                source_device=args.source_device,
+                source_inode=args.source_inode,
                 execute=args.execute,
             )
             _json_out(result)

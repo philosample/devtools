@@ -83,7 +83,7 @@ func parseOptions() throws -> Options {
     while index < args.count {
         let key = args[index]
         if key == "--help" {
-            print("Usage: live_transport.swift --pid PID --bundle-id ID --set /path/Set.als [--execute --action play --play-for-seconds 1..15 --expected-count N --baseline FILE --baseline-sha256 SHA256 | --execute --action stop]")
+            print("Usage: live_transport.swift --pid PID --bundle-id ID --set /path/Set.als [--execute --action play --play-for-seconds 1..15 --expected-count N --baseline FILE --baseline-sha256 SHA256 | --execute --action stop | --execute --action reset-position --expected-count N --baseline FILE --baseline-sha256 SHA256]")
             exit(0)
         }
         if key == "--execute" {
@@ -122,7 +122,7 @@ func parseOptions() throws -> Options {
         index += 2
     }
     guard result.pid > 0, !result.bundleID.isEmpty, !result.setPath.isEmpty,
-          ["inspect", "play", "stop"].contains(result.action) else {
+          ["inspect", "play", "stop", "reset-position"].contains(result.action) else {
         throw TransportFailure(phase: "arguments", message: "PID, bundle ID, exact Set path and a supported action are required")
     }
     if result.action == "inspect" {
@@ -130,10 +130,14 @@ func parseOptions() throws -> Options {
     } else {
         guard result.execute else { throw TransportFailure(phase: "arguments", message: "mutating actions require --execute") }
     }
-    if result.action == "play" {
-        guard (1...15).contains(result.playForSeconds), result.expectedCount > 0,
+    if result.action == "play" || result.action == "reset-position" {
+        let durationValid = result.action != "play" || (1...15).contains(result.playForSeconds)
+        guard durationValid, result.expectedCount > 0, result.expectedCount <= 128,
               !result.baselinePath.isEmpty, result.baselineHash.count == 64 else {
-            throw TransportFailure(phase: "arguments", message: "play requires a 1–15 second duration, output count and checked baseline")
+            throw TransportFailure(phase: "arguments", message: "play or reset-position requires a bounded output count and checked baseline; play also requires a 1–15 second duration")
+        }
+        if result.action == "reset-position" && result.playForSeconds != 0 {
+            throw TransportFailure(phase: "arguments", message: "play duration is valid only for play")
         }
     } else {
         guard result.playForSeconds == 0 else {
@@ -562,6 +566,38 @@ func controlsState(_ controls: [String: Control]) -> [String: Any] {
     ]
 }
 
+let positionIdentifiers = [
+    "bars": "Transport.ArrangementPosition.Bars",
+    "beats": "Transport.ArrangementPosition.Beats",
+    "subdivisions": "Transport.ArrangementPosition.Subdivisions",
+]
+
+func arrangementPosition(_ window: AXUIElement) throws -> (String, [String: AXUIElement]) {
+    var found: [String: AXUIElement] = [:]
+    for element in try elementTree([window]) {
+        guard let identifier = optionalString(element, "AXIdentifier"),
+              let name = positionIdentifiers.first(where: { $0.value == identifier })?.key else { continue }
+        try require(try role(element) == "AXSlider", "arrangement position control role changed: \(name)")
+        try require(found[name] == nil, "duplicate exact arrangement position control: \(name)")
+        found[name] = element
+    }
+    try require(Set(found.keys) == Set(positionIdentifiers.keys), "one or more exact arrangement position sliders are missing")
+    var values: [String: Int] = [:]
+    for name in positionIdentifiers.keys {
+        guard let raw = try axValue(found[name]!, kAXValueAttribute as String),
+              let number = raw as? NSNumber,
+              number.doubleValue.isFinite,
+              number.doubleValue.rounded() == number.doubleValue,
+              number.doubleValue >= 1,
+              number.doubleValue <= 1_000_000 else {
+            throw TransportFailure(phase: phase, message: "arrangement position value is unreadable or out of bounds: \(name)")
+        }
+        values[name] = number.intValue
+    }
+    let formatted = "\(values["bars"]!).\(values["beats"]!).\(values["subdivisions"]!)"
+    return (formatted, found)
+}
+
 func checkedBaseline() throws -> [String: Any] {
     let url = URL(fileURLWithPath: options.baselinePath)
     var info = stat()
@@ -717,7 +753,11 @@ func run() throws -> [String: Any] {
         )
     }
 
-    actions = [
+    actions = options.action == "reset-position" ? [
+        "settings_close": ["attempted": false, "outcome": "not_attempted"],
+        "reset_stop_first": ["attempted": false, "outcome": "not_attempted"],
+        "reset_stop_second": ["attempted": false, "outcome": "not_attempted"],
+    ] : [
         "settings_close": ["attempted": false, "outcome": "not_attempted"],
         "play": ["attempted": false, "outcome": "not_attempted"],
         "stop": ["attempted": false, "outcome": "not_attempted"],
@@ -776,6 +816,96 @@ func run() throws -> [String: Any] {
         if let readback = receipt["stop_play_readback"] {
             result["stop_play_readback"] = readback
         }
+        return result
+    }
+
+    if options.action == "reset-position" {
+        phase = "reset-position-baseline"
+        let baseline = try checkedBaseline()
+        let observedAt = baseline["observed_at_utc"] as! String
+        let settingsMatches = try appWindows(app).filter {
+            try role($0) == (kAXWindowRole as String) && optionalString($0, kAXTitleAttribute as String) == "Settings"
+        }
+        try require(settingsMatches.count == 1, "reset-position requires exactly one open Settings window for output isolation inspection")
+        let settingsWindow = settingsMatches[0]
+        try validateCurrentOutputs(settingsWindow, baseline: baseline)
+        try require(initialState["play"] as? Int == 0, "reset-position requires stopped transport")
+        try require(initialState["link"] as? Int == 0, "reset-position requires Link off")
+        try require(initialState["arrangement_record"] as? Int == 0, "reset-position requires Arrangement Record off")
+        try require(initialState["session_record"] as? Int == 0, "reset-position requires Session Record off")
+        let (positionBefore, _) = try arrangementPosition(setWindow)
+        receipt["position_before"] = positionBefore
+
+        setWindow = try closeSettingsAfterIsolation(
+            app, pid: options.pid, process: process, settings: settingsWindow,
+            setWindow: setWindow, setTitle: setTitle, baseline: baseline
+        )
+        try validateBaselineAge(observedAt)
+        phase = "reset-position-preflight"
+        controls = try exactControls(try exactSetWindow(app, url: pathURL))
+        try require(controls["Play"]?.value == 0, "reset-position requires stopped transport")
+        try require(controls["Link"]?.value == 0 && controls["Arrangement Record"]?.value == 0 && controls["Session Record"]?.value == 0,
+                    "Link or recording state changed before reset-position")
+        try require(frontmost(options.pid) && focusedWindowIs(app, setWindow), "exact Set window is not foreground and focused before reset-position")
+        try require(onscreenWindow(pid: options.pid, title: setTitle), "exact Set window is no longer proven on the current desktop")
+        try require(currentProcessMatches(options.pid, bundleID: options.bundleID), "Live process identity changed before reset-position")
+        try validateWindowDocument(setWindow, url: pathURL)
+        try validateBaselineAge(observedAt)
+
+        for (index, actionName) in ["reset_stop_first", "reset_stop_second"].enumerated() {
+            phase = "reset-position-stop-\(index + 1)"
+            setWindow = try exactSetWindow(app, url: pathURL)
+            try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && frontmost(options.pid) && focusedWindowIs(app, setWindow),
+                        "exact Set focus or process identity changed before reset Stop \(index + 1)")
+            try require(onscreenWindow(pid: options.pid, title: setTitle), "exact Set is not proven on the current desktop before reset Stop \(index + 1)")
+            try validateWindowDocument(setWindow, url: pathURL)
+            controls = try exactControls(setWindow)
+            try require(controls["Play"]?.value == 0 && controls["Link"]?.value == 0 &&
+                        controls["Arrangement Record"]?.value == 0 && controls["Session Record"]?.value == 0,
+                        "transport became unsafe before reset Stop \(index + 1)")
+            try validateControlIdentity(controls["Stop"]!.element, name: "Stop")
+            try require(frontmost(options.pid) && focusedWindowIs(app, setWindow), "exact Set lost focus immediately before reset Stop \(index + 1)")
+            try press(controls["Stop"]!.element, actionName: actionName)
+            setAction(actionName, outcome: "known")
+            if index == 0 {
+                let afterFirst = try exactControls(try exactSetWindow(app, url: pathURL))
+                try require(afterFirst["Play"]?.value == 0 && afterFirst["Link"]?.value == 0 &&
+                            afterFirst["Arrangement Record"]?.value == 0 && afterFirst["Session Record"]?.value == 0,
+                            "transport state changed after first reset Stop; second Stop was not attempted")
+            }
+        }
+
+        phase = "reset-position-readback"
+        receipt["position_readback"] = "unknown"
+        let readbackWindow = try exactSetWindow(app, url: pathURL)
+        try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && frontmost(options.pid) &&
+                    focusedWindowIs(app, readbackWindow) && onscreenWindow(pid: options.pid, title: setTitle),
+                    "exact Set identity, focus or desktop visibility changed before reset readback")
+        let finalControls = try exactControls(readbackWindow)
+        let (finalPosition, _) = try arrangementPosition(readbackWindow)
+        let finalState = controlsState(finalControls)
+        receipt["position"] = finalPosition
+        receipt["position_readback"] = finalPosition == "1.1.1" ? "verified" : "mismatch"
+        receipt["transport"] = finalState
+        guard finalState["play"] as? Int == 0 && finalState["link"] as? Int == 0 &&
+              finalState["arrangement_record"] as? Int == 0 && finalState["session_record"] as? Int == 0 &&
+              finalPosition == "1.1.1" else {
+            manualInspectionRequired = true
+            receipt["status"] = "stopped"
+            receipt["phase"] = phase
+            receipt["error"] = "reset-position did not independently verify stopped transport and arrangement position 1.1.1"
+            receipt["actions"] = actions
+            receipt["manual_inspection_required"] = true
+            return receipt
+        }
+        var result = transportReport(
+            status: "complete", phase: "complete", action: options.action, readOnly: false,
+            pid: options.pid, bundleID: options.bundleID, processName: process.localizedName ?? "",
+            setURL: pathURL, title: setTitle, transport: finalState
+        )
+        result["position_before"] = positionBefore
+        result["position"] = finalPosition
+        result["position_readback"] = "verified"
         return result
     }
 
@@ -955,7 +1085,11 @@ do {
     options = try parseOptions()
     canonicalSetURL = URL(fileURLWithPath: options.setPath)
     if options.execute {
-        actions = [
+        actions = options.action == "reset-position" ? [
+            "settings_close": ["attempted": false, "outcome": "not_attempted"],
+            "reset_stop_first": ["attempted": false, "outcome": "not_attempted"],
+            "reset_stop_second": ["attempted": false, "outcome": "not_attempted"],
+        ] : [
             "settings_close": ["attempted": false, "outcome": "not_attempted"],
             "play": ["attempted": false, "outcome": "not_attempted"],
             "stop": ["attempted": false, "outcome": "not_attempted"],
@@ -967,12 +1101,21 @@ do {
 } catch {
     let attempted = actions.values.contains { ($0["outcome"] as? String) != "not_attempted" && ($0["outcome"] as? String) != "verified_noop" }
     manualInspectionRequired = manualInspectionRequired || actions.values.contains { $0["outcome"] as? String == "unknown" }
+    var result = receipt
     if options.action == "play",
        actions["play"]?["outcome"] as? String == "known",
        actions["stop"]?["outcome"] as? String != "known" {
         manualInspectionRequired = true
     }
-    var result = receipt
+    if options.action == "reset-position",
+       ["reset_stop_first", "reset_stop_second"].contains(where: {
+           actions[$0]?["attempted"] as? Bool == true
+       }) {
+        manualInspectionRequired = true
+        if result["position_readback"] == nil {
+            result["position_readback"] = "unknown"
+        }
+    }
     result["format"] = receiptFormat
     result["status"] = "stopped"
     result["phase"] = (error as? TransportFailure)?.phase ?? phase
