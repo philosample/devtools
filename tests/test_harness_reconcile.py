@@ -38,12 +38,12 @@ class ReconciliationTests(unittest.TestCase):
         self.output = self.directory / "evidence"
         self.count = self.directory / "count"
 
-    def launch(self):
+    def launch(self, *, timeout_ms=100, lease_ms=1000):
         script = """
 const {createHarnessMailbox}=require(process.argv[1]);
 const fs=require('fs');
 const mailbox=createHarnessMailbox({root:process.argv[2],pins:JSON.parse(process.argv[3]),
- timeoutMs:100,leaseMs:1000,commands:{arm:{}},
+ timeoutMs:Number(process.argv[5]),leaseMs:Number(process.argv[6]),commands:{arm:{}},
  handle(){fs.appendFileSync(process.argv[4],'callback\\n');}});
 console.log(mailbox.descriptorPath);
 """
@@ -56,6 +56,8 @@ console.log(mailbox.descriptorPath);
                 str(self.root),
                 json.dumps(PINS),
                 str(self.count),
+                str(timeout_ms),
+                str(lease_ms),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -134,6 +136,7 @@ console.log(mailbox.descriptorPath);
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual(report["status"], "retired")
+        self.assertEqual(report["retirement_basis"], "fenced")
         self.assertEqual(report["marker_callback_count"], 0)
         self.assertEqual(self.count.read_text(), "callback\n")
         self.assertFalse((self.root / "owner").exists())
@@ -189,15 +192,68 @@ console.log(mailbox.descriptorPath);
         self.assertFalse(self.output.exists())
         self.assertTrue((self.root / "owner").exists())
 
-    def test_refuses_ready_even_if_expired_and_wrong_pins_owner_or_nonce(self):
+    def test_expired_ready_without_pending_can_retire_and_allow_fresh_registration(
+        self,
+    ):
         process, ready = self.launch()
         self.stop(process)
         value = json.loads(ready.read_text())
         value["expires_at_ms"] = 0
         ready.write_text(json.dumps(value))
-        self.assertNotEqual(self.run_cli(ready).returncode, 0)
-        value["state"] = "fenced"
-        ready.write_text(json.dumps(value))
+        self.assertFalse(client.status(ready)["lease_current"])
+        result = self.run_cli(ready)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["retirement_basis"], "expired_ready_no_pending")
+        self.assertEqual(report["marker_callback_count"], 0)
+        self.assertFalse(self.count.exists())
+        self.assertFalse((self.root / "owner").exists())
+        self.assertEqual(client.status(ready)["state"], "ready")
+        runner = json.loads((self.output / "runner.json").read_text())
+        self.assertEqual(runner["retirement_basis"], "expired_ready_no_pending")
+        self.assertEqual(runner["callback_count"], 0)
+        fresh_process, fresh = self.launch()
+        self.assertNotEqual(fresh, ready)
+        self.assertEqual(client.status(fresh)["state"], "ready")
+        self.stop(fresh_process)
+
+    def test_refuses_live_ready_owner(self):
+        process, live_ready = self.launch()
+        self.assertTrue(client.status(live_ready)["lease_current"])
+        self.assertNotEqual(self.run_cli(live_ready).returncode, 0)
+        self.assertTrue((self.root / "owner").exists())
+        self.assertFalse(self.output.exists())
+        self.stop(process)
+
+    def test_refuses_expired_pending_owner(self):
+        process, pending = self.launch(timeout_ms=60000)
+        result = client.submit(pending, PINS, "arm", {}, wait=0.05)
+        self.assertEqual(result["status"], "enqueued")
+        self.assertEqual(client.status(pending)["state"], "pending")
+        self.stop(process)
+        descriptor = json.loads(pending.read_text())
+        descriptor["expires_at_ms"] = 0
+        pending.write_text(json.dumps(descriptor))
+        self.assertNotEqual(self.run_cli(pending).returncode, 0)
+        self.assertEqual(client.status(pending)["state"], "pending")
+        self.assertTrue((self.root / "owner").exists())
+        self.assertFalse(self.output.exists())
+
+    def test_refuses_expired_ready_with_unresolved_command_file(self):
+        process, orphaned = self.launch()
+        self.stop(process)
+        descriptor = json.loads(orphaned.read_text())
+        descriptor["expires_at_ms"] = 0
+        orphaned.write_text(json.dumps(descriptor))
+        command = orphaned.parent / "command.json"
+        command.write_text("{}")
+        command.chmod(0o600)
+        self.assertNotEqual(self.run_cli(orphaned).returncode, 0)
+        self.assertTrue((self.root / "owner").exists())
+        self.assertFalse(self.output.exists())
+
+    def test_wrong_pins_owner_or_nonce_still_fail_closed_for_fenced_owner(self):
+        ready = self.fenced()
         self.pins.write_text(json.dumps({**PINS, "artifact_sha256": "c" * 64}))
         self.assertNotEqual(self.run_cli(ready).returncode, 0)
         self.pins.write_text(json.dumps(PINS))

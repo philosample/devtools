@@ -87,13 +87,19 @@ Tests require an actual discovered Node executable (absence is a failing prerequ
 
 ## Explicit audited retirement after operator unload
 
-`harness reconcile` retires exactly one **fenced** local harness owner after an
-operator asserts that its target has actually been unloaded. It is an opt-in
-administrative action, not a harness capability, automatic recovery, cancellation,
-or retry. It does not unload a target, inspect process liveness, operate a host,
-launch a musical consumer, or send MIDI. Lease expiry alone never authorizes it.
-Keep the unload witness and obtain the applicable review/authorization before
-running it against a real root.
+`harness reconcile` retires exactly one local harness owner after an operator
+asserts that its target has actually been unloaded. It accepts either a fenced
+owner (including preserved pending/unknown-effect evidence) or an expired `ready`
+owner whose descriptor has `pending: null` and whose instance has no command or
+actor. The expired-ready case cannot have an active lease. Live-ready, pending,
+closed, changed-owner, pin-mismatched, or unresolved-command states remain refused.
+Lease expiry alone never authorizes retirement: both paths require the explicit
+unload assertion, reason, witness, exact owner identity/pins, and complete
+pre/post evidence checks. This is an opt-in administrative action, not a harness
+capability, automatic recovery, cancellation, or retry. It does not unload a
+target, inspect process liveness, operate a host, launch a musical consumer, or
+send MIDI. Keep the unload witness and obtain the applicable review/authorization
+before running it against a real root.
 
 ```sh
 python3 -m codex_devtools harness reconcile \
@@ -112,13 +118,14 @@ files `0600` are suitable), outside Git, with no symlink ancestors. The evidence
 parent must already exist and be private; the new output directory must not exist
 and must be outside the mailbox root. Outputs are exclusive and never overwrite
 an earlier attempt. A missing assertion, reason, witness, wrong pins/nonce/owner,
-ready/pending/closed descriptor, or unsafe path is refused. This command does not
-create an assertion from an expired lease or a PID.
+live lease, pending or closed descriptor, unresolved command/actor, or unsafe
+path is refused. This command does not create an assertion from an expired lease
+or a PID.
 
 The CLI exclusively creates `ROOT/reconciliation-actor` and preserves the old
 root-owner bytes plus every selected instance descriptor, command, actor identity
-and retained ACK. `intent.json` records exact identity/pins, source hashes, Node
-runtime, operator UID, reason and witness. `before/` contains exact old bytes;
+and retained ACK. `intent.json` records exact identity/pins, retirement basis,
+source hashes, Node runtime, operator UID, reason and witness. `before/` contains exact old bytes;
 `expected-pins.json` preserves the supplied pin bytes. It then rechecks identity,
 file hashes and inventory in Python and again in actual Node immediately before
 mutation. The reviewed `harness_mailbox.cjs` remains byte-for-byte unchanged,
@@ -130,8 +137,8 @@ to make one inert marker registration with the **old pins** and a single empty
 `close()` execute on the same synchronous JavaScript stack before any timer poll;
 no command is submitted and callback count remains zero. The closed marker
 identity/descriptor and `runner.json` remain as evidence. `outcome.json` records
-retirement and post-operation hashes; the old fenced instance, pending command,
-actor and unknown-effect ACK are left unchanged. Retirement declares **no** old
+retirement basis and post-operation hashes; the old instance, pending command,
+actor and retained ACKs are left unchanged. Retirement declares **no** old
 command completed or canceled. A later legitimate registration is a separate,
 explicit action and must satisfy its own consumer/host gates.
 
