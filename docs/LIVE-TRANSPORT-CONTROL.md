@@ -81,3 +81,18 @@ external routing, hardware response, M4L recall, or full clean-recall
 acceptance. CGWindowList current-desktop visibility checks do not switch or
 create Spaces; a window that is not proven on the current desktop stops the
 action.
+
+## Exact macOS window-sharing overlay exception
+
+The app-window guard recognizes one captured macOS window-sharing overlay
+shape: an `AXWindow` with `AXDialog` subrole, title `Window`, identifier
+`_NS:8`, and exactly one direct child, an enabled `AXButton` titled
+`WindowSharingSessionButton` with no exposed AX identifier. This was derived
+from a read-only Live window snapshot on 2026-11-05; the AX title and internal
+identifier are version-specific observations, not stable public Apple API
+contracts. If any field is absent or changes, the guard rejects it as an
+unexpected dialog. Sheets, popovers, system dialogs, floating windows, ordinary
+dialogs, and additional child controls remain rejected. The exception does not
+remove the window from the bounded app-window inventory or change exact Set
+URL, focus, visibility, or transport-control checks. It does not diagnose a
+Space-placement cause.
