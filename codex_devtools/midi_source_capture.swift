@@ -3,6 +3,8 @@ import CoreMIDI
 import Dispatch
 import Foundation
 
+let MAX_PACKET_DATA_BYTES = 256
+
 struct CapturedPacket: Codable {
     let sequence: Int
     let sourceUniqueID: Int32
@@ -77,6 +79,8 @@ struct SourceIdentity: Codable {
 
 struct CaptureResult: Codable {
     var status = "failed"
+    var runID = ""
+    var processID: Int32 = 0
     var requestedSourceUID: Int32 = 0
     var source: SourceIdentity? = nil
     var requestedSeconds: Double = 0
@@ -119,8 +123,26 @@ func resolveSource(_ uid: Int32) -> (MIDIEndpointRef, SourceIdentity)? {
     return matches.count == 1 ? matches[0] : nil
 }
 
-func run(sourceUID: Int32, seconds: Double, maxEvents: Int, maxBytes: Int) -> CaptureResult {
+func emitReady(runID: String, sourceUID: Int32, processID: Int32) throws {
+    let marker: [String: Any] = [
+        "event": "READY",
+        "schema": "codex-devtools.raw-midi-source-ready/v1",
+        "run_id": runID,
+        "source_uid": sourceUID,
+        "process_id": processID,
+        "connected": true,
+        "observed_monotonic_nanoseconds": DispatchTime.now().uptimeNanoseconds
+    ]
+    var data = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
+    data.append(0x0A)
+    try FileHandle.standardOutput.write(contentsOf: data)
+}
+
+func run(sourceUID: Int32, seconds: Double, maxEvents: Int, maxBytes: Int, runID: String) -> CaptureResult {
     var result = CaptureResult()
+    let processID = ProcessInfo.processInfo.processIdentifier
+    result.runID = runID
+    result.processID = processID
     result.requestedSourceUID = sourceUID
     result.requestedSeconds = seconds
     result.maxEvents = maxEvents
@@ -153,8 +175,17 @@ func run(sourceUID: Int32, seconds: Double, maxEvents: Int, maxBytes: Int) -> Ca
             for _ in 0..<list.numPackets {
                 let length = Int(packet.pointee.length)
                 let timestamp = packet.pointee.timeStamp
-                let bytes = withUnsafeBytes(of: packet.pointee.data) { raw in
-                    Array(raw.prefix(length))
+                if length < 1 || length > MAX_PACKET_DATA_BYTES {
+                    state.fail("packet_length_outside_fixed_payload_storage")
+                    break
+                }
+                let bytes = withUnsafeBytes(of: packet.pointee.data) { raw -> [UInt8]? in
+                    guard length <= raw.count else { return nil }
+                    return Array(raw.prefix(length))
+                }
+                guard let bytes else {
+                    state.fail("packet_length_exceeds_addressable_payload_storage")
+                    break
                 }
                 if !state.append(bytes, timestamp: timestamp) { break }
                 packet = UnsafeMutablePointer(MIDIPacketNext(UnsafePointer(packet)))
@@ -170,6 +201,19 @@ func run(sourceUID: Int32, seconds: Double, maxEvents: Int, maxBytes: Int) -> Ca
         let connectStatus = MIDIPortConnectSource(input, source, nil)
         if connectStatus == noErr { connected = true }
         else { result.error = "MIDIPortConnectSource OSStatus \(connectStatus)" }
+    }
+
+    if result.error == nil {
+        if let (currentSource, currentIdentity) = resolveSource(sourceUID),
+           currentSource == source, !currentIdentity.offline {
+            do {
+                try emitReady(runID: runID, sourceUID: sourceUID, processID: processID)
+            } catch {
+                result.error = "READY marker write failed: \(error)"
+            }
+        } else {
+            result.error = "pinned source identity changed before READY"
+        }
     }
 
     if result.error == nil {
@@ -212,14 +256,15 @@ func run(sourceUID: Int32, seconds: Double, maxEvents: Int, maxBytes: Int) -> Ca
 
 let arguments = CommandLine.arguments
 var result = CaptureResult()
-if arguments.count == 5,
+if arguments.count == 6,
    let sourceUID = Int32(arguments[1]),
    let seconds = Double(arguments[2]), seconds.isFinite, seconds >= 0.05, seconds <= 30,
    let maxEvents = Int(arguments[3]), maxEvents >= 1, maxEvents <= 65536,
-   let maxBytes = Int(arguments[4]), maxBytes >= 1, maxBytes <= 1048576 {
-    result = run(sourceUID: sourceUID, seconds: seconds, maxEvents: maxEvents, maxBytes: maxBytes)
+   let maxBytes = Int(arguments[4]), maxBytes >= 1, maxBytes <= 1048576,
+   let runID = UUID(uuidString: arguments[5]), runID.uuidString.lowercased() == arguments[5] {
+    result = run(sourceUID: sourceUID, seconds: seconds, maxEvents: maxEvents, maxBytes: maxBytes, runID: arguments[5])
 } else {
-    result.error = "expected source UID, seconds (0.05–30), max-events (1–65536), max-bytes (1–1048576)"
+    result.error = "expected source UID, seconds (0.05–30), max-events (1–65536), max-bytes (1–1048576), and canonical run UUID"
 }
 let encoder = JSONEncoder()
 encoder.outputFormatting = [.sortedKeys]

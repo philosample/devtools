@@ -6,16 +6,78 @@ import hashlib
 import json
 import os
 import platform
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
+from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+
+READY_SCHEMA = "codex-devtools.raw-midi-source-ready/v1"
+READY_TIMEOUT_SECONDS = 5.0
+MAX_PACKET_DATA_BYTES = 256
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _ready_from_line(
+    line: str, *, run_id: str, source_uid: int, process_id: int
+) -> tuple[dict | None, str | None]:
+    if not line.endswith("\n") or "\r" in line:
+        return None, "READY marker is partial or has invalid line termination"
+    try:
+        marker = json.loads(line)
+    except json.JSONDecodeError:
+        return None, "READY marker is not valid JSON"
+    fields = {
+        "event",
+        "schema",
+        "run_id",
+        "source_uid",
+        "process_id",
+        "connected",
+        "observed_monotonic_nanoseconds",
+    }
+    if not isinstance(marker, dict) or set(marker) != fields:
+        return None, "READY marker has an unknown or incomplete schema"
+    if marker.get("event") != "READY" or marker.get("schema") != READY_SCHEMA:
+        return None, "READY marker type or schema is unknown"
+    if (
+        marker.get("run_id") != run_id
+        or not isinstance(marker.get("source_uid"), int)
+        or isinstance(marker.get("source_uid"), bool)
+        or marker.get("source_uid") != source_uid
+        or not isinstance(marker.get("process_id"), int)
+        or isinstance(marker.get("process_id"), bool)
+        or marker.get("process_id") != process_id
+    ):
+        return None, "READY marker run, source or process identity mismatch"
+    if marker.get("connected") is not True:
+        return None, "READY marker does not attest a connected source"
+    timestamp = marker.get("observed_monotonic_nanoseconds")
+    if not isinstance(timestamp, int) or isinstance(timestamp, bool) or timestamp <= 0:
+        return None, "READY marker timestamp is invalid"
+    return marker, None
+
+
+def _read_lines(stream, output: queue.Queue) -> None:
+    try:
+        for line in stream:
+            output.put(line)
+    finally:
+        output.put(None)
+
+
+def _read_stderr(stream, output: deque) -> None:
+    for line in stream:
+        output.append(line.rstrip("\n"))
 
 
 def _assess(
@@ -24,9 +86,24 @@ def _assess(
     source_uid: int,
     max_events: int,
     max_bytes: int,
+    run_id: str,
+    process_id: int,
 ) -> tuple[bool, str | None]:
     if native.get("status") != "captured":
         return False, native.get("error") or "native source capture did not complete"
+    if (
+        native.get("runID") != run_id
+        or not isinstance(native.get("processID"), int)
+        or isinstance(native.get("processID"), bool)
+        or native.get("processID") != process_id
+    ):
+        return False, "native receipt run or process identity differs from READY"
+    if (
+        not isinstance(native.get("requestedSourceUID"), int)
+        or isinstance(native.get("requestedSourceUID"), bool)
+        or native.get("requestedSourceUID") != source_uid
+    ):
+        return False, "native receipt source UID differs from the pinned source"
     source = native.get("source")
     if (
         not isinstance(source, dict)
@@ -62,11 +139,12 @@ def _assess(
             or isinstance(packet.get("sourceUniqueID"), bool)
             or packet.get("sourceUniqueID") != source_uid
         ):
-            return False, "packet source identity differs from the pinned source UID"
+            return False, "packet sequence or source identity is invalid"
         raw = packet.get("bytes")
         if (
             not isinstance(raw, list)
             or not raw
+            or len(raw) > MAX_PACKET_DATA_BYTES
             or any(
                 not isinstance(value, int)
                 or isinstance(value, bool)
@@ -74,7 +152,7 @@ def _assess(
                 for value in raw
             )
         ):
-            return False, "raw packet bytes are invalid"
+            return False, "raw packet bytes are invalid or exceed fixed packet storage"
         if any(
             not isinstance(packet.get(key), int)
             or isinstance(packet.get(key), bool)
@@ -83,7 +161,7 @@ def _assess(
         ):
             return False, "packet timestamps are invalid"
         size += len(raw)
-    if native["byteCount"] != size:
+    if byte_count != size:
         return False, "reported byte count differs from exact packet payloads"
     # Reaching a cap is inconclusive: more packets may have been omitted.
     if len(packets) >= max_events or size >= max_bytes:
@@ -97,12 +175,171 @@ def _assess(
     return True, None
 
 
+def _collect_native(
+    command: list[str],
+    *,
+    run_id: str,
+    source_uid: int,
+    seconds: float,
+    on_ready: Callable[[dict], None] | None,
+) -> tuple[dict | None, dict | None, str | None, int | None, list[str]]:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    if process.stdout is None or process.stderr is None:
+        process.kill()
+        process.wait()
+        return (
+            None,
+            None,
+            "native listener pipes were unavailable",
+            process.returncode,
+            [],
+        )
+    lines: queue.Queue = queue.Queue()
+    stderr_lines: deque = deque(maxlen=8)
+    stdout_reader = threading.Thread(
+        target=_read_lines, args=(process.stdout, lines), daemon=True
+    )
+    stderr_reader = threading.Thread(
+        target=_read_stderr, args=(process.stderr, stderr_lines), daemon=True
+    )
+    stdout_reader.start()
+    stderr_reader.start()
+
+    started = time.monotonic()
+    deadline = started + READY_TIMEOUT_SECONDS + seconds + 8.0
+    marker = None
+    try:
+        first_line = lines.get(timeout=READY_TIMEOUT_SECONDS)
+    except queue.Empty:
+        first_line = None
+        ready_error = (
+            "native listener did not emit READY before the bounded readiness deadline"
+        )
+    else:
+        if first_line is None:
+            ready_error = "native listener ended before emitting READY"
+        else:
+            marker, ready_error = _ready_from_line(
+                first_line,
+                run_id=run_id,
+                source_uid=source_uid,
+                process_id=process.pid,
+            )
+            if marker is not None and process.poll() is not None:
+                marker = None
+                ready_error = (
+                    "native listener exited before READY could be validated live"
+                )
+            if marker is not None:
+                try:
+                    if on_ready is not None:
+                        on_ready(marker)
+                except (
+                    OSError
+                ) as exc:  # CLI stdout publication can fail if its reader closes.
+                    marker = None
+                    ready_error = f"READY marker publication failed: {exc}"
+    ready_marker = marker if first_line not in (None, "") else None
+
+    output_lines = [first_line] if isinstance(first_line, str) else []
+    timed_out = False
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            break
+        try:
+            line = lines.get(timeout=remaining)
+        except queue.Empty:
+            timed_out = True
+            break
+        if line is None:
+            break
+        output_lines.append(line)
+
+    if timed_out and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+    else:
+        try:
+            process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+    stdout_reader.join(timeout=1)
+    stderr_reader.join(timeout=1)
+    native = None
+    extra_output_error = None
+    if len(output_lines) == 2 and output_lines[1].endswith("\n"):
+        try:
+            native = json.loads(output_lines[1])
+        except json.JSONDecodeError:
+            extra_output_error = "native listener final receipt is not valid JSON"
+    elif ready_marker is not None:
+        extra_output_error = "native listener omitted its final receipt or emitted unknown stdout markers"
+    elif len(output_lines) > 1:
+        try:
+            native = (
+                json.loads(output_lines[-1])
+                if output_lines[-1].endswith("\n")
+                else None
+            )
+        except json.JSONDecodeError:
+            native = None
+        if not isinstance(native, dict):
+            extra_output_error = (
+                "native listener emitted partial or unknown stdout markers"
+            )
+    elif output_lines:
+        try:
+            native = (
+                json.loads(output_lines[0]) if output_lines[0].endswith("\n") else None
+            )
+        except json.JSONDecodeError:
+            native = None
+    if isinstance(native, dict):
+        if native.get("runID") != run_id or native.get("processID") != process.pid:
+            extra_output_error = "native receipt run/process correlation mismatch"
+    else:
+        extra_output_error = (
+            extra_output_error or "native listener returned no correlated final receipt"
+        )
+    if timed_out:
+        ready_error = (
+            ready_error
+            or f"native listener exceeded its bounded runtime ({deadline - started:g} seconds)"
+        )
+    if process.returncode not in (0, None):
+        ready_error = (
+            ready_error or f"native listener exited with status {process.returncode}"
+        )
+    protocol_error = ready_error or extra_output_error
+    return native, ready_marker, protocol_error, process.returncode, list(stderr_lines)
+
+
 def capture_source(
     out: Path,
     source_uid: int,
     seconds: float = 5.0,
     max_events: int = 256,
     max_bytes: int = 4096,
+    on_ready: Callable[[dict], None] | None = None,
 ) -> dict:
     """Compile and run the passive source listener, saving an exclusive receipt."""
     out = out.expanduser().absolute()
@@ -127,9 +364,10 @@ def capture_source(
 
     source = Path(__file__).with_name("midi_source_capture.swift")
     source_bytes = source.read_bytes()
+    run_id = str(uuid.uuid4())
     receipt = {
         "format": "codex-devtools-raw-midi-source-capture-v1",
-        "run_id": str(uuid.uuid4()),
+        "run_id": run_id,
         "started_utc": _utc_now(),
         "source_pin": {"uniqueID": source_uid},
         "source_code": {
@@ -143,6 +381,7 @@ def capture_source(
             "max_bytes": max_bytes,
         },
         "capture_scope": "passive CoreMIDI input connection to exactly one online source UID; no output port or send API",
+        "ready_timeout_seconds": READY_TIMEOUT_SECONDS,
         "status": "failed",
     }
     try:
@@ -202,55 +441,50 @@ def capture_source(
             if compile_result.returncode != 0:
                 receipt["error"] = "Swift CoreMIDI source listener did not compile"
             else:
-                try:
-                    run = subprocess.run(
-                        [
-                            str(executable),
-                            str(source_uid),
-                            str(seconds),
-                            str(max_events),
-                            str(max_bytes),
-                        ],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=seconds + 8,
-                    )
-                    receipt["native_returncode"] = run.returncode
-                    if run.stderr:
-                        receipt["native_stderr"] = run.stderr[-4000:]
-                    try:
-                        native = (
-                            json.loads(run.stdout.strip().splitlines()[-1])
-                            if run.stdout.strip()
-                            else None
-                        )
-                    except json.JSONDecodeError:
-                        native = None
-                    if not isinstance(native, dict):
-                        receipt["error"] = (
-                            "native source listener returned no JSON evidence"
-                        )
-                    else:
-                        receipt["native"] = native
-                        if run.returncode != 0:
-                            receipt["error"] = (
-                                f"native source listener exited with status {run.returncode}"
-                            )
-                        else:
-                            captured, error = _assess(
-                                native,
-                                source_uid=source_uid,
-                                max_events=max_events,
-                                max_bytes=max_bytes,
-                            )
-                            receipt["status"] = "captured" if captured else "failed"
-                            if error:
-                                receipt["error"] = error
-                except subprocess.TimeoutExpired:
+                native, ready, protocol_error, returncode, stderr = _collect_native(
+                    [
+                        str(executable),
+                        str(source_uid),
+                        str(seconds),
+                        str(max_events),
+                        str(max_bytes),
+                        run_id,
+                    ],
+                    run_id=run_id,
+                    source_uid=source_uid,
+                    seconds=seconds,
+                    on_ready=on_ready,
+                )
+                receipt["native_returncode"] = returncode
+                receipt["ready_validated"] = ready is not None
+                if ready is not None:
+                    receipt["ready"] = ready
+                if stderr:
+                    receipt["native_stderr"] = "\n".join(stderr)[-4000:]
+                if native is not None:
+                    receipt["native"] = native
+                if protocol_error:
+                    receipt["error"] = protocol_error
+                elif returncode != 0:
                     receipt["error"] = (
-                        f"native source listener exceeded bounded runtime ({seconds + 8:g} seconds)"
+                        f"native listener exited with status {returncode}"
                     )
+                elif native is None:
+                    receipt["error"] = (
+                        "native source listener returned no JSON evidence"
+                    )
+                else:
+                    captured, error = _assess(
+                        native,
+                        source_uid=source_uid,
+                        max_events=max_events,
+                        max_bytes=max_bytes,
+                        run_id=run_id,
+                        process_id=ready["process_id"] if ready else -1,
+                    )
+                    receipt["status"] = "captured" if captured else "failed"
+                    if error:
+                        receipt["error"] = error
     except (OSError, subprocess.SubprocessError) as exc:
         receipt["error"] = f"CoreMIDI toolchain unavailable: {exc}"
     receipt["finished_utc"] = _utc_now()

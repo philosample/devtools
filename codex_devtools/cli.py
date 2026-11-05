@@ -26,6 +26,13 @@ def _json_out(value) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def _json_line(value) -> None:
+    print(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        flush=True,
+    )
+
+
 def _manifest(root: Path, destination: Path) -> dict:
     if not root.is_dir():
         raise ValueError(f"manifest root is not a directory: {root}")
@@ -643,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.seconds,
                     args.max_events,
                     args.max_bytes,
+                    on_ready=_json_line,
                 )
                 _json_out(result)
                 return 0 if result["status"] == "captured" else 1
