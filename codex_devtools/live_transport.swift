@@ -35,6 +35,36 @@ struct Control {
     let value: Int?
 }
 
+struct WindowSharingOverlayChildSignature: Equatable {
+    let role: String
+    let title: String?
+    let identifier: String?
+    let enabled: Bool
+}
+
+struct WindowSharingOverlaySignature: Equatable {
+    let role: String
+    let subrole: String?
+    let title: String?
+    let identifier: String?
+    let children: [WindowSharingOverlayChildSignature]
+}
+
+func isObservedWindowSharingOverlay(_ signature: WindowSharingOverlaySignature) -> Bool {
+    signature == WindowSharingOverlaySignature(
+        role: kAXWindowRole as String,
+        subrole: "AXDialog",
+        title: "Window",
+        identifier: "_NS:8",
+        children: [WindowSharingOverlayChildSignature(
+            role: kAXButtonRole as String,
+            title: "WindowSharingSessionButton",
+            identifier: nil,
+            enabled: true
+        )]
+    )
+}
+
 var options = Options()
 var phase = "arguments"
 var actions: [String: [String: Any]] = [:]
@@ -279,12 +309,37 @@ func appWindows(_ app: AXUIElement) throws -> [AXUIElement] {
     for window in windows {
         let kind = try role(window)
         let subrole = optionalString(window, kAXSubroleAttribute as String) ?? ""
-        if kind == "AXDialog" || kind == "AXSheet" || kind == "AXPopover" ||
-            ["AXDialog", "AXSystemDialog", "AXFloatingWindow"].contains(subrole) {
-            throw TransportFailure(phase: phase, message: "unexpected dialog, sheet or popover is open")
+        let isBlockingWindow = kind == "AXDialog" || kind == "AXSheet" || kind == "AXPopover" ||
+            ["AXDialog", "AXSystemDialog", "AXFloatingWindow"].contains(subrole)
+        if isBlockingWindow {
+            let isAllowedOverlay = try isObservedWindowSharingOverlay(window, windowRole: kind, subrole: subrole)
+            if !isAllowedOverlay {
+                throw TransportFailure(phase: phase, message: "unexpected dialog, sheet or popover is open")
+            }
         }
     }
     return windows
+}
+
+func isObservedWindowSharingOverlay(_ window: AXUIElement, windowRole: String, subrole: String) throws -> Bool {
+    guard windowRole == (kAXWindowRole as String), subrole == "AXDialog",
+          optionalString(window, kAXTitleAttribute as String) == "Window",
+          optionalString(window, "AXIdentifier") == "_NS:8" else { return false }
+    let childElements = try children(window)
+    guard childElements.count == 1 else { return false }
+    let button = childElements[0]
+    return isObservedWindowSharingOverlay(WindowSharingOverlaySignature(
+        role: windowRole,
+        subrole: subrole,
+        title: optionalString(window, kAXTitleAttribute as String),
+        identifier: optionalString(window, "AXIdentifier"),
+        children: [WindowSharingOverlayChildSignature(
+            role: try role(button),
+            title: optionalString(button, kAXTitleAttribute as String),
+            identifier: optionalString(button, "AXIdentifier"),
+            enabled: try enabled(button)
+        )]
+    ))
 }
 
 func lexicalPath(_ path: String) throws -> String {

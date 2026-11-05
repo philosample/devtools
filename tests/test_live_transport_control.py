@@ -1058,6 +1058,115 @@ precondition(!late && lateClock.reads == 1)
         self.assertLess(deadline_wait, timed_stop)
         self.assertLess(timed_stop, stop_ack)
 
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_only_exact_observed_window_sharing_overlay_signature_is_allowed(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        start = source.index("struct WindowSharingOverlayChildSignature")
+        end = source.index("\nvar options =", start)
+        production_signature = source[start:end]
+        harness = f"""
+let kAXWindowRole = "AXWindow"
+let kAXButtonRole = "AXButton"
+{production_signature}
+
+let overlay = WindowSharingOverlaySignature(
+    role: "AXWindow", subrole: "AXDialog", title: "Window", identifier: "_NS:8",
+    children: [WindowSharingOverlayChildSignature(
+        role: "AXButton", title: "WindowSharingSessionButton", identifier: nil, enabled: true
+    )]
+)
+precondition(isObservedWindowSharingOverlay(overlay))
+func changed(_ value: WindowSharingOverlaySignature, role: String? = nil,
+             subrole: String? = nil, title: String? = nil, identifier: String? = nil,
+             children: [WindowSharingOverlayChildSignature]? = nil) -> WindowSharingOverlaySignature {{
+    WindowSharingOverlaySignature(
+        role: role ?? value.role, subrole: subrole ?? value.subrole,
+        title: title ?? value.title, identifier: identifier ?? value.identifier,
+        children: children ?? value.children
+    )
+}}
+precondition(!isObservedWindowSharingOverlay(changed(overlay, role: "AXDialog")))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, subrole: "AXSheet")))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, subrole: "AXPopover")))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, subrole: "AXFloatingWindow")))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, title: "Save Changes")))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, identifier: "_NS:9")))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, children: [])))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, children: overlay.children + overlay.children)))
+let child = overlay.children[0]
+precondition(!isObservedWindowSharingOverlay(WindowSharingOverlaySignature(
+    role: overlay.role, subrole: overlay.subrole, title: nil, identifier: overlay.identifier,
+    children: overlay.children
+)))
+precondition(!isObservedWindowSharingOverlay(WindowSharingOverlaySignature(
+    role: overlay.role, subrole: overlay.subrole, title: overlay.title, identifier: nil,
+    children: overlay.children
+)))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, children: [
+    WindowSharingOverlayChildSignature(role: child.role, title: nil, identifier: nil, enabled: true)
+])))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, children: overlay.children + [
+    WindowSharingOverlayChildSignature(role: "AXStaticText", title: "Confirm", identifier: nil, enabled: true)
+])))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, children: [
+    WindowSharingOverlayChildSignature(
+        role: "AXButton", title: "Save", identifier: nil, enabled: true
+    )
+])))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, children: [
+    WindowSharingOverlayChildSignature(
+        role: "AXCheckBox", title: "WindowSharingSessionButton", identifier: nil, enabled: true
+    )
+])))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, children: [
+    WindowSharingOverlayChildSignature(
+        role: "AXButton", title: "WindowSharingSessionButton", identifier: "unexpected", enabled: true
+    )
+])))
+precondition(!isObservedWindowSharingOverlay(changed(overlay, children: [
+    WindowSharingOverlayChildSignature(
+        role: "AXButton", title: "WindowSharingSessionButton", identifier: nil, enabled: false
+    )
+])))
+let ordinaryDialog = WindowSharingOverlaySignature(
+    role: "AXWindow", subrole: "AXDialog", title: "Save Changes", identifier: "_NS:8",
+    children: [WindowSharingOverlayChildSignature(role: "AXButton", title: "Save", identifier: nil, enabled: true)]
+)
+precondition(!isObservedWindowSharingOverlay(ordinaryDialog))
+"""
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            main_swift = root / "main.swift"
+            binary = root / "overlay-signature-model"
+            main_swift.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                ["/usr/bin/xcrun", "swiftc", str(main_swift), "-o", str(binary)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        app_windows = source.split("func appWindows(", maxsplit=1)[1].split(
+            "func isObservedWindowSharingOverlay(_ window:", maxsplit=1
+        )[0]
+        self.assertIn("isBlockingWindow", app_windows)
+        self.assertIn("!isAllowedOverlay", app_windows)
+        adapter = source.split(
+            "func isObservedWindowSharingOverlay(_ window:", maxsplit=1
+        )[1].split("\nfunc lexicalPath(", maxsplit=1)[0]
+        self.assertIn("childElements.count == 1", adapter)
+        self.assertIn("try role(button)", adapter)
+        self.assertIn("try enabled(button)", adapter)
+
 
 if __name__ == "__main__":
     unittest.main()
