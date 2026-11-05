@@ -104,7 +104,7 @@ For JavaScript tests, `python3 -m codex_devtools runtime node --json` discovers 
 
 `python3 -m codex_devtools.quality bootstrap` installs the pinned Ruff `0.17.3` and Lefthook `2.2.2` tools with a local rollback receipt. See [Python quality tooling](docs/QUALITY.md) for hook activation, staged-file behavior, manual and CI commands, and rollback.
 
-Read-only PR policy and evidence declarations are available through `python3 -m codex_devtools pr plan-check` and `pr review-ready`; the latter reads required CI checks and review-thread state while keeping ambiguous observations, receipt verification, and coordinator approval fail-closed. See [PR readiness declarations](docs/PR-READINESS.md) for schemas and limits.
+Read-only PR policy and evidence declarations are available through `python3 -m codex_devtools pr plan-check` and `pr review-ready`; they verify bounded local receipt bytes/content and read required CI checks and review-thread state. Ambiguous observations, invalid receipts and coordinator approval remain fail-closed. Receipt consistency does not authenticate the writer or establish independent test provenance. See [PR readiness declarations](docs/PR-READINESS.md) for schemas and limits.
 
 Opt-in test harnesses can publish a local command mailbox for repeatable scripted control through their own existing driver inlet. See [HARNESS-CONTROL.md](docs/HARNESS-CONTROL.md) for exact-instance/pin selection, explicit completion, timeout fencing and real cross-process tests. This transport provides no general Max, Live or MIDI control.
 

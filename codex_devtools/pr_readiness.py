@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 POLICY_SCHEMA = "codex-devtools-pr-policy-v1"
 EVIDENCE_SCHEMA = "codex-devtools-pr-evidence-v1"
+RECEIPT_SCHEMA = "codex-devtools-pr-check-receipt-v1"
 REPORT_SCHEMA = "codex-devtools-pr-readiness-v1"
 MAX_INPUT_BYTES = 1_048_576
+MAX_RECEIPT_BYTES = 65_536
 MAX_ITEMS = 128
 SHA1 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -80,6 +83,19 @@ ROW_KEYS = {
     "owner",
     "next_action",
 }
+RECEIPT_KEYS = {
+    "schema",
+    "check_id",
+    "level",
+    "base_sha",
+    "head_sha",
+    "component_pins",
+    "command",
+    "environment",
+    "result",
+    "exit_code",
+    "test_count",
+}
 
 
 def _duplicate_free(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -116,6 +132,202 @@ def _read_json(path: Path) -> tuple[Any, bytes]:
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid UTF-8 JSON: {path}") from exc
     return value, raw
+
+
+def _receipt_bytes(root: Path, reference: str) -> bytes:
+    if (
+        not isinstance(reference, str)
+        or not reference
+        or len(reference) > 4096
+        or "\\" in reference
+        or "\x00" in reference
+    ):
+        raise ValueError("receipt reference is malformed")
+    parts = reference.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError("receipt reference must be an explicit relative path")
+    relative = PurePosixPath(reference)
+    if relative.is_absolute():
+        raise ValueError("receipt reference must be relative")
+
+    path = root
+    for part in parts[:-1]:
+        path = path / part
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("receipt path contains a symlink or non-directory")
+    path = path / parts[-1]
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("receipt must be a regular, non-symlink file")
+    if metadata.st_size > MAX_RECEIPT_BYTES:
+        raise ValueError(f"receipt exceeds {MAX_RECEIPT_BYTES} bytes")
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != metadata.st_dev
+            or opened.st_ino != metadata.st_ino
+        ):
+            raise ValueError("receipt changed while it was opened")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            raw = stream.read(MAX_RECEIPT_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_RECEIPT_BYTES:
+        raise ValueError(f"receipt exceeds {MAX_RECEIPT_BYTES} bytes")
+    return raw
+
+
+def _validate_receipt(value: Any, row: dict[str, Any], check: dict[str, Any]) -> None:
+    receipt = _closed(value, RECEIPT_KEYS, "receipt")
+    if receipt["schema"] != RECEIPT_SCHEMA:
+        raise ValueError("unsupported receipt schema")
+    _text(receipt["check_id"], "receipt.check_id")
+    if receipt["level"] not in LEVELS:
+        raise ValueError("receipt.level is unsupported")
+    _digest(receipt["base_sha"], "receipt.base_sha", short=True)
+    _digest(receipt["head_sha"], "receipt.head_sha", short=True)
+    _string_map(receipt["component_pins"], "receipt.component_pins", digest_values=True)
+    command = receipt["command"]
+    if not isinstance(command, list) or not command or len(command) > 32:
+        raise ValueError("receipt.command must be a bounded argument list")
+    for item in command:
+        _text(item, "receipt.command item")
+    environment = receipt["environment"]
+    if not isinstance(environment, dict) or len(environment) > MAX_ITEMS:
+        raise ValueError("receipt.environment must be a bounded object")
+    for key, item in environment.items():
+        _text(key, "receipt.environment key")
+        _text(item, "receipt.environment value")
+    if receipt["result"] not in RESULTS:
+        raise ValueError("receipt.result is unsupported")
+    if type(receipt["exit_code"]) is not int or not -255 <= receipt["exit_code"] <= 255:
+        raise ValueError("receipt.exit_code must be a bounded integer")
+    if (
+        type(receipt["test_count"]) is not int
+        or not 0 <= receipt["test_count"] <= 1_000_000
+    ):
+        raise ValueError("receipt.test_count must be a bounded integer")
+
+    fields = (
+        "check_id",
+        "level",
+        "base_sha",
+        "head_sha",
+        "component_pins",
+        "command",
+        "environment",
+        "result",
+        "exit_code",
+        "test_count",
+    )
+    expected = {field: row[field] for field in fields}
+    actual = {field: receipt[field] for field in fields}
+    if actual != expected:
+        raise ValueError("receipt content differs from its evidence row")
+    if check["kind"] == "test" and receipt["test_count"] == 0:
+        raise ValueError("test receipt has zero tests")
+
+
+def _verify_receipts(
+    evidence_path: Path, policy: dict[str, Any], evidence: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    checks = {check["id"]: check for check in policy["checks"]}
+    row_by_check = {row["check_id"]: row for row in evidence["rows"]}
+    results: list[dict[str, str]] = []
+    blockers: list[dict[str, str]] = []
+    unknown = False
+    failed = False
+
+    for check_id, check in checks.items():
+        row = row_by_check.get(check_id)
+        if row is None:
+            if check["required_for_merge"]:
+                unknown = True
+            continue
+        try:
+            raw = _receipt_bytes(evidence_path.parent, row["receipt_ref"])
+        except FileNotFoundError:
+            status, reason = "unknown", "receipt file is missing"
+        except PermissionError:
+            status, reason = "unknown", "receipt file is not readable"
+        except OSError:
+            status, reason = "unknown", "receipt file could not be read"
+        except ValueError as exc:
+            status, reason = "failed", str(exc)
+        else:
+            if hashlib.sha256(raw).hexdigest() != row["receipt_sha256"]:
+                status, reason = (
+                    "failed",
+                    "receipt byte hash differs from receipt_sha256",
+                )
+            else:
+                try:
+                    value = json.loads(
+                        raw.decode("utf-8"),
+                        object_pairs_hook=_duplicate_free,
+                        parse_constant=_reject_constant,
+                    )
+                    _validate_receipt(value, row, check)
+                except (
+                    UnicodeError,
+                    json.JSONDecodeError,
+                    RecursionError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    status, reason = "failed", f"receipt content is invalid: {exc}"
+                else:
+                    status, reason = "verified", ""
+        results.append(
+            {
+                "check_id": check_id,
+                "receipt_ref": row["receipt_ref"],
+                "status": status,
+                "reason": reason,
+            }
+        )
+        if status != "verified":
+            blockers.append(
+                {
+                    "gate": "receipt_verification",
+                    "status": status,
+                    "check_id": check_id,
+                    "reason": reason,
+                    "owner": row["owner"] or "evidence owner",
+                    "next_action": row["next_action"]
+                    or "provide a matching bounded local receipt",
+                }
+            )
+            unknown = unknown or status == "unknown"
+            failed = failed or status == "failed"
+
+    if unknown:
+        status, reason = (
+            "unknown",
+            "one or more required local receipts were unavailable",
+        )
+    elif failed:
+        status, reason = (
+            "failed",
+            "one or more local receipts did not match their declarations",
+        )
+    else:
+        status, reason = "verified", "all declared local receipts match their rows"
+    return (
+        {
+            "status": status,
+            "complete": not unknown,
+            "count": len(results),
+            "receipts": results,
+            "reason": reason,
+        },
+        blockers,
+    )
 
 
 def _closed(value: Any, keys: set[str], label: str) -> dict[str, Any]:
@@ -392,12 +604,21 @@ def _inputs(
     if len(plan_bytes) > MAX_INPUT_BYTES:
         raise ValueError("persisted plan exceeds input size limit")
     blockers = _validate_policy(policy, evidence, plan_bytes)
+    receipt_verification, receipt_blockers = _verify_receipts(
+        evidence_path, policy, evidence
+    )
+    blockers.extend(receipt_blockers)
     pins = {
         "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
         "evidence_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
         "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
     }
-    return {"policy": policy, "blockers": blockers}, pins
+    return {
+        "policy": policy,
+        "evidence": evidence,
+        "blockers": blockers,
+        "receipt_verification": receipt_verification,
+    }, pins
 
 
 def plan_check(
@@ -441,9 +662,11 @@ def plan_check(
             "repository": data["policy"]["repository"],
             "pr_number": data["policy"]["pr_number"],
             "pins": pins,
+            "receipt_verification": data["receipt_verification"],
             "blockers": blockers,
             "limitations": [
-                "plan-check validates declarations only; it does not fetch GitHub or authenticate coordinator selection"
+                "receipt verification proves local byte and declared-content consistency only, not authentication or independent test provenance",
+                "plan-check does not fetch GitHub or authenticate coordinator selection",
             ],
         },
         0 if not blockers else 1,
@@ -856,9 +1079,17 @@ def review_ready(
         "threads": [],
         "reason": "review-thread observation was not completed",
     }
+    receipt_observed: dict[str, Any] = {
+        "status": "unknown",
+        "complete": False,
+        "count": 0,
+        "receipts": [],
+        "reason": "local receipt observations were not completed",
+    }
     try:
         data, pins = _inputs(policy_path, evidence_path, plan_path)
         blockers.extend(data["blockers"])
+        receipt_observed = data["receipt_verification"]
     except (TypeError, ValueError) as exc:
         data, pins = None, {}
         blockers.append(
@@ -1001,15 +1232,17 @@ def review_ready(
             }
         )
 
-    receipt_gate = {
-        "gate": "receipt_verification",
-        "status": "unknown",
-        "reason": "declared receipt content and its hash have not been retrieved and verified",
-        "owner": "evidence owner",
-        "next_action": "retrieve each referenced receipt and verify its content hash",
-    }
-    unverified_gates.append(receipt_gate)
-    blockers.append(receipt_gate)
+    if receipt_observed["status"] == "unknown":
+        receipt_gate = {
+            "gate": "receipt_verification",
+            "status": "unknown",
+            "reason": receipt_observed["reason"],
+            "owner": "evidence owner",
+            "next_action": "provide every required local receipt and rerun verification",
+        }
+        unverified_gates.append(receipt_gate)
+        if not any(item.get("gate") == "receipt_verification" for item in blockers):
+            blockers.append(receipt_gate)
 
     observed_decisions = {
         snapshot["reviewDecision"]
@@ -1112,11 +1345,12 @@ def review_ready(
         "pr_snapshot_after": after_summary,
         "github_required_checks": checks_observed,
         "review_threads": threads_observed,
+        "receipt_verification": receipt_observed,
         "blockers": blockers,
         "unverified_gates": unverified_gates,
         "limitations": [
             "GitHub reviewDecision is informational only and does not authenticate the coordinator under shared identity",
-            "receipt references are hash-pinned declarations but receipt content and hashes are not retrieved or verified",
+            "local receipt byte/content consistency does not authenticate the writer or prove independent test provenance",
             "this read-only report provides no merge authorization",
         ],
     }

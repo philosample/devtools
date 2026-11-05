@@ -83,8 +83,7 @@ class PRReadinessTests(unittest.TestCase):
         }
         self.policy_path = self.root / "policy.json"
         self.evidence_path = self.root / "evidence.json"
-        self.write_json(self.policy_path, self.policy)
-        self.write_json(self.evidence_path, self.evidence)
+        self.save_inputs()
 
     def tearDown(self):
         self.temp.cleanup()
@@ -121,6 +120,29 @@ class PRReadinessTests(unittest.TestCase):
         path.write_text(json.dumps(value), encoding="utf-8")
 
     def save_inputs(self):
+        receipt_root = self.root / "receipts"
+        receipt_root.mkdir(exist_ok=True)
+        receipt_fields = (
+            "check_id",
+            "level",
+            "base_sha",
+            "head_sha",
+            "component_pins",
+            "command",
+            "environment",
+            "result",
+            "exit_code",
+            "test_count",
+        )
+        for row in self.evidence["rows"]:
+            row["receipt_ref"] = f"receipts/{row['check_id']}.json"
+            receipt = {
+                "schema": pr_readiness.RECEIPT_SCHEMA,
+                **{field: row[field] for field in receipt_fields},
+            }
+            raw = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode()
+            (self.root / row["receipt_ref"]).write_bytes(raw)
+            row["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
         self.write_json(self.policy_path, self.policy)
         self.write_json(self.evidence_path, self.evidence)
 
@@ -232,6 +254,128 @@ class PRReadinessTests(unittest.TestCase):
         self.assertTrue(report["valid"])
         self.assertFalse(report["overall_ready"])
         self.assertEqual(report["coordinator_approval"]["status"], "unknown")
+        self.assertEqual(report["receipt_verification"]["status"], "verified")
+        self.assertTrue(report["receipt_verification"]["complete"])
+        self.assertIn("not authentication", report["limitations"][0])
+
+    def test_receipt_missing_malformed_oversized_and_hash_mismatch_fail_closed(self):
+        row = self.evidence["rows"][0]
+        receipt_path = self.root / row["receipt_ref"]
+
+        receipt_path.unlink()
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["receipt_verification"]["status"], "unknown")
+
+        self.save_inputs()
+        row = self.evidence["rows"][0]
+        receipt_path = self.root / row["receipt_ref"]
+        receipt_path.write_bytes(b"{" + b" " * (pr_readiness.MAX_RECEIPT_BYTES + 1))
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["receipt_verification"]["status"], "failed")
+
+        self.save_inputs()
+        row = self.evidence["rows"][0]
+        receipt_path = self.root / row["receipt_ref"]
+        receipt_path.write_bytes(b"{malformed")
+        row["receipt_sha256"] = hashlib.sha256(b"{malformed").hexdigest()
+        self.write_json(self.evidence_path, self.evidence)
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["receipt_verification"]["status"], "failed")
+
+        self.save_inputs()
+        row = self.evidence["rows"][0]
+        receipt_path = self.root / row["receipt_ref"]
+        receipt_path.write_bytes(receipt_path.read_bytes() + b" ")
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["receipt_verification"]["status"], "failed")
+        self.assertIn("hash", report["receipt_verification"]["receipts"][0]["reason"])
+
+    def test_receipt_rejects_symlink_path_changed_content_and_zero_test_count(self):
+        row = self.evidence["rows"][0]
+        receipt_path = self.root / row["receipt_ref"]
+        target = self.root / "outside.json"
+        target.write_bytes(receipt_path.read_bytes())
+        receipt_path.unlink()
+        receipt_path.symlink_to(target)
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(report["receipt_verification"]["status"], "failed")
+        self.assertIn(
+            "symlink", report["receipt_verification"]["receipts"][0]["reason"]
+        )
+
+        receipt_path.unlink()
+        self.save_inputs()
+        row = self.evidence["rows"][0]
+        receipt_link = self.root / "receipt-directory-link"
+        receipt_link.symlink_to(self.root / "receipts", target_is_directory=True)
+        row["receipt_ref"] = "receipt-directory-link/unit.json"
+        self.write_json(self.evidence_path, self.evidence)
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "symlink", report["receipt_verification"]["receipts"][0]["reason"]
+        )
+        receipt_link.unlink()
+
+        receipt_path.unlink()
+        self.save_inputs()
+        row = self.evidence["rows"][0]
+        receipt_path = self.root / row["receipt_ref"]
+        value = json.loads(receipt_path.read_text(encoding="utf-8"))
+        value["head_sha"] = "9" * 40
+        raw = json.dumps(value).encode()
+        receipt_path.write_bytes(raw)
+        row["receipt_sha256"] = hashlib.sha256(raw).hexdigest()
+        self.write_json(self.evidence_path, self.evidence)
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "differs from its evidence row",
+            report["receipt_verification"]["receipts"][0]["reason"],
+        )
+
+        self.evidence["rows"][0] = self.row(
+            "unit", "development", test_count=0, owner="worker", next_action="rerun"
+        )
+        self.save_inputs()
+        report, code = pr_readiness.plan_check(
+            self.policy_path, self.evidence_path, self.plan
+        )
+        self.assertEqual(code, 1)
+        self.assertTrue(
+            any("zero tests" in item["reason"] for item in report["blockers"])
+        )
+
+    def test_receipt_paths_must_be_explicit_relative_files(self):
+        for reference in ("../escape.json", "/tmp/receipt.json", "receipts//unit.json"):
+            with self.subTest(reference=reference):
+                self.save_inputs()
+                self.evidence["rows"][0]["receipt_ref"] = reference
+                self.write_json(self.evidence_path, self.evidence)
+                report, code = pr_readiness.plan_check(
+                    self.policy_path, self.evidence_path, self.plan
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(report["receipt_verification"]["status"], "failed")
 
     def test_unknown_fields_duplicate_keys_and_malformed_json_fail_closed(self):
         self.policy["unreviewed"] = True
@@ -367,7 +511,8 @@ class PRReadinessTests(unittest.TestCase):
         self.assertEqual(report["review_threads"]["status"], "resolved")
         gates = {item["gate"] for item in report["blockers"]}
         self.assertIn("coordinator_approval", gates)
-        self.assertIn("receipt_verification", gates)
+        self.assertNotIn("receipt_verification", gates)
+        self.assertEqual(report["receipt_verification"]["status"], "verified")
         self.assertNotIn("github_required_checks", gates)
         self.assertNotIn("review_findings", gates)
         self.assertEqual(
