@@ -450,6 +450,21 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--pr")
             command.add_argument("--plan")
     worktree_sub.add_parser("audit", help="read-only inventory of registered worktrees")
+    pr = commands.add_parser(
+        "pr", help="validate pinned pull-request plans and evidence (read-only)"
+    )
+    pr_sub = pr.add_subparsers(dest="action", required=True)
+    for action, help_text in (
+        ("plan-check", "validate local policy, evidence, and plan declarations"),
+        ("review-ready", "compare declarations with a read-only GitHub PR snapshot"),
+    ):
+        command = pr_sub.add_parser(action, help=help_text)
+        command.add_argument("--policy", required=True, type=Path)
+        command.add_argument("--evidence", required=True, type=Path)
+        command.add_argument("--plan", required=True, type=Path)
+        if action == "review-ready":
+            command.add_argument("--repo", required=True)
+            command.add_argument("--number", required=True, type=int)
     from .harness_control import register_cli
 
     register_cli(commands)
@@ -493,6 +508,23 @@ def main(argv: list[str] | None = None) -> int:
                 result = worktrees.audit()
             _json_out(result)
             return 0
+        if args.group == "pr":
+            from . import pr_readiness
+
+            if args.action == "plan-check":
+                result, code = pr_readiness.plan_check(
+                    args.policy, args.evidence, args.plan
+                )
+            else:
+                result, code = pr_readiness.review_ready(
+                    args.repo,
+                    args.number,
+                    args.policy,
+                    args.evidence,
+                    args.plan,
+                )
+            _json_out(result)
+            return code
         if args.group == "harness":
             from .harness_control import run_cli
 
