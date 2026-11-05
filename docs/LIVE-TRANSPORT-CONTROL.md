@@ -8,18 +8,21 @@ default is read-only:
       --set '/private/tmp/tr1000-instance-scope-20261101/TR1000-instance-scope-r61 Project/TR1000-tooling-recall-r71.als'
 
 Mutation requires both --execute and an action. Play is limited to 1–15
-seconds and requires the independently supplied output count of 21:
+seconds and requires an independently supplied output row count from 1 to 128.
+The example uses 23; supply the exact count established for the target Live
+Settings inventory:
 
     python3 -m codex_devtools ax live-transport \
       --pid 58198 --expected-bundle-id com.ableton.live \
       --set '/private/tmp/tr1000-instance-scope-20261101/TR1000-instance-scope-r61 Project/TR1000-tooling-recall-r71.als' \
-      --execute --action play --play-for-seconds 5 --expected-output-count 21 \
+      --execute --action play --play-for-seconds 5 --expected-output-count 23 \
       --receipt /private/tmp/live-transport-play.json
 
 The wrapper compiles the native helper before taking the fresh MIDI Output Sync
-inspection. Play requires all 21 controls to be readable and off in that
-inspection. The helper checks the fresh baseline age and re-reads the complete,
-bounded Settings tree before closing only the unique Settings window with its
+inspection. Play requires exactly the independently supplied number of output
+Sync controls to be readable and all off in that inspection. The helper checks
+the fresh baseline age and re-reads the complete, bounded Settings tree before
+closing only the unique Settings window with its
 unique enabled AXCloseButton. It confirms the exact Set window is still
 focused, and requires Play, Link, Arrangement Record, and Session Record off
 before starting.
