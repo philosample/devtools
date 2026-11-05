@@ -390,6 +390,44 @@ console.log(mailbox.descriptorPath);
         self.assertEqual(self.count.read_text(), "callback\n")
         self.assertEqual(client.status(descriptor)["state"], "fenced")
 
+    def test_actual_runner_rejects_empty_actor_directory_arriving_after_snapshot(self):
+        process, descriptor = self.launch()
+        self.stop(process)
+        value = json.loads(descriptor.read_text())
+        value["expires_at_ms"] = 0
+        descriptor.write_text(json.dumps(value))
+        descriptor_before = descriptor.read_bytes()
+        owner_before = (self.root / "owner/identity.json").read_bytes()
+        actual_run = subprocess.run
+
+        def add_empty_actor_before_runner(command, **kwargs):
+            (descriptor.parent / "actor").mkdir(mode=0o700)
+            return actual_run(command, **kwargs)
+
+        with (
+            patch.object(
+                reconcile,
+                "discover_node",
+                return_value={"available": True, "path": self.node},
+            ),
+            patch.object(
+                reconcile.subprocess,
+                "run",
+                side_effect=add_empty_actor_before_runner,
+            ),
+            self.assertRaisesRegex(ValueError, "actor retained"),
+        ):
+            self.call(descriptor)
+        self.assertTrue((descriptor.parent / "actor").is_dir())
+        self.assertTrue((self.root / "owner").is_dir())
+        self.assertEqual(descriptor.read_bytes(), descriptor_before)
+        self.assertEqual((self.root / "owner/identity.json").read_bytes(), owner_before)
+        self.assertFalse((self.output / "marker.json").exists())
+        self.assertFalse(self.count.exists())
+        outcome = json.loads((self.output / "outcome.json").read_text())
+        self.assertEqual(outcome["status"], "unknown")
+        self.assertTrue((self.root / "reconciliation-actor").is_dir())
+
     def test_uncertain_runner_owner_gap_restores_exclusive_fence(self):
         descriptor = self.fenced()
 

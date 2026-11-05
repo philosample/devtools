@@ -43,7 +43,7 @@ try {
   // Require exact member inventory so no newly arrived ACK/actor is omitted.
   const members=dir=>fs.readdirSync(dir).flatMap(name=>name==='actor' ? fs.readdirSync(path.join(dir,name)).map(x=>'actor/'+x) : [name]);
   const oldMembers=members(oldDir);
-  if(basis==='expired_ready_no_pending' && (oldMembers.includes('command.json') || oldMembers.some(name=>name.startsWith('actor/')))) throw Error('expired READY owner has unresolved command/actor');
+  if(basis==='expired_ready_no_pending' && (oldMembers.includes('command.json') || fs.existsSync(path.join(oldDir,'actor')))) throw Error('expired READY owner has unresolved command/actor');
   const current=[...members(path.join(root,'owner')).map(x=>'owner/'+x),...oldMembers.map(x=>descriptor.instance+'/'+x)].sort();
   if(!equal(current,Object.keys(intent.before_sha256).sort())) throw Error('old inventory changed');
   const {createHarnessMailbox}=require(helper);
