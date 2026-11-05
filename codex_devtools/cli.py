@@ -374,19 +374,21 @@ def build_parser() -> argparse.ArgumentParser:
     midi_inputs.add_argument("--max-baseline-age-seconds", type=float, default=300.0)
     live_transport = ax_sub.add_parser(
         "live-transport",
-        help="inspect or explicitly play briefly or stop one exact Live Set",
+        help="inspect or explicitly play, stop, or reset position on one exact Live Set",
     )
     live_transport.add_argument("--pid", required=True, type=int)
     live_transport.add_argument("--expected-bundle-id", required=True)
     live_transport.add_argument("--set", dest="set_path", required=True, type=Path)
-    live_transport.add_argument("--action", dest="operation", choices=("play", "stop"))
+    live_transport.add_argument(
+        "--action", dest="operation", choices=("play", "stop", "reset-position")
+    )
     live_transport.add_argument("--play-for-seconds", type=int)
     live_transport.add_argument("--expected-output-count", type=int)
     live_transport.add_argument("--receipt", type=Path)
     live_transport.add_argument(
         "--execute",
         action="store_true",
-        help="allow the selected bounded Play or Stop action",
+        help="allow the selected bounded Play, Stop, or reset-position action",
     )
     runtime = commands.add_parser("runtime", help="discover existing local runtimes")
     runtime_sub = runtime.add_subparsers(dest="action", required=True)

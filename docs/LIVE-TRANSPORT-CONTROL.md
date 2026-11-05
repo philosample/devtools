@@ -49,6 +49,30 @@ on. Stop is a verified no-op if Play is already off. Receipts are new
 files and report each action as not attempted, known, or unknown. A receipt
 requiring manual inspection must be inspected before another action.
 
+To reset the arrangement position before configuring a recall test, use the
+fixed reset-position action with the exact output row count established for
+that Live Settings inventory. The [Live 12 Session View manual](https://www.ableton.com/en/live-manual/12/session-view/)
+documents pressing Stop twice to return arrangement position to 1.1.1:
+
+    python3 -m codex_devtools ax live-transport \
+      --pid 58198 --expected-bundle-id com.ableton.live \
+      --set '/private/tmp/tr1000-instance-scope-20261101/TR1000-instance-scope-r61 Project/TR1000-tooling-recall-r71.als' \
+      --execute --action reset-position --expected-output-count 23 \
+      --receipt /private/tmp/live-transport-reset-position.json
+
+Reset-position requires an exact, fresh, complete output Sync baseline with
+every output Sync control off, as Play does. It also requires Play, Link,
+Arrangement Record, and Session Record off. After closing the uniquely
+identified Settings window, it rechecks those transport gates and the exact
+Set identity and focus. It then presses the exact Stop control twice without
+starting transport or setting an arbitrary position. Each press has its own
+receipt action state; an uncertain press is never retried. A separate bounded
+Accessibility traversal reads the three unique arrangement position sliders
+and transport again. Success requires Play, Link, and both recording controls
+off and position 1.1.1. A failed or uncertain readback requires inspection
+before another action. The existing Stop action keeps its idle verified-noop
+behavior.
+
 ## Recorded native findings
 
 On 2026-11-02, a read-only inspection of the exact R71 Set in Live PID 58198

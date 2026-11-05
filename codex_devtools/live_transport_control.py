@@ -71,11 +71,19 @@ def _initial_receipt(
         "play_for_seconds": play_for_seconds,
         "actions": {}
         if action == "inspect"
-        else {
-            "settings_close": {"attempted": False, "outcome": "not_attempted"},
-            "play": {"attempted": False, "outcome": "not_attempted"},
-            "stop": {"attempted": False, "outcome": "not_attempted"},
-        },
+        else (
+            {
+                "settings_close": {"attempted": False, "outcome": "not_attempted"},
+                "reset_stop_first": {"attempted": False, "outcome": "not_attempted"},
+                "reset_stop_second": {"attempted": False, "outcome": "not_attempted"},
+            }
+            if action == "reset-position"
+            else {
+                "settings_close": {"attempted": False, "outcome": "not_attempted"},
+                "play": {"attempted": False, "outcome": "not_attempted"},
+                "stop": {"attempted": False, "outcome": "not_attempted"},
+            }
+        ),
         "manual_inspection_required": False,
         "error": "native helper has not run; no action was attempted",
     }
@@ -131,7 +139,16 @@ def _valid_report(
             and report.get("actions") == {}
         )
     rows = report.get("actions")
-    if not isinstance(rows, dict) or set(rows) != {"settings_close", "play", "stop"}:
+    expected_actions = (
+        {"settings_close", "play", "stop"}
+        if action == "play"
+        else (
+            {"settings_close", "reset_stop_first", "reset_stop_second"}
+            if action == "reset-position"
+            else {"settings_close", "play", "stop"}
+        )
+    )
+    if not isinstance(rows, dict) or set(rows) != expected_actions:
         return False
     allowed = {"not_attempted", "known", "unknown", "verified_noop"}
     for row in rows.values():
@@ -167,8 +184,37 @@ def _valid_report(
         and any(state.get(name) == 1 for name in monitored_states)
         for state in (transport_before_stop, transport)
     )
+    reset_position_attempted = action == "reset-position" and any(
+        row["attempted"] for name, row in rows.items() if name != "settings_close"
+    )
+    if (
+        action == "reset-position"
+        and transport is not None
+        and (
+            not isinstance(transport, dict)
+            or any(
+                type(transport.get(name)) is not int or transport[name] not in (0, 1)
+                for name in ("play", *monitored_states)
+            )
+        )
+    ):
+        return False
+    reset_transport_needs_review = (
+        reset_position_attempted
+        and isinstance(transport, dict)
+        and any(transport.get(name) == 1 for name in ("play", *monitored_states))
+    )
+    reset_position_uncertain = reset_position_attempted and (
+        unknown
+        or report.get("position_readback") != "verified"
+        or report.get("position") != "1.1.1"
+    )
     if report["manual_inspection_required"] is not (
-        unknown or play_attempted_without_verified_stop or transport_state_needs_review
+        unknown
+        or play_attempted_without_verified_stop
+        or transport_state_needs_review
+        or reset_transport_needs_review
+        or reset_position_uncertain
     ):
         return False
     if action == "play" and rows["play"]["attempted"]:
@@ -180,7 +226,7 @@ def _valid_report(
             return False
         if rows["play"]["outcome"] == "known" and report["play_readback"] != "verified":
             return False
-    if rows["stop"]["attempted"]:
+    if "stop" in rows and rows["stop"]["attempted"]:
         if report.get("stop_play_readback") not in {
             "verified",
             "not_observed_before_bound",
@@ -193,6 +239,18 @@ def _valid_report(
         ):
             return False
     if action == "play" and rows["stop"]["attempted"] and transport_before_stop is None:
+        return False
+    if (
+        action == "reset-position"
+        and reset_position_attempted
+        and (
+            report.get("position_readback") not in {"verified", "mismatch", "unknown"}
+            or (
+                report.get("position_readback") == "verified"
+                and report.get("position") != "1.1.1"
+            )
+        )
+    ):
         return False
     if report.get("play_for_seconds") != play_for_seconds:
         return False
@@ -213,6 +271,18 @@ def _valid_report(
                 rows["settings_close"]["outcome"] == "known"
                 and rows["play"]["outcome"] == "known"
                 and rows["stop"]["outcome"] == "known"
+            )
+        if action == "reset-position":
+            return (
+                rows["settings_close"]["outcome"] == "known"
+                and rows["reset_stop_first"]["outcome"] == "known"
+                and rows["reset_stop_second"]["outcome"] == "known"
+                and report.get("position_readback") == "verified"
+                and report.get("position") == "1.1.1"
+                and not report["manual_inspection_required"]
+                and all(
+                    transport.get(name) == 0 for name in ("play", *monitored_states)
+                )
             )
         return (
             rows["play"]["outcome"] == "not_attempted"
@@ -298,7 +368,7 @@ def run_live_transport(
     receipt_path: Path | None = None,
     execute: bool = False,
 ) -> dict:
-    """Inspect by default; explicitly play briefly or stop one exact Set."""
+    """Inspect by default; explicitly play briefly, stop, or reset one exact Set."""
     if platform.system() != "Darwin":
         raise ValueError("native Live transport control requires macOS")
     if type(pid) is not int or not 1 <= pid <= 2_147_483_647:
@@ -316,12 +386,14 @@ def run_live_transport(
             raise ValueError("action options and --receipt require explicit --execute")
         selected_action = "inspect"
     else:
-        if action not in {"play", "stop"}:
-            raise ValueError("--execute requires --action play or stop")
+        if action not in {"play", "stop", "reset-position"}:
+            raise ValueError(
+                "--execute requires --action play, stop, or reset-position"
+            )
         if receipt_path is None:
             raise ValueError("--execute requires a new --receipt path")
-        if action == "play":
-            if (
+        if action in {"play", "reset-position"}:
+            if action == "play" and (
                 type(play_for_seconds) is not int
                 or not MIN_PLAY_SECONDS <= play_for_seconds <= MAX_PLAY_SECONDS
             ):
@@ -333,12 +405,14 @@ def run_live_transport(
                 or not 1 <= expected_count <= MAX_EXPECTED_OUTPUT_COUNT
             ):
                 raise ValueError(
-                    "Play requires an independently supplied expected output count from 1 to 128"
+                    "Play and reset-position require an independently supplied expected output count from 1 to 128"
                 )
         elif play_for_seconds is not None or expected_count is not None:
             raise ValueError(
                 "--play-for-seconds and --expected-count are valid only for play"
             )
+        if action == "reset-position" and play_for_seconds is not None:
+            raise ValueError("--play-for-seconds is valid only for play")
         selected_action = action
 
     initial = _initial_receipt(
@@ -380,7 +454,7 @@ def run_live_transport(
 
             baseline_path = None
             baseline_hash = None
-            if selected_action == "play":
+            if selected_action in {"play", "reset-position"}:
                 initial["phase"] = "output-isolation-preflight"
                 initial["error"] = "complete output Sync inspection has not passed"
                 save(initial)
@@ -401,7 +475,7 @@ def run_live_transport(
                         )
                     if not all(row.get("value") == 0 for row in outputs):
                         raise ValueError(
-                            f"all {expected_count} output Sync controls must be off before Play"
+                            f"all {expected_count} output Sync controls must be off before {selected_action}"
                         )
                     baseline_path = temporary_dir / "baseline.json"
                     _write_new_json(baseline_path, baseline)
@@ -448,18 +522,27 @@ def run_live_transport(
                     uncertain["error"] = (
                         "native inspection timed out; transport observation is unavailable"
                     )
-                elif selected_action == "play":
+                elif selected_action in {"play", "reset-position"}:
                     for name in ("settings_close", "play", "stop"):
-                        uncertain["actions"][name] = {
-                            "attempted": True,
-                            "outcome": "unknown",
-                        }
+                        if name in uncertain["actions"]:
+                            uncertain["actions"][name] = {
+                                "attempted": True,
+                                "outcome": "unknown",
+                            }
+                    for name in ("reset_stop_first", "reset_stop_second"):
+                        if name in uncertain["actions"]:
+                            uncertain["actions"][name] = {
+                                "attempted": True,
+                                "outcome": "unknown",
+                            }
                 else:
                     uncertain["actions"]["stop"] = {
                         "attempted": True,
                         "outcome": "unknown",
                     }
                 uncertain["manual_inspection_required"] = selected_action != "inspect"
+                if selected_action == "reset-position":
+                    uncertain["position_readback"] = "unknown"
                 return save(uncertain) if execute else uncertain
             try:
                 report = json.loads(result.stdout)
@@ -485,18 +568,27 @@ def run_live_transport(
                 uncertain["error"] = (
                     "native helper returned an invalid or incomplete receipt; inspect Live before retry"
                 )
-                if selected_action == "play":
+                if selected_action in {"play", "reset-position"}:
                     for name in ("settings_close", "play", "stop"):
-                        uncertain["actions"][name] = {
-                            "attempted": True,
-                            "outcome": "unknown",
-                        }
+                        if name in uncertain["actions"]:
+                            uncertain["actions"][name] = {
+                                "attempted": True,
+                                "outcome": "unknown",
+                            }
+                    for name in ("reset_stop_first", "reset_stop_second"):
+                        if name in uncertain["actions"]:
+                            uncertain["actions"][name] = {
+                                "attempted": True,
+                                "outcome": "unknown",
+                            }
                 elif selected_action == "stop":
                     uncertain["actions"]["stop"] = {
                         "attempted": True,
                         "outcome": "unknown",
                     }
                 uncertain["manual_inspection_required"] = selected_action != "inspect"
+                if selected_action == "reset-position":
+                    uncertain["position_readback"] = "unknown"
                 if selected_action == "inspect":
                     uncertain.update(
                         format=FORMAT,
