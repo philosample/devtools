@@ -55,6 +55,47 @@ oversized input,
 missing/stale/wrong pins, zero discovered tests, failed/skipped/unknown required
 checks, and active holds block the declaration check.
 
+## Offline evidence assembly
+
+`python3 -m codex_devtools pr evidence-pack --policy policy.json --manifest manifest.json --plan plan.md --out evidence.json`
+assembles an evidence document from an explicit closed manifest of structured
+receipts already present beside the manifest. The manifest schema is
+`codex-devtools-pr-evidence-pack-v1`; its `receipts` entries each name a
+`check_id`, relative `receipt_ref`, `owner`, `next_action`, and `limitations`.
+Every required policy check must have an entry; optional checks may be omitted.
+For example:
+
+```json
+{
+  "schema": "codex-devtools-pr-evidence-pack-v1",
+  "receipts": [
+    {
+      "check_id": "unit",
+      "receipt_ref": "receipts/unit.json",
+      "owner": "",
+      "next_action": "",
+      "limitations": ["Focused test fixture"]
+    }
+  ]
+}
+```
+
+Receipt paths use the same bounded regular-file, no-symlink rules as
+`plan-check`. The output must be a new file in the manifest directory, so its
+relative receipt references remain valid. The packer copies receipt facts
+unchanged, hashes the exact bytes read, and refuses invalid schemas, duplicate
+or unknown check IDs, stale pins, missing required receipts, and output
+overwrite before writing. It writes deterministically and does not search for
+receipts.
+
+Evidence packing does not run a test, execute a declared command, access
+GitHub, parse logs, infer a result or N/A disposition, or authenticate a
+receipt writer. It does not establish CI success or readiness. Failed,
+skipped, and unknown facts stay as recorded; `plan-check` remains the
+authoritative declaration and receipt validator, and required non-passing
+facts and existing policy holds continue to block. A test receipt with zero
+tests remains invalid; zero-count inspection receipts are allowed.
+
 This increment has no independent authenticated coordinator identity boundary.
 Consequently `review-ready` always reports `ready: false` and coordinator
 approval `unknown`, including when GitHub reports `APPROVED`. Same-account
