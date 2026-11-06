@@ -470,11 +470,14 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--expected-head", required=True)
             command.add_argument("--expected-base", required=True)
             command.add_argument("--expected-tree", required=True)
+            command.add_argument("--expected-head-tree", required=True)
             command.add_argument("--body-sha256", required=True)
             command.add_argument("--expected-policy-sha256", required=True)
             command.add_argument("--expected-evidence-sha256", required=True)
             command.add_argument("--expected-plan-sha256", required=True)
-            command.add_argument("--review-reference", required=True)
+            command.add_argument("--review-reference")
+            command.add_argument("--decision-reference")
+            command.add_argument("--decision-sha256")
             command.add_argument("--operator-assertion", required=True)
             command.add_argument("--dry-run", action="store_true")
     from .harness_control import register_cli
@@ -542,11 +545,14 @@ def main(argv: list[str] | None = None) -> int:
                     expected_head=args.expected_head,
                     expected_base=args.expected_base,
                     expected_tree=args.expected_tree,
+                    expected_head_tree=args.expected_head_tree,
                     body_sha256=args.body_sha256,
                     expected_policy_sha256=args.expected_policy_sha256,
                     expected_evidence_sha256=args.expected_evidence_sha256,
                     expected_plan_sha256=args.expected_plan_sha256,
                     review_reference=args.review_reference,
+                    decision_reference=args.decision_reference,
+                    decision_sha256=args.decision_sha256,
                     operator_assertion=args.operator_assertion,
                     readiness=lambda: pr_readiness.review_ready(
                         args.repo,

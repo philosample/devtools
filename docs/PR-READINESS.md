@@ -65,20 +65,40 @@ separate issue #75 gates.
 
 ## Explicit operator-asserted merge
 
-`python3 -m codex_devtools pr merge --repo OWNER/REPO --number N --policy policy.json --evidence evidence.json --plan plan.md --expected-head SHA --expected-base SHA --expected-tree SHA --body-sha256 SHA256 --expected-policy-sha256 SHA256 --expected-evidence-sha256 SHA256 --expected-plan-sha256 SHA256 --review-reference REVIEW_URL --operator-assertion 'I am the designated coordinator and explicitly authorize this exact-head merge.'`
+`python3 -m codex_devtools pr merge --repo OWNER/REPO --number N --policy policy.json --evidence evidence.json --plan plan.md --expected-head SHA --expected-base SHA --expected-head-tree SHA --expected-tree SHA --body-sha256 SHA256 --expected-policy-sha256 SHA256 --expected-evidence-sha256 SHA256 --expected-plan-sha256 SHA256 [--review-reference REVIEW_URL | --decision-reference COMMENT_URL --decision-sha256 SHA256] --operator-assertion 'I am the designated coordinator and explicitly authorize this exact-head merge.'`
 is a separate explicit mutation command. It freshly runs `review-ready`,
 requires every blocker except the intentionally unknown coordinator identity
 gate to be absent, and requires verified policy/evidence/plan pins, passing
-required CI, resolved review threads, and verified evidence receipts. It then
-re-reads the open PR head/base/head tree/body hash and the exact approved review
-reference for that same head, immediately before one GitHub head-matched merge
-request. The head tree, body hash, and expected policy/evidence/plan hashes are
-provided as reviewed pins. Readiness is run again after the first snapshot and
-review reads; the declaration hashes must still match, then one final PR and
-review read is performed at the mutation boundary.
+required CI, resolved review threads, and verified evidence receipts. The formal
+review path accepts an approved review reference pinned to the exact source
+head. Alternatively, a coordinator decision comment can be pinned by its GitHub
+comment URL/ID and exact SHA-256 of the UTF-8 comment body. That body must be one
+closed JSON object using schema
+`codex-devtools-pr-coordinator-decision-v1` and bind `repository`, `pr_number`,
+`head_sha`, `base_sha`, `head_tree_sha`, `merge_tree_sha`, `body_sha256`, the
+policy/evidence/plan hashes, and `operator_asserted: true`. Unknown fields,
+including authentication or username claims, are rejected. The comment is
+re-read and re-hashed at the mutation boundary. Neither comment content nor
+GitHub username independently authenticates coordinator identity.
+
+`--expected-head-tree` pins the PR source tree; `--expected-tree` pins the
+reviewed integrated merge result tree. Readiness is run again after initial PR
+and review/decision reads; declaration hashes must still match, then the PR and
+review/decision are read once more at the mutation boundary. After a successful
+merge response, terminal verification fetches the actual merge commit, requires
+its SHA to match the response SHA, checks its single parent is the reviewed base
+SHA, and compares the actual merge commit tree with `--expected-tree`. Missing
+or mismatched terminal data is never success and is never retried.
+
 GitHub's merge endpoint supports an exact head SHA precondition, but not an
-atomic base SHA precondition; the base is freshly re-read immediately before
-the request and any intervening change is outside the adapter's atomic guard.
+atomic base SHA precondition. Verification of the merge commit parent confirms
+which base was used after completion; no cleanup follows unknown, rejected, or
+unverified completion. The strict `review-ready` report still returns unknown
+for an empty required-check response. Live use of this adapter remains blocked
+until required-check applicability can be established; coordinator-selected
+remote CI is not applicable to this source-only implementation PR because this
+repository has no configured workflows/checks/branch protection. That selection
+does not claim CI passed or relax `review-ready`.
 
 `--dry-run` performs these reads and validations without making a mutation.
 Rejected or unknown network completion is reported without retry. A successful

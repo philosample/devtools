@@ -18,6 +18,24 @@ SHA1 = re.compile(r"^[0-9a-f]{40}$")
 REVIEW_REFERENCE = re.compile(
     r"^(?:[1-9][0-9]*|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*#pullrequestreview-[1-9][0-9]*)$"
 )
+DECISION_REFERENCE = re.compile(
+    r"^(?:[1-9][0-9]*|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*#issuecomment-[1-9][0-9]*)$"
+)
+DECISION_SCHEMA = "codex-devtools-pr-coordinator-decision-v1"
+DECISION_FIELDS = {
+    "schema",
+    "repository",
+    "pr_number",
+    "head_sha",
+    "base_sha",
+    "head_tree_sha",
+    "merge_tree_sha",
+    "body_sha256",
+    "policy_sha256",
+    "evidence_sha256",
+    "plan_sha256",
+    "operator_asserted",
+}
 APPROVAL_GATE = "coordinator_approval"
 
 
@@ -33,6 +51,8 @@ class MergePorts(Protocol):
     def snapshot(self) -> dict[str, Any]: ...
 
     def review(self, reference: str) -> dict[str, Any]: ...
+
+    def decision(self, reference: str) -> dict[str, Any]: ...
 
     def merge(self, expected_head: str) -> dict[str, Any]: ...
 
@@ -107,6 +127,23 @@ class GHMergePorts:
             "html_url": row["html_url"],
         }
 
+    def decision(self, reference: str) -> dict[str, Any]:
+        match = re.search(r"(?:issuecomment-|^)([1-9][0-9]*)$", reference)
+        if match is None:
+            raise ValueError("decision reference has no comment ID")
+        comment = self._api(f"repos/{self.repository}/issues/comments/{match.group(1)}")
+        expected_issue_url = (
+            f"https://api.github.com/repos/{self.repository}/issues/{self.number}"
+        )
+        if comment.get("issue_url") != expected_issue_url:
+            raise ValueError("decision comment belongs to another pull request")
+        return {
+            "id": str(comment["id"]),
+            "html_url": comment["html_url"],
+            "issue_number": self.number,
+            "body": comment["body"],
+        }
+
     def merge(self, expected_head: str) -> dict[str, Any]:
         return self._api(
             f"repos/{self.repository}/pulls/{self.number}/merge",
@@ -116,16 +153,27 @@ class GHMergePorts:
 
     def terminal(self) -> dict[str, Any]:
         pr = self._api(f"repos/{self.repository}/pulls/{self.number}")
-        result = {
+        head = pr["head"]["sha"]
+        head_commit = self._api(f"repos/{self.repository}/commits/{head}")
+        merge_commit_sha = pr.get("merge_commit_sha")
+        if not merge_commit_sha:
+            return {
+                "state": "MERGED" if pr.get("merged") else pr["state"].upper(),
+                "head_sha": head,
+                "head_tree_sha": head_commit["commit"]["tree"]["sha"],
+                "merge_commit_sha": None,
+                "merge_commit_tree_sha": None,
+                "parent_shas": [],
+            }
+        merge_commit = self._api(f"repos/{self.repository}/commits/{merge_commit_sha}")
+        return {
             "state": "MERGED" if pr.get("merged") else pr["state"].upper(),
-            "head_sha": pr["head"]["sha"],
-            "merge_commit_sha": pr.get("merge_commit_sha"),
-            "head_tree_sha": None,
+            "head_sha": head,
+            "head_tree_sha": head_commit["commit"]["tree"]["sha"],
+            "merge_commit_sha": merge_commit_sha,
+            "merge_commit_tree_sha": merge_commit["commit"]["tree"]["sha"],
+            "parent_shas": [parent["sha"] for parent in merge_commit["parents"]],
         }
-        if result["head_sha"]:
-            commit = self._api(f"repos/{self.repository}/commits/{result['head_sha']}")
-            result["head_tree_sha"] = commit["commit"]["tree"]["sha"]
-        return result
 
 
 def _digest(value: Any, name: str) -> str:
@@ -203,6 +251,90 @@ def _review_ready(
     return pins
 
 
+def _duplicate_free(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate decision JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _decision_receipt(
+    ports: MergePorts,
+    *,
+    reference: str,
+    expected_sha256: str,
+    repository: str,
+    number: int,
+    head: str,
+    base: str,
+    head_tree: str,
+    merge_tree: str,
+    body_sha256: str,
+    declarations: dict[str, str],
+) -> str:
+    if not isinstance(reference, str) or not DECISION_REFERENCE.fullmatch(reference):
+        raise ValueError("decision reference must identify one explicit GitHub comment")
+    if reference.startswith("https://") and not reference.startswith(
+        f"https://github.com/{repository}/pull/{number}#issuecomment-"
+    ):
+        raise ValueError("decision comment reference belongs to another pull request")
+    if not isinstance(expected_sha256, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_sha256
+    ):
+        raise ValueError("decision comment hash must be a full lowercase SHA-256")
+    comment = ports.decision(reference)
+    identifier_match = re.search(r"(?:issuecomment-|^)([1-9][0-9]*)$", reference)
+    if identifier_match is None or str(comment.get("id")) != identifier_match.group(1):
+        raise ValueError("decision comment ID differs from the pinned reference")
+    if comment.get("issue_number") != number:
+        raise ValueError("decision comment belongs to another pull request")
+    if reference.startswith("https://") and comment.get("html_url") != reference:
+        raise ValueError("decision comment URL differs from the pinned reference")
+    body = comment.get("body")
+    if not isinstance(body, str):
+        raise TypeError("decision comment body is missing or malformed")
+    try:
+        raw = body.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("decision comment is not valid UTF-8") from exc
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise ValueError("decision comment content hash changed")
+    try:
+        receipt = json.loads(body, object_pairs_hook=_duplicate_free)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise ValueError(
+            "decision comment must contain one structured JSON receipt"
+        ) from exc
+    if not isinstance(receipt, dict) or set(receipt) != DECISION_FIELDS:
+        raise ValueError(
+            "decision receipt fields are malformed or include unsupported claims"
+        )
+    if (
+        type(receipt["pr_number"]) is not int
+        or type(receipt["operator_asserted"]) is not bool
+    ):
+        raise ValueError(
+            "decision receipt number and operator assertion types are invalid"
+        )
+    expected = {
+        "schema": DECISION_SCHEMA,
+        "repository": repository,
+        "pr_number": number,
+        "head_sha": head,
+        "base_sha": base,
+        "head_tree_sha": head_tree,
+        "merge_tree_sha": merge_tree,
+        "body_sha256": body_sha256,
+        **declarations,
+        "operator_asserted": True,
+    }
+    if receipt != expected:
+        raise ValueError("decision receipt does not bind the exact reviewed pins")
+    return expected_sha256
+
+
 def merge_pr(
     *,
     repository: str,
@@ -214,7 +346,10 @@ def merge_pr(
     expected_policy_sha256: str,
     expected_evidence_sha256: str,
     expected_plan_sha256: str,
-    review_reference: str,
+    expected_head_tree: str,
+    review_reference: str | None,
+    decision_reference: str | None,
+    decision_sha256: str | None,
     operator_assertion: str,
     readiness: Callable[[], dict[str, Any]],
     ports: MergePorts,
@@ -230,6 +365,7 @@ def merge_pr(
         _digest(expected_base, "expected base"),
         _digest(expected_tree, "expected tree"),
     )
+    head_tree = _digest(expected_head_tree, "expected source head tree")
     if not isinstance(body_sha256, str) or not re.fullmatch(
         r"[0-9a-f]{64}", body_sha256
     ):
@@ -246,15 +382,28 @@ def merge_pr(
         raise ValueError(
             "reviewed policy/evidence/plan pins must be full SHA-256 values"
         )
-    if not isinstance(review_reference, str) or not REVIEW_REFERENCE.fullmatch(
-        review_reference
-    ):
-        raise ValueError("review reference must identify one explicit GitHub review")
-    if review_reference.startswith("https://") and not review_reference.startswith(
-        f"https://github.com/{repository}/pull/{number}#pullrequestreview-"
-    ):
+    use_review = review_reference is not None
+    use_decision = decision_reference is not None or decision_sha256 is not None
+    if use_review == use_decision:
         raise ValueError(
-            "review reference belongs to another repository or pull request"
+            "provide exactly one formal review or coordinator decision reference"
+        )
+    if use_review:
+        if not isinstance(review_reference, str) or not REVIEW_REFERENCE.fullmatch(
+            review_reference
+        ):
+            raise ValueError(
+                "review reference must identify one explicit GitHub review"
+            )
+        if review_reference.startswith("https://") and not review_reference.startswith(
+            f"https://github.com/{repository}/pull/{number}#pullrequestreview-"
+        ):
+            raise ValueError(
+                "review reference belongs to another repository or pull request"
+            )
+    elif not isinstance(decision_reference, str) or decision_sha256 is None:
+        raise ValueError(
+            "decision reference and exact content hash must be supplied together"
         )
     if (
         not isinstance(operator_assertion, str)
@@ -282,14 +431,29 @@ def merge_pr(
         current.get("base_sha"),
         current.get("head_tree_sha"),
         current.get("body_sha256"),
-    ) != (head, base, tree, body_sha256):
+    ) != (head, base, head_tree, body_sha256):
         raise ValueError(
-            "PR head, base, tree, or body changed immediately before merge"
+            "PR head, base, source tree, or body changed immediately before merge"
         )
-    review = ports.review(review_reference)
-    if review.get("state") != "APPROVED" or review.get("commit_sha") != head:
-        raise ValueError(
-            "referenced review is not an approval of the exact current head"
+    if use_review:
+        review = ports.review(review_reference)
+        if review.get("state") != "APPROVED" or review.get("commit_sha") != head:
+            raise ValueError(
+                "referenced review is not an approval of the exact current head"
+            )
+    else:
+        _decision_receipt(
+            ports,
+            reference=decision_reference,
+            expected_sha256=decision_sha256,
+            repository=repository,
+            number=number,
+            head=head,
+            base=base,
+            head_tree=head_tree,
+            merge_tree=tree,
+            body_sha256=body_sha256,
+            declarations=expected_declarations,
         )
     # Re-read declarations and remote gates after the first exact review read,
     # then perform one last compact PR/review read at the mutation boundary.
@@ -313,11 +477,26 @@ def merge_pr(
         current.get("base_sha"),
         current.get("head_tree_sha"),
         current.get("body_sha256"),
-    ) != (head, base, tree, body_sha256):
+    ) != (head, base, head_tree, body_sha256):
         raise ValueError("PR pins changed at the merge boundary")
-    review = ports.review(review_reference)
-    if review.get("state") != "APPROVED" or review.get("commit_sha") != head:
-        raise ValueError("review changed at the merge boundary")
+    if use_review:
+        review = ports.review(review_reference)
+        if review.get("state") != "APPROVED" or review.get("commit_sha") != head:
+            raise ValueError("review changed at the merge boundary")
+    else:
+        _decision_receipt(
+            ports,
+            reference=decision_reference,
+            expected_sha256=decision_sha256,
+            repository=repository,
+            number=number,
+            head=head,
+            base=base,
+            head_tree=head_tree,
+            merge_tree=tree,
+            body_sha256=body_sha256,
+            declarations=expected_declarations,
+        )
     if dry_run:
         return {
             "command": "merge",
@@ -325,8 +504,10 @@ def merge_pr(
             "merged": False,
             "operator_assertion": "operator-asserted; not independently authenticated",
             "review_reference": review_reference,
+            "decision_reference": decision_reference,
             "head_sha": head,
-            "head_tree_sha": tree,
+            "head_tree_sha": head_tree,
+            "merge_tree_sha": tree,
         }
 
     try:
@@ -353,6 +534,14 @@ def merge_pr(
             "merged": False,
             "retry": False,
         }
+    response_sha = response.get("sha")
+    if not isinstance(response_sha, str) or not SHA1.fullmatch(response_sha):
+        return {
+            "command": "merge",
+            "status": "terminal_verification_failed",
+            "merged": None,
+            "retry": False,
+        }
     try:
         terminal = ports.terminal()
     except (UnknownCompletion, OSError, TimeoutError, ValueError) as exc:
@@ -363,12 +552,23 @@ def merge_pr(
             "error": type(exc).__name__,
             "retry": False,
         }
+    except (AttributeError, KeyError, TypeError):
+        return {
+            "command": "merge",
+            "status": "terminal_verification_failed",
+            "merged": None,
+            "retry": False,
+        }
     if (
-        terminal.get("state") != "MERGED"
+        not isinstance(terminal, dict)
+        or terminal.get("state") != "MERGED"
         or terminal.get("head_sha") != head
-        or terminal.get("head_tree_sha") != tree
+        or terminal.get("head_tree_sha") != head_tree
         or not isinstance(terminal.get("merge_commit_sha"), str)
         or not SHA1.fullmatch(terminal["merge_commit_sha"])
+        or terminal.get("merge_commit_sha") != response_sha
+        or terminal.get("merge_commit_tree_sha") != tree
+        or terminal.get("parent_shas") != [base]
     ):
         return {
             "command": "merge",
@@ -381,7 +581,8 @@ def merge_pr(
         "status": "merged_verified",
         "merged": True,
         "head_sha": head,
-        "head_tree_sha": tree,
+        "head_tree_sha": head_tree,
+        "merge_tree_sha": tree,
         "merge_commit_sha": terminal["merge_commit_sha"],
         "review_reference": review_reference,
         "operator_assertion": "operator-asserted; not independently authenticated",
