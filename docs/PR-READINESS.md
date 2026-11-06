@@ -65,6 +65,13 @@ separate issue #75 gates.
 
 ## Explicit operator-asserted merge
 
+`python3 -m codex_devtools pr check-applicability --repo OWNER/REPO --number N --expected-head SHA --expected-base SHA --expected-head-tree SHA --body-sha256 SHA256 --expected-policy-sha256 SHA256 --expected-evidence-sha256 SHA256 --expected-plan-sha256 SHA256`
+is a read-only evidence collector for the v2 receipt. It returns a candidate
+observation and its canonical SHA-256 only when the exact pinned PR and empty
+required-check evidence are observed. The report sets
+`coordinator_receipt_required: true`, `merge_authorized: false`, and
+`ci_passed: false`; it does not change `review-ready` or authorize a merge.
+
 `python3 -m codex_devtools pr merge --repo OWNER/REPO --number N --policy policy.json --evidence evidence.json --plan plan.md --expected-head SHA --expected-base SHA --expected-head-tree SHA --expected-tree SHA --body-sha256 SHA256 --expected-policy-sha256 SHA256 --expected-evidence-sha256 SHA256 --expected-plan-sha256 SHA256 [--review-reference REVIEW_URL | --decision-reference COMMENT_URL --decision-sha256 SHA256] --operator-assertion 'I am the designated coordinator and explicitly authorize this exact-head merge.'`
 is a separate explicit mutation command. It freshly runs `review-ready`,
 requires every blocker except the intentionally unknown coordinator identity
@@ -81,6 +88,39 @@ including authentication or username claims, are rejected. The comment is
 re-read and re-hashed at the mutation boundary. Neither comment content nor
 GitHub username independently authenticates coordinator identity.
 
+The v1 receipt above retains its original closed field set and requires passing
+required CI. A separate closed schema,
+`codex-devtools-pr-coordinator-decision-v2`, adds only the coordinator-asserted
+`required_checks_disposition: "not_applicable"`, a bounded reason, exact
+`target_branch` and `target_sha`, and
+`applicability_observation_sha256`. It is accepted only with the decision
+comment path; formal review references cannot select N/A. The canonical
+`codex-devtools-required-check-applicability-v1` observation records endpoint
+names, API version, HTTP status and raw response body hashes, and is bound by
+the v2 comment alongside repository, PR head/base/source and merge trees, body,
+and policy/evidence/plan pins.
+
+The N/A observation must show the exact target branch at the pinned target SHA
+with `protected: false`, a structured valid-empty `gh pr checks --required`
+result, zero configured workflows, complete empty check-run and individual
+status-context reads for the exact PR head, and an aggregate status with no
+contexts. The aggregate `pending` value is not a pass. The three documented
+branch-protection/rules endpoints count as `feature_unsupported` only for a
+private repository and the exact GitHub upgrade response; generic 403/404,
+network or parse errors, missing fields, truncation, duplicates and conflicting
+data remain unknown. Any nonempty check or status row, regardless of outcome,
+blocks N/A. Branch names are URL-encoded for endpoint reads.
+
+The v2 comment and applicability observations are fetched and hashed again
+immediately before the single head-matched merge request. The guarded merge
+receipt labels the required-check gate `not_applicable` and includes the
+decision reference, comment-body SHA-256, observation SHA-256 and reason. It
+never synthesizes a passing check or waives another gate. The ordinary
+`review-ready` command is unchanged: an empty required-check response remains
+unknown and `ready: false`. This extension is a coordinator-reviewed code path,
+not evidence that a future live pilot is applicable; no actual merge is part of
+its tests.
+
 `--expected-head-tree` pins the PR source tree; `--expected-tree` pins the
 reviewed integrated merge result tree. Readiness is run again after initial PR
 and review/decision reads; declaration hashes must still match, then the PR and
@@ -95,11 +135,11 @@ GitHub's merge endpoint supports an exact head SHA precondition, but not an
 atomic base SHA precondition. Verification of the merge commit parent confirms
 which base was used after completion; no cleanup follows unknown, rejected, or
 unverified completion. The strict `review-ready` report still returns unknown
-for an empty required-check response. Live use of this adapter remains blocked
-until required-check applicability can be established; coordinator-selected
-remote CI is not applicable to this source-only implementation PR because this
-repository has no configured workflows/checks/branch protection. That selection
-does not claim CI passed or relax `review-ready`.
+for an empty required-check response. The v2 N/A extension is limited to its
+exact private-repository observation and explicit decision receipt. The
+source-only implementation PR's CI selection as N/A does not claim CI passed
+or relax `review-ready`; it also does not complete issue #75 or establish live
+pilot applicability.
 
 `--dry-run` performs these reads and validations without making a mutation.
 Only an explicit boolean `merged: false` is a definite rejection. Non-object

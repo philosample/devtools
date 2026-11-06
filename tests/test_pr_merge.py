@@ -4,10 +4,11 @@ import contextlib
 import hashlib
 import io
 import json
+import subprocess
 import unittest
 from unittest.mock import patch
 
-from codex_devtools import pr_merge
+from codex_devtools import check_applicability, pr_merge
 from codex_devtools.cli import main
 
 HEAD = "1" * 40
@@ -43,6 +44,99 @@ def decision_body(*, head=HEAD, extra=None):
     return json.dumps(receipt, separators=(",", ":"), sort_keys=True)
 
 
+def na_observation(*, target_branch="main"):
+    def endpoint(name, **fields):
+        return {
+            "endpoint": name,
+            "api_version": check_applicability.API_VERSION,
+            "status_code": 200,
+            "body_sha256": "d" * 64,
+            **fields,
+        }
+
+    branch_path = target_branch.replace("/", "%2F")
+    return {
+        "schema": check_applicability.SCHEMA,
+        "repository": "philosample/devtools",
+        "target_branch": target_branch,
+        "target_sha": BASE,
+        "head_sha": HEAD,
+        "repository_private": True,
+        "repository_owner_type": "User",
+        "repository_observation": endpoint("repos/philosample/devtools"),
+        "branch": endpoint(f"branches/{branch_path}", sha=BASE, protected=False),
+        "required_checks": {
+            "command": "gh pr checks --required --json",
+            "exit_code": 0,
+            "body_sha256": "e" * 64,
+            "complete": True,
+            "rows": [],
+        },
+        "workflows": endpoint(
+            "actions/workflows?per_page=100",
+            total_count=0,
+            rows=[],
+            complete=True,
+            truncated=False,
+        ),
+        "check_runs": endpoint(
+            f"commits/{HEAD}/check-runs?per_page=100",
+            complete=True,
+            truncated=False,
+            rows=[],
+        ),
+        "statuses": endpoint(
+            f"commits/{HEAD}/statuses?per_page=100",
+            complete=True,
+            truncated=False,
+            rows=[],
+        ),
+        "aggregate_status": endpoint(
+            f"commits/{HEAD}/status", state="pending", contexts=[]
+        ),
+        "unsupported_endpoints": [
+            {
+                "name": name,
+                "endpoint": endpoint_path.format(branch=branch_path),
+                "api_version": check_applicability.API_VERSION,
+                "status_code": 403,
+                "body_sha256": "f" * 64,
+                "message": check_applicability.UPGRADE_MESSAGE,
+                "classification": "feature_unsupported",
+            }
+            for name, endpoint_path in check_applicability.UNSUPPORTED_ENDPOINTS.items()
+        ],
+    }
+
+
+def na_decision_body(*, target_branch="main", observation=None, extra=None):
+    observation = observation or na_observation(target_branch=target_branch)
+    receipt = {
+        "schema": pr_merge.DECISION_SCHEMA_V2,
+        "repository": "philosample/devtools",
+        "pr_number": 75,
+        "head_sha": HEAD,
+        "base_sha": BASE,
+        "head_tree_sha": HEAD_TREE,
+        "merge_tree_sha": TREE,
+        "body_sha256": BODY_HASH,
+        "policy_sha256": "a" * 64,
+        "evidence_sha256": "b" * 64,
+        "plan_sha256": "c" * 64,
+        "operator_asserted": True,
+        "target_branch": target_branch,
+        "target_sha": BASE,
+        "required_checks_disposition": "not_applicable",
+        "applicability_observation_sha256": check_applicability.canonical_hash(
+            observation
+        ),
+        "applicability_reason": "Coordinator reviewed the empty required-check evidence.",
+    }
+    if extra:
+        receipt.update(extra)
+    return json.dumps(receipt, separators=(",", ":"), sort_keys=True)
+
+
 DECISION_BODY = decision_body()
 DECISION_HASH = hashlib.sha256(DECISION_BODY.encode()).hexdigest()
 
@@ -69,6 +163,25 @@ def ready_report():
     }
 
 
+def ready_report_checks_unknown():
+    report = ready_report()
+    reason = "no required checks were returned; absence is ambiguous"
+    report["github_required_checks"] = {
+        "status": "unknown",
+        "complete": False,
+        "checks": [],
+        "reason": reason,
+    }
+    report["blockers"].append(
+        {
+            "gate": "github_required_checks",
+            "status": "unknown",
+            "reason": reason,
+        }
+    )
+    return report
+
+
 class FakePorts:
     def __init__(self):
         self.snapshot_row = {
@@ -76,6 +189,7 @@ class FakePorts:
             "state": "OPEN",
             "head_sha": HEAD,
             "base_sha": BASE,
+            "base_ref": "main",
             "head_tree_sha": HEAD_TREE,
             "body_sha256": BODY_HASH,
         }
@@ -92,7 +206,11 @@ class FakePorts:
         }
         self.decision_body = DECISION_BODY
         self.decision_bodies: list[str] | None = None
+        self.applicability_observation = na_observation()
+        self.applicability_observations: list[dict] | None = None
+        self.applicability_calls = 0
         self.snapshot_calls = 0
+        self.snapshot_rows: list[dict] | None = None
         self.review_calls = 0
         self.decision_calls = 0
         self.merge_calls: list[str] = []
@@ -103,7 +221,10 @@ class FakePorts:
         self.raise_terminal_identity = False
 
     def snapshot(self):
+        index = self.snapshot_calls
         self.snapshot_calls += 1
+        if self.snapshot_rows is not None:
+            return self.snapshot_rows[index]
         return self.snapshot_row
 
     def review(self, reference):
@@ -133,6 +254,15 @@ class FakePorts:
             "issue_number": 75,
             "body": body,
         }
+
+    def check_applicability(self, *, target_branch, target_sha, head_sha):
+        index = self.applicability_calls
+        self.applicability_calls += 1
+        if self.applicability_observations is not None:
+            observation = self.applicability_observations[index]
+        else:
+            observation = self.applicability_observation
+        return observation
 
     def terminal(self):
         self.terminal_calls += 1
@@ -222,7 +352,7 @@ class PRMergeTests(unittest.TestCase):
         ):
             self.invoke(ports, readiness=lambda: report)
         self.assertEqual(ports.merge_calls, [])
-        self.assertEqual(ports.snapshot_calls, 0)
+        self.assertEqual(ports.snapshot_calls, 1)
 
     def test_declaration_pin_drift_between_fresh_readiness_calls_never_merges(self):
         first = ready_report()
@@ -457,10 +587,109 @@ class PRMergeTests(unittest.TestCase):
             pr_merge.GHMergePorts("philosample/devtools", 75).terminal()
         self.assertEqual(api.call_count, 3)
 
+    def test_github_applicability_adapter_builds_slash_branch_observation(self):
+        def fake_run(command, **_kwargs):
+            if command[:3] == ["gh", "pr", "checks"]:
+                return subprocess.CompletedProcess(command, 0, b"[]\n", b"")
+            endpoint = command[-1]
+            if endpoint == "repos/philosample/devtools":
+                status, payload = 200, {"private": True, "owner": {"type": "User"}}
+            elif endpoint == "repos/philosample/devtools/branches/release%2F2026":
+                status, payload = (
+                    200,
+                    {
+                        "commit": {"sha": BASE},
+                        "protected": False,
+                    },
+                )
+            elif endpoint.endswith("/actions/workflows?per_page=100"):
+                status, payload = 200, {"total_count": 0, "workflows": []}
+            elif endpoint.endswith("/check-runs?per_page=100"):
+                status, payload = 200, {"total_count": 0, "check_runs": []}
+            elif endpoint.endswith("/statuses?per_page=100"):
+                status, payload = 200, []
+            elif endpoint.endswith("/status"):
+                status, payload = 200, {"state": "pending", "statuses": []}
+            else:
+                status, payload = 403, {"message": check_applicability.UPGRADE_MESSAGE}
+            output = (
+                f"HTTP/2.0 {status} {'OK' if status == 200 else 'Forbidden'}\n"
+                "Content-Type: application/json\n\n" + json.dumps(payload)
+            ).encode()
+            return subprocess.CompletedProcess(
+                command, 0 if status == 200 else 1, output, b""
+            )
+
+        ports = pr_merge.GHMergePorts("philosample/devtools", 75)
+        with patch("codex_devtools.pr_merge.subprocess.run", side_effect=fake_run):
+            observation = ports.check_applicability(
+                target_branch="release/2026", target_sha=BASE, head_sha=HEAD
+            )
+        self.assertEqual(observation["branch"]["endpoint"], "branches/release%2F2026")
+        self.assertEqual(
+            check_applicability.validate_na_observation(
+                observation,
+                repository="philosample/devtools",
+                target_branch="release/2026",
+                target_sha=BASE,
+                head_sha=HEAD,
+            ),
+            check_applicability.canonical_hash(observation),
+        )
+
+    def test_github_applicability_adapter_does_not_classify_generic_403(self):
+        def fake_run(command, **_kwargs):
+            if command[:3] == ["gh", "pr", "checks"]:
+                return subprocess.CompletedProcess(command, 0, b"[]\n", b"")
+            endpoint = command[-1]
+            if endpoint == "repos/philosample/devtools":
+                status, payload = 200, {"private": True, "owner": {"type": "User"}}
+            elif endpoint == "repos/philosample/devtools/branches/main":
+                status, payload = 200, {"commit": {"sha": BASE}, "protected": False}
+            elif endpoint.endswith("/actions/workflows?per_page=100"):
+                status, payload = 200, {"total_count": 0, "workflows": []}
+            elif endpoint.endswith("/check-runs?per_page=100"):
+                status, payload = 200, {"total_count": 0, "check_runs": []}
+            elif endpoint.endswith("/statuses?per_page=100"):
+                status, payload = 200, []
+            elif endpoint.endswith("/status"):
+                status, payload = 200, {"state": "pending", "statuses": []}
+            elif endpoint.endswith("/branches/main/protection"):
+                status, payload = (
+                    403,
+                    {"message": "Resource not accessible by integration"},
+                )
+            else:
+                status, payload = 403, {"message": check_applicability.UPGRADE_MESSAGE}
+            output = (
+                f"HTTP/2.0 {status} {'OK' if status == 200 else 'Forbidden'}\n"
+                "Content-Type: application/json\n\n" + json.dumps(payload)
+            ).encode()
+            return subprocess.CompletedProcess(
+                command, 0 if status == 200 else 1, output, b""
+            )
+
+        ports = pr_merge.GHMergePorts("philosample/devtools", 75)
+        with patch("codex_devtools.pr_merge.subprocess.run", side_effect=fake_run):
+            observation = ports.check_applicability(
+                target_branch="main", target_sha=BASE, head_sha=HEAD
+            )
+        with self.assertRaisesRegex(ValueError, "exact private-repository upgrade"):
+            check_applicability.validate_na_observation(
+                observation,
+                repository="philosample/devtools",
+                target_branch="main",
+                target_sha=BASE,
+                head_sha=HEAD,
+            )
+
     def invoke_decision(self, ports, **updates):
         updates.setdefault("review_reference", None)
         updates.setdefault("decision_reference", DECISION_REF)
-        updates.setdefault("decision_sha256", DECISION_HASH)
+        updates.setdefault(
+            "decision_sha256",
+            hashlib.sha256(ports.decision_body.encode()).hexdigest(),
+        )
         return self.invoke(ports, **updates)
 
     def test_structured_decision_comment_is_pinned_and_re_read_before_merge(self):
@@ -472,6 +701,351 @@ class PRMergeTests(unittest.TestCase):
         self.assertEqual(ports.merge_calls, [HEAD])
         self.assertEqual(result["decision_reference"], DECISION_REF)
         self.assertEqual(result["decision_sha256"], DECISION_HASH)
+
+    def test_v2_na_receipt_allows_only_required_check_gate_and_reports_na(self):
+        ports = FakePorts()
+        ports.decision_body = na_decision_body()
+        result = self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(result["status"], "merged_verified")
+        self.assertEqual(result["required_checks_disposition"], "not_applicable")
+        self.assertEqual(
+            result["applicability_observation_sha256"],
+            check_applicability.canonical_hash(na_observation()),
+        )
+        self.assertEqual(ports.merge_calls, [HEAD])
+        self.assertEqual(ports.applicability_calls, 2)
+        self.assertEqual(ports.decision_calls, 2)
+
+    def test_review_ready_check_unknown_stays_blocked_without_v2_na(self):
+        ports = FakePorts()
+        with self.assertRaisesRegex(ValueError, "required gates"):
+            self.invoke(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(ports.merge_calls, [])
+        self.assertEqual(ports.applicability_calls, 0)
+
+    def test_v2_receipt_binds_slash_branch_and_encoded_endpoint(self):
+        ports = FakePorts()
+        ports.snapshot_row["base_ref"] = "release/2026"
+        ports.applicability_observation = na_observation(target_branch="release/2026")
+        ports.decision_body = na_decision_body(target_branch="release/2026")
+        result = self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(result["status"], "merged_verified")
+        self.assertEqual(result["required_checks_disposition"], "not_applicable")
+
+    def test_changed_or_malformed_applicability_evidence_blocks_mutation(self):
+        mutations = (
+            (
+                "branch SHA",
+                lambda observation: observation["branch"].update(sha="f" * 40),
+            ),
+            (
+                "protected",
+                lambda observation: observation["branch"].update(protected=True),
+            ),
+            (
+                "generic 403",
+                lambda observation: observation["unsupported_endpoints"][0].update(
+                    message="Resource not accessible", classification="unknown"
+                ),
+            ),
+            (
+                "unexpected 404",
+                lambda observation: observation["unsupported_endpoints"][1].update(
+                    status_code=404, classification="unknown"
+                ),
+            ),
+            (
+                "nonempty check runs",
+                lambda observation: observation["check_runs"].update(
+                    rows=[{"status": "success"}]
+                ),
+            ),
+            (
+                "nonempty status contexts",
+                lambda observation: observation["statuses"].update(
+                    rows=[{"state": "success"}]
+                ),
+            ),
+            (
+                "truncated check runs",
+                lambda observation: observation["check_runs"].update(
+                    complete=False, truncated=True
+                ),
+            ),
+            (
+                "workflow present",
+                lambda observation: observation["workflows"].update(
+                    total_count=1, rows=[{"id": 1}]
+                ),
+            ),
+            (
+                "unknown repository visibility",
+                lambda observation: observation.update(repository_private=None),
+            ),
+            (
+                "missing protected field",
+                lambda observation: observation["branch"].pop("protected"),
+            ),
+            (
+                "missing aggregate endpoint",
+                lambda observation: observation.pop("aggregate_status"),
+            ),
+            (
+                "duplicate unsupported endpoint",
+                lambda observation: observation["unsupported_endpoints"].__setitem__(
+                    1, observation["unsupported_endpoints"][0].copy()
+                ),
+            ),
+            (
+                "truncated statuses",
+                lambda observation: observation["statuses"].update(
+                    complete=False, truncated=True
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                observation = na_observation()
+                mutate(observation)
+                ports = FakePorts()
+                ports.applicability_observation = observation
+                ports.decision_body = na_decision_body(observation=observation)
+                with self.assertRaises(ValueError):
+                    self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+                self.assertEqual(ports.merge_calls, [])
+
+    def test_any_nonempty_check_or_status_state_blocks_na(self):
+        for field, state_key, states in (
+            (
+                "check_runs",
+                "conclusion",
+                ("success", "failure", "pending", "cancelled", "neutral", "skipped"),
+            ),
+            (
+                "statuses",
+                "state",
+                (
+                    "success",
+                    "failure",
+                    "pending",
+                    "error",
+                    "cancelled",
+                    "neutral",
+                    "skipped",
+                ),
+            ),
+        ):
+            for state in states:
+                with self.subTest(field=field, state=state):
+                    observation = na_observation()
+                    observation[field]["rows"] = [{state_key: state}]
+                    ports = FakePorts()
+                    ports.applicability_observation = observation
+                    ports.decision_body = na_decision_body(observation=observation)
+                    with self.assertRaises(ValueError):
+                        self.invoke_decision(
+                            ports, readiness=ready_report_checks_unknown
+                        )
+                    self.assertEqual(ports.merge_calls, [])
+
+    def test_stale_v2_observation_hash_and_network_errors_block_before_merge(self):
+        ports = FakePorts()
+        ports.decision_body = na_decision_body(
+            extra={"applicability_observation_sha256": "0" * 64}
+        )
+        with self.assertRaisesRegex(ValueError, "does not bind"):
+            self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(ports.merge_calls, [])
+        self.assertEqual(ports.applicability_calls, 1)
+
+        ports = FakePorts()
+        ports.decision_body = na_decision_body()
+        ports.decision_bodies = [ports.decision_body, ports.decision_body + " "]
+        with self.assertRaisesRegex(ValueError, "content hash changed"):
+            self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(ports.merge_calls, [])
+
+        class UnavailablePorts(FakePorts):
+            def check_applicability(self, *, target_branch, target_sha, head_sha):
+                self.applicability_calls += 1
+                raise OSError("network unavailable")
+
+        ports = UnavailablePorts()
+        ports.decision_body = na_decision_body()
+        with self.assertRaisesRegex(OSError, "network unavailable"):
+            self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(ports.merge_calls, [])
+
+    def test_required_check_cli_needs_a_structured_empty_result(self):
+        with (
+            patch(
+                "codex_devtools.pr_merge.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("gh", 20),
+            ),
+            self.assertRaisesRegex(ValueError, "unavailable"),
+        ):
+            pr_merge.GHMergePorts._required_check_observation(
+                "philosample/devtools", 75
+            )
+        for stdout, returncode in ((b"[]\n", 4), (b"no checks reported", 1)):
+            with self.subTest(stdout=stdout, returncode=returncode):
+                completed = subprocess.CompletedProcess([], returncode, stdout, "")
+                with (
+                    patch(
+                        "codex_devtools.pr_merge.subprocess.run", return_value=completed
+                    ),
+                    self.assertRaises(ValueError),
+                ):
+                    pr_merge.GHMergePorts._required_check_observation(
+                        "philosample/devtools", 75
+                    )
+
+        completed = subprocess.CompletedProcess([], 0, b"[{}]", b"")
+        with patch("codex_devtools.pr_merge.subprocess.run", return_value=completed):
+            nonempty = pr_merge.GHMergePorts._required_check_observation(
+                "philosample/devtools", 75
+            )
+        self.assertEqual(nonempty["rows"], [{}])
+
+        completed = subprocess.CompletedProcess([], 1, b"[]\n", b"")
+        with patch("codex_devtools.pr_merge.subprocess.run", return_value=completed):
+            required = pr_merge.GHMergePorts._required_check_observation(
+                "philosample/devtools", 75
+            )
+        self.assertEqual(required["rows"], [])
+        self.assertTrue(required["complete"])
+
+    def test_v2_final_observation_drift_and_comment_change_block_mutation(self):
+        observation = na_observation()
+        changed = na_observation()
+        changed["branch"]["body_sha256"] = "a" * 64
+        ports = FakePorts()
+        ports.decision_body = na_decision_body(observation=observation)
+        ports.applicability_observations = [observation, changed]
+        with self.assertRaisesRegex(ValueError, "does not bind"):
+            self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(ports.merge_calls, [])
+        self.assertEqual(ports.applicability_calls, 2)
+
+    def test_v2_target_branch_pin_drift_at_mutation_boundary_blocks(self):
+        ports = FakePorts()
+        first = ports.snapshot_row.copy()
+        final = ports.snapshot_row.copy()
+        final["base_ref"] = "release/changed"
+        ports.snapshot_rows = [first, final]
+        ports.decision_body = na_decision_body()
+        with self.assertRaisesRegex(ValueError, "target branch changed"):
+            self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(ports.merge_calls, [])
+        self.assertEqual(ports.snapshot_calls, 2)
+        self.assertEqual(ports.applicability_calls, 1)
+
+    def test_v2_dry_run_and_cli_integration_keep_mutation_explicit(self):
+        ports = FakePorts()
+        ports.decision_body = na_decision_body()
+        result = self.invoke_decision(
+            ports, readiness=ready_report_checks_unknown, dry_run=True
+        )
+        self.assertEqual(result["status"], "dry_run_ready")
+        self.assertEqual(result["required_checks_disposition"], "not_applicable")
+        self.assertEqual(ports.merge_calls, [])
+
+        ports = FakePorts()
+        ports.decision_body = na_decision_body()
+        output = io.StringIO()
+        with (
+            patch.object(pr_merge, "GHMergePorts", return_value=ports),
+            contextlib.redirect_stdout(output),
+            patch(
+                "codex_devtools.pr_readiness.review_ready",
+                return_value=(ready_report_checks_unknown(), 1),
+            ),
+        ):
+            code = main(
+                [
+                    "pr",
+                    "merge",
+                    "--repo",
+                    "philosample/devtools",
+                    "--number",
+                    "75",
+                    "--policy",
+                    "policy.json",
+                    "--evidence",
+                    "evidence.json",
+                    "--plan",
+                    "plan.md",
+                    "--expected-head",
+                    HEAD,
+                    "--expected-base",
+                    BASE,
+                    "--expected-head-tree",
+                    HEAD_TREE,
+                    "--expected-tree",
+                    TREE,
+                    "--body-sha256",
+                    BODY_HASH,
+                    "--expected-policy-sha256",
+                    "a" * 64,
+                    "--expected-evidence-sha256",
+                    "b" * 64,
+                    "--expected-plan-sha256",
+                    "c" * 64,
+                    "--decision-reference",
+                    DECISION_REF,
+                    "--decision-sha256",
+                    hashlib.sha256(ports.decision_body.encode()).hexdigest(),
+                    "--operator-assertion",
+                    ASSERTION,
+                ]
+            )
+        self.assertEqual(code, 0)
+        output_row = json.loads(output.getvalue())
+        self.assertEqual(output_row["required_checks_disposition"], "not_applicable")
+        self.assertEqual(ports.merge_calls, [HEAD])
+
+    def test_read_only_applicability_cli_emits_candidate_hash_only(self):
+        ports = FakePorts()
+        output = io.StringIO()
+        with (
+            patch.object(pr_merge, "GHMergePorts", return_value=ports),
+            contextlib.redirect_stdout(output),
+        ):
+            code = main(
+                [
+                    "pr",
+                    "check-applicability",
+                    "--repo",
+                    "philosample/devtools",
+                    "--number",
+                    "75",
+                    "--expected-head",
+                    HEAD,
+                    "--expected-base",
+                    BASE,
+                    "--expected-head-tree",
+                    HEAD_TREE,
+                    "--body-sha256",
+                    BODY_HASH,
+                    "--expected-policy-sha256",
+                    "a" * 64,
+                    "--expected-evidence-sha256",
+                    "b" * 64,
+                    "--expected-plan-sha256",
+                    "c" * 64,
+                ]
+            )
+        self.assertEqual(code, 0)
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["status"], "candidate_evidence")
+        self.assertTrue(report["coordinator_receipt_required"])
+        self.assertFalse(report["merge_authorized"])
+        self.assertFalse(report["ci_passed"])
+        self.assertEqual(
+            report["observation_sha256"],
+            check_applicability.canonical_hash(na_observation()),
+        )
+        self.assertEqual(ports.merge_calls, [])
 
     def test_changed_decision_comment_hash_blocks_before_merge(self):
         ports = FakePorts()

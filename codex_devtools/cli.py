@@ -457,15 +457,30 @@ def build_parser() -> argparse.ArgumentParser:
     for action, help_text in (
         ("plan-check", "validate local policy, evidence, and plan declarations"),
         ("review-ready", "compare declarations with a read-only GitHub PR snapshot"),
+        (
+            "check-applicability",
+            "collect candidate required-check N/A evidence (read-only)",
+        ),
         ("merge", "explicitly merge one reviewed exact head after fresh gate checks"),
     ):
         command = pr_sub.add_parser(action, help=help_text)
-        command.add_argument("--policy", required=True, type=Path)
-        command.add_argument("--evidence", required=True, type=Path)
-        command.add_argument("--plan", required=True, type=Path)
+        if action != "check-applicability":
+            command.add_argument("--policy", required=True, type=Path)
+            command.add_argument("--evidence", required=True, type=Path)
+            command.add_argument("--plan", required=True, type=Path)
         if action in ("review-ready", "merge"):
             command.add_argument("--repo", required=True)
             command.add_argument("--number", required=True, type=int)
+        if action == "check-applicability":
+            command.add_argument("--repo", required=True)
+            command.add_argument("--number", required=True, type=int)
+            command.add_argument("--expected-head", required=True)
+            command.add_argument("--expected-base", required=True)
+            command.add_argument("--expected-head-tree", required=True)
+            command.add_argument("--body-sha256", required=True)
+            command.add_argument("--expected-policy-sha256", required=True)
+            command.add_argument("--expected-evidence-sha256", required=True)
+            command.add_argument("--expected-plan-sha256", required=True)
         if action == "merge":
             command.add_argument("--expected-head", required=True)
             command.add_argument("--expected-base", required=True)
@@ -538,6 +553,20 @@ def main(argv: list[str] | None = None) -> int:
                     args.evidence,
                     args.plan,
                 )
+            elif args.action == "check-applicability":
+                result = pr_merge.check_applicability_report(
+                    repository=args.repo,
+                    number=args.number,
+                    expected_head=args.expected_head,
+                    expected_base=args.expected_base,
+                    expected_head_tree=args.expected_head_tree,
+                    body_sha256=args.body_sha256,
+                    expected_policy_sha256=args.expected_policy_sha256,
+                    expected_evidence_sha256=args.expected_evidence_sha256,
+                    expected_plan_sha256=args.expected_plan_sha256,
+                    ports=pr_merge.GHMergePorts(args.repo, args.number),
+                )
+                code = 0
             else:
                 result = pr_merge.merge_pr(
                     repository=args.repo,

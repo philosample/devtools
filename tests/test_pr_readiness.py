@@ -773,6 +773,7 @@ class PRReadinessTests(unittest.TestCase):
                     self.plan,
                 )
                 self.assertEqual(report["github_required_checks"]["status"], "unknown")
+                self.assertIs(report["ready"], False)
                 gate = next(
                     item
                     for item in report["unverified_gates"]
