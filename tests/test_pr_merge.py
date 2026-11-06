@@ -66,7 +66,15 @@ def na_observation(*, target_branch="main"):
         "head_ref": HEAD_REF,
         "repository_private": True,
         "repository_owner_type": "User",
-        "repository_observation": endpoint("repos/philosample/devtools"),
+        "repository_observation": {
+            "endpoint": "repos/philosample/devtools",
+            "api_version": check_applicability.API_VERSION,
+            "status_code": 200,
+            "raw_body_sha256": "d" * 64,
+            "full_name": "philosample/devtools",
+            "private": True,
+            "owner_type": "User",
+        },
         "branch": endpoint(f"branches/{branch_path}", sha=BASE, protected=False),
         "required_checks": {
             "command": "gh pr checks --required --json",
@@ -629,7 +637,11 @@ class PRMergeTests(unittest.TestCase):
         self.assertEqual(api.call_count, 3)
 
     def test_api_normalizes_completed_process_bytes_and_text(self):
-        payload = {"private": True, "owner": {"type": "User"}}
+        payload = {
+            "full_name": "philosample/devtools",
+            "private": True,
+            "owner": {"type": "User"},
+        }
         for stdout in (json.dumps(payload).encode(), json.dumps(payload)):
             with self.subTest(stdout_type=type(stdout).__name__):
                 completed = subprocess.CompletedProcess([], 0, stdout, b"")
@@ -783,7 +795,14 @@ class PRMergeTests(unittest.TestCase):
                         command, 0, raw if calls % 2 else raw.decode(), b""
                     )
                 if endpoint == "repos/philosample/devtools":
-                    status, payload = 200, {"private": True, "owner": {"type": "User"}}
+                    status, payload = (
+                        200,
+                        {
+                            "full_name": "philosample/devtools",
+                            "private": True,
+                            "owner": {"type": "User"},
+                        },
+                    )
                 elif endpoint == "repos/philosample/devtools/branches/main":
                     status, payload = 200, {"commit": {"sha": BASE}, "protected": False}
                 elif endpoint.endswith("/actions/workflows?per_page=100"):
@@ -886,7 +905,14 @@ class PRMergeTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, b"[]\n", b"")
             endpoint = command[-1]
             if endpoint == "repos/philosample/devtools":
-                status, payload = 200, {"private": True, "owner": {"type": "User"}}
+                status, payload = (
+                    200,
+                    {
+                        "full_name": "philosample/devtools",
+                        "private": True,
+                        "owner": {"type": "User"},
+                    },
+                )
             elif endpoint == "repos/philosample/devtools/branches/release%2F2026":
                 status, payload = (
                     200,
@@ -940,7 +966,14 @@ class PRMergeTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, b"[]\n", b"")
             endpoint = command[-1]
             if endpoint == "repos/philosample/devtools":
-                status, payload = 200, {"private": True, "owner": {"type": "User"}}
+                status, payload = (
+                    200,
+                    {
+                        "full_name": "philosample/devtools",
+                        "private": True,
+                        "owner": {"type": "User"},
+                    },
+                )
             elif endpoint == "repos/philosample/devtools/branches/main":
                 status, payload = 200, {"commit": {"sha": BASE}, "protected": False}
             elif endpoint.endswith("/actions/workflows?per_page=100"):
@@ -1016,6 +1049,104 @@ class PRMergeTests(unittest.TestCase):
         self.assertEqual(ports.merge_calls, [HEAD])
         self.assertEqual(ports.applicability_calls, 2)
         self.assertEqual(ports.decision_calls, 2)
+
+    def test_repository_raw_metadata_hash_is_provenance_not_semantic_pin(self):
+        repository_reads = 0
+
+        def fake_run(command, **_kwargs):
+            nonlocal repository_reads
+            if command[:3] == ["gh", "pr", "checks"]:
+                return subprocess.CompletedProcess(command, 0, b"[]\n", b"")
+            endpoint = command[-1]
+            if endpoint == "repos/philosample/devtools":
+                repository_reads += 1
+                payload = {
+                    "full_name": "philosample/devtools",
+                    "private": True,
+                    "owner": {"type": "User"},
+                    "description": f"mutable metadata revision {repository_reads}",
+                }
+                return completed_http(command, 200, payload)
+            if endpoint == "repos/philosample/devtools/branches/main":
+                return completed_http(
+                    command, 200, {"commit": {"sha": BASE}, "protected": False}
+                )
+            if endpoint.endswith("/actions/workflows?per_page=100"):
+                return completed_http(command, 200, {"total_count": 0, "workflows": []})
+            if endpoint.endswith("/check-runs?per_page=100"):
+                return completed_http(
+                    command, 200, {"total_count": 0, "check_runs": []}
+                )
+            if endpoint.endswith("/statuses?per_page=100"):
+                return completed_http(command, 200, [])
+            if endpoint.endswith("/status"):
+                return completed_http(
+                    command, 200, {"state": "pending", "statuses": []}
+                )
+            return completed_http(
+                command, 403, {"message": check_applicability.UPGRADE_MESSAGE}
+            )
+
+        collector = pr_merge.GHMergePorts("philosample/devtools", 75)
+        with patch("codex_devtools.pr_merge.subprocess.run", side_effect=fake_run):
+            observed = collector.check_applicability(
+                target_branch="main",
+                target_sha=BASE,
+                head_sha=HEAD,
+                head_ref=HEAD_REF,
+            )
+            after_decision = collector.check_applicability(
+                target_branch="main",
+                target_sha=BASE,
+                head_sha=HEAD,
+                head_ref=HEAD_REF,
+            )
+        self.assertNotEqual(
+            observed["repository_observation"]["raw_body_sha256"],
+            after_decision["repository_observation"]["raw_body_sha256"],
+        )
+        self.assertEqual(
+            check_applicability.canonical_hash(observed),
+            check_applicability.canonical_hash(after_decision),
+        )
+        ports = FakePorts()
+        ports.applicability_observations = [observed, after_decision]
+        ports.decision_body = na_decision_body(observation=observed)
+        result = self.invoke_decision(
+            ports, readiness=ready_report_checks_unknown, dry_run=True
+        )
+        self.assertEqual(result["status"], "dry_run_ready")
+        self.assertEqual(result["required_checks_disposition"], "not_applicable")
+        self.assertEqual(ports.applicability_calls, 2)
+        self.assertEqual(ports.merge_calls, [])
+
+    def test_legacy_v2_observation_keeps_its_original_exact_hash(self):
+        observation = na_observation()
+        observation["schema"] = check_applicability.LEGACY_SCHEMA
+        observation["repository_observation"] = {
+            "endpoint": "repos/philosample/devtools",
+            "api_version": check_applicability.API_VERSION,
+            "status_code": 200,
+            "body_sha256": "d" * 64,
+        }
+        original_hash = check_applicability.validate_na_observation(
+            observation,
+            repository="philosample/devtools",
+            target_branch="main",
+            target_sha=BASE,
+            head_sha=HEAD,
+            head_ref=HEAD_REF,
+        )
+        observation["repository_observation"]["body_sha256"] = "e" * 64
+        changed_hash = check_applicability.validate_na_observation(
+            observation,
+            repository="philosample/devtools",
+            target_branch="main",
+            target_sha=BASE,
+            head_sha=HEAD,
+            head_ref=HEAD_REF,
+        )
+        self.assertNotEqual(original_hash, changed_hash)
 
     def test_review_ready_check_unknown_stays_blocked_without_v2_na(self):
         ports = FakePorts()
@@ -1117,6 +1248,24 @@ class PRMergeTests(unittest.TestCase):
             (
                 "unknown repository visibility",
                 lambda observation: observation.update(repository_private=None),
+            ),
+            (
+                "wrong repository identity",
+                lambda observation: observation["repository_observation"].update(
+                    full_name="other/devtools"
+                ),
+            ),
+            (
+                "public repository metadata",
+                lambda observation: observation["repository_observation"].update(
+                    private=False
+                ),
+            ),
+            (
+                "organization owner metadata",
+                lambda observation: observation["repository_observation"].update(
+                    owner_type="Organization"
+                ),
             ),
             (
                 "missing protected field",
@@ -1416,7 +1565,11 @@ class PRMergeTests(unittest.TestCase):
 
         def api_payload(endpoint):
             if endpoint == "repos/philosample/devtools":
-                return 200, {"private": True, "owner": {"type": "User"}}
+                return 200, {
+                    "full_name": "philosample/devtools",
+                    "private": True,
+                    "owner": {"type": "User"},
+                }
             if endpoint == "repos/philosample/devtools/branches/main":
                 return 200, {"commit": {"sha": BASE}, "protected": False}
             if endpoint.endswith("/actions/workflows?per_page=100"):

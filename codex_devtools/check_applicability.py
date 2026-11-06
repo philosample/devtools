@@ -8,7 +8,8 @@ import re
 from typing import Any
 from urllib.parse import quote
 
-SCHEMA = "codex-devtools-required-check-applicability-v2"
+LEGACY_SCHEMA = "codex-devtools-required-check-applicability-v2"
+SCHEMA = "codex-devtools-required-check-applicability-v3"
 API_VERSION = "2022-11-28"
 UPGRADE_MESSAGE = (
     "Upgrade to GitHub Pro or make this repository public to enable this feature."
@@ -46,7 +47,18 @@ OBSERVATION_FIELDS = {
 
 
 def canonical_hash(value: Any) -> str:
-    """Hash canonical JSON, without accepting non-JSON Python values."""
+    """Hash stable v3 semantics or exact legacy JSON, rejecting non-JSON values."""
+    if isinstance(value, dict) and value.get("schema") == SCHEMA:
+        repository_observation = value.get("repository_observation")
+        if isinstance(repository_observation, dict):
+            value = {
+                **value,
+                "repository_observation": {
+                    key: item
+                    for key, item in repository_observation.items()
+                    if key != "raw_body_sha256"
+                },
+            }
     encoded = json.dumps(
         value,
         ensure_ascii=False,
@@ -90,8 +102,10 @@ def validate_na_observation(
     """Require a complete, exact, empty-check observation and return its hash."""
     if not isinstance(observation, dict) or set(observation) != OBSERVATION_FIELDS:
         raise ValueError("required-check applicability observation is malformed")
+    schema = observation["schema"]
     if (
-        observation["schema"] != SCHEMA
+        not isinstance(schema, str)
+        or schema not in {LEGACY_SCHEMA, SCHEMA}
         or observation["repository"] != repository
         or observation["target_branch"] != target_branch
         or observation["target_sha"] != target_sha
@@ -102,12 +116,42 @@ def validate_na_observation(
     ):
         raise ValueError("required-check applicability target or visibility differs")
 
-    _endpoint_row(
-        observation["repository_observation"],
-        endpoint=f"repos/{repository}",
-        status_code=200,
-        fields={"endpoint", "api_version", "status_code", "body_sha256"},
-    )
+    repository_observation = observation["repository_observation"]
+    if schema == SCHEMA:
+        fields = {
+            "endpoint",
+            "api_version",
+            "status_code",
+            "raw_body_sha256",
+            "full_name",
+            "private",
+            "owner_type",
+        }
+        if (
+            not isinstance(repository_observation, dict)
+            or set(repository_observation) != fields
+            or repository_observation.get("endpoint") != f"repos/{repository}"
+            or repository_observation.get("api_version") != API_VERSION
+            or repository_observation.get("status_code") != 200
+            or type(repository_observation.get("status_code")) is not int
+            or not isinstance(repository_observation.get("raw_body_sha256"), str)
+            or not SHA256.fullmatch(repository_observation["raw_body_sha256"])
+            or repository_observation.get("full_name") != repository
+            or repository_observation.get("private") is not True
+            or repository_observation.get("owner_type") != "User"
+            or repository_observation.get("private")
+            != observation["repository_private"]
+            or repository_observation.get("owner_type")
+            != observation["repository_owner_type"]
+        ):
+            raise ValueError("repository identity observation is malformed")
+    else:
+        _endpoint_row(
+            repository_observation,
+            endpoint=f"repos/{repository}",
+            status_code=200,
+            fields={"endpoint", "api_version", "status_code", "body_sha256"},
+        )
 
     branch = _endpoint_row(
         observation["branch"],

@@ -94,11 +94,13 @@ required CI. A separate closed schema,
 `required_checks_disposition: "not_applicable"`, a bounded reason, exact
 `target_branch` and `target_sha`, and
 `applicability_observation_sha256`. It is accepted only with the decision
-comment path; formal review references cannot select N/A. The canonical
-`codex-devtools-required-check-applicability-v2` observation records endpoint
-names, API version, HTTP status and raw response body hashes, and is bound by
-the v2 comment alongside repository, PR head/base/source and merge trees, body,
-and policy/evidence/plan pins.
+comment path; formal review references cannot select N/A. The current
+`codex-devtools-required-check-applicability-v3` observation records endpoint
+names, API version, HTTP status and response provenance, and is bound by the
+v2 decision comment alongside repository, PR head/base/source and merge trees,
+body, and policy/evidence/plan pins. The validator retains exact-hash support
+for closed v2 observations; only v3 applies the stable repository identity
+canonicalization below.
 
 The N/A observation must show the exact target branch at the pinned target SHA
 with `protected: false`, zero configured workflows, complete empty check-run
@@ -120,8 +122,20 @@ network or parse errors, missing fields, truncation, duplicates and conflicting
 data remain unknown. Any nonempty check or status row, regardless of outcome,
 blocks N/A. Branch names are URL-encoded for endpoint reads.
 
-The v2 comment and applicability observations are fetched and hashed again
-immediately before the single head-matched merge request. The guarded merge
+V3 binds the repository endpoint's semantic identity fields (`full_name`,
+`private: true`, and `owner.type: User`), as well as the exact endpoint, API
+version, and successful HTTP status. It keeps that response's raw body hash in
+`raw_body_sha256` as per-read provenance, but excludes only this volatile hash
+from the v3 canonical observation hash. Other endpoint response hashes and
+all repository identity/visibility, branch, workflow, check, status, and source
+pins remain hash-bound. Thus a metadata-only repository response change can
+leave the reviewed applicability hash stable, while a repository name,
+visibility, owner type, target, or any check/status fact change still fails
+validation. The raw repository response hash records what each read returned;
+it is not itself a stable identity or a cross-read equality pin.
+
+The v2 decision comment and v3 applicability observation are fetched and
+hashed again immediately before the single head-matched merge request. The guarded merge
 receipt labels the required-check gate `not_applicable` and includes the
 decision reference, comment-body SHA-256, observation SHA-256 and reason. It
 never synthesizes a passing check or waives another gate. The ordinary

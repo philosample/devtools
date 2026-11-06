@@ -369,6 +369,9 @@ class GHMergePorts:
             )
         ) or not isinstance(statuses_payload, list):
             raise ValueError("applicability endpoint JSON shape is malformed")
+        repo_owner = repo_payload.get("owner")
+        if not isinstance(repo_owner, dict):
+            raise TypeError("repository identity metadata is malformed")
         run_rows = runs_payload.get("check_runs")
         workflow_rows = workflows_payload.get("workflows")
         status_rows = statuses_payload
@@ -412,10 +415,16 @@ class GHMergePorts:
             "head_sha": head_sha,
             "head_ref": head_ref,
             "repository_private": repo_payload.get("private"),
-            "repository_owner_type": repo_payload.get("owner", {}).get("type")
-            if isinstance(repo_payload.get("owner"), dict)
-            else None,
-            "repository_observation": api_row(repo_endpoint, repo_response),
+            "repository_owner_type": repo_owner.get("type"),
+            "repository_observation": {
+                "endpoint": repo_endpoint,
+                "api_version": check_applicability.API_VERSION,
+                "status_code": repo_response["status_code"],
+                "raw_body_sha256": repo_response["body_sha256"],
+                "full_name": repo_payload.get("full_name"),
+                "private": repo_payload.get("private"),
+                "owner_type": repo_owner.get("type"),
+            },
             "branch": {
                 **api_row(branch_endpoint, branch_response),
                 "sha": branch_payload.get("commit", {}).get("sha")
