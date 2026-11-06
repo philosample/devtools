@@ -58,8 +58,8 @@ function unique(rows, predicate, label) {
 }
 
 function withID(row, id) {
-  const identifiers = row.body.split(', ').filter(part => part.startsWith('ID: '));
-  return identifiers.length === 1 && identifiers[0] === 'ID: ' + id;
+  const identifiers = [...row.body.matchAll(/(?:^|[ ,])ID: ([^,]+)/g)];
+  return identifiers.length === 1 && identifiers[0][1].trim() === id;
 }
 
 function field(rows, id) {
@@ -69,11 +69,23 @@ function field(rows, id) {
 }
 
 function fieldValue(row, id) {
-  const prefix = 'Value: ', suffix = ', ID: ' + id;
-  const begin = row.body.indexOf(prefix), end = row.body.indexOf(suffix);
-  requireGuard(begin >= 0 && end > begin && row.body.indexOf(prefix, begin + prefix.length) < 0 &&
-    row.body.indexOf(suffix, end + suffix.length) < 0, `unparseable ${id} value`);
-  return row.body.slice(begin + prefix.length, end);
+  const values = [...row.body.matchAll(/(?:^|[ ,])Value: /g)];
+  const identifiers = [...row.body.matchAll(/(?:^|[ ,])ID: ([^,]+)/g)];
+  requireGuard(values.length === 1 && identifiers.length === 1 && identifiers[0][1].trim() === id,
+    `unparseable ${id} value`);
+  const valueStart = values[0].index + values[0][0].length;
+  const identifierStart = identifiers[0].index + identifiers[0][0].lastIndexOf('ID: ');
+  let end;
+  if (identifierStart > valueStart) {
+    end = identifierStart;
+    if (row.body.slice(end - 2, end) === ', ') end -= 2;
+    else if (row.body[end - 1] === ' ') end -= 1;
+    else requireGuard(false, `unparseable ${id} value`);
+  } else {
+    end = row.body.length;
+  }
+  requireGuard(end >= valueStart, `unparseable ${id} value`);
+  return row.body.slice(valueStart, end);
 }
 
 function windowURL(row) {
@@ -117,7 +129,11 @@ function saveState(rows, expectedSource, pathEntry = false) {
   requireGuard(windows.length <= 1, 'ambiguous Set window during Save');
   if (windows.length) requireGuard(windowURL(windows[0]).url === expectedSource.url, 'source Set changed during Save');
   stopped(rows, false);
-  if (pathEntry) return field(rows, 'PathTextField');
+  if (pathEntry) {
+    const pathField = field(rows, 'PathTextField');
+    fieldValue(pathField, 'PathTextField');
+    return pathField;
+  }
   requireGuard(!rows.some(row => withID(row, 'PathTextField')), 'Go To Folder is still open');
   const name = field(rows, 'saveAsNameTextField');
   const save = unique(rows, row => /^button Save, ID: OKButton(?:,|$)/.test(row.body), 'Save button');
