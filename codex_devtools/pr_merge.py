@@ -47,6 +47,10 @@ class UnknownCompletion(ValueError):
     """The request may have reached GitHub but no terminal response was observed."""
 
 
+class TerminalVerificationError(ValueError):
+    """Fetched terminal commit identity does not match its requested SHA."""
+
+
 class MergePorts(Protocol):
     def snapshot(self) -> dict[str, Any]: ...
 
@@ -166,11 +170,16 @@ class GHMergePorts:
                 "parent_shas": [],
             }
         merge_commit = self._api(f"repos/{self.repository}/commits/{merge_commit_sha}")
+        if merge_commit.get("sha") != merge_commit_sha:
+            raise TerminalVerificationError(
+                "fetched merge commit object SHA differs from the PR merge SHA"
+            )
         return {
             "state": "MERGED" if pr.get("merged") else pr["state"].upper(),
             "head_sha": head,
             "head_tree_sha": head_commit["commit"]["tree"]["sha"],
             "merge_commit_sha": merge_commit_sha,
+            "merge_commit_object_sha": merge_commit["sha"],
             "merge_commit_tree_sha": merge_commit["commit"]["tree"]["sha"],
             "parent_shas": [parent["sha"] for parent in merge_commit["parents"]],
         }
@@ -442,7 +451,7 @@ def merge_pr(
                 "referenced review is not an approval of the exact current head"
             )
     else:
-        _decision_receipt(
+        decision_sha256 = _decision_receipt(
             ports,
             reference=decision_reference,
             expected_sha256=decision_sha256,
@@ -484,7 +493,7 @@ def merge_pr(
         if review.get("state") != "APPROVED" or review.get("commit_sha") != head:
             raise ValueError("review changed at the merge boundary")
     else:
-        _decision_receipt(
+        decision_sha256 = _decision_receipt(
             ports,
             reference=decision_reference,
             expected_sha256=decision_sha256,
@@ -527,7 +536,21 @@ def merge_pr(
             "error": type(exc).__name__,
             "retry": False,
         }
-    if not isinstance(response, dict) or response.get("merged") is not True:
+    if not isinstance(response, dict):
+        return {
+            "command": "merge",
+            "status": "unknown_completion",
+            "merged": None,
+            "retry": False,
+        }
+    if "merged" not in response or type(response["merged"]) is not bool:
+        return {
+            "command": "merge",
+            "status": "unknown_completion",
+            "merged": None,
+            "retry": False,
+        }
+    if response["merged"] is False:
         return {
             "command": "merge",
             "status": "rejected",
@@ -544,6 +567,13 @@ def merge_pr(
         }
     try:
         terminal = ports.terminal()
+    except TerminalVerificationError:
+        return {
+            "command": "merge",
+            "status": "terminal_verification_failed",
+            "merged": None,
+            "retry": False,
+        }
     except (UnknownCompletion, OSError, TimeoutError, ValueError) as exc:
         return {
             "command": "merge",
@@ -567,6 +597,7 @@ def merge_pr(
         or not isinstance(terminal.get("merge_commit_sha"), str)
         or not SHA1.fullmatch(terminal["merge_commit_sha"])
         or terminal.get("merge_commit_sha") != response_sha
+        or terminal.get("merge_commit_object_sha") != terminal.get("merge_commit_sha")
         or terminal.get("merge_commit_tree_sha") != tree
         or terminal.get("parent_shas") != [base]
     ):
@@ -576,7 +607,7 @@ def merge_pr(
             "merged": None,
             "retry": False,
         }
-    return {
+    result = {
         "command": "merge",
         "status": "merged_verified",
         "merged": True,
@@ -587,3 +618,7 @@ def merge_pr(
         "review_reference": review_reference,
         "operator_assertion": "operator-asserted; not independently authenticated",
     }
+    if use_decision:
+        result["decision_reference"] = decision_reference
+        result["decision_sha256"] = decision_sha256
+    return result

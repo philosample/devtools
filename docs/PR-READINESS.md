@@ -86,9 +86,10 @@ reviewed integrated merge result tree. Readiness is run again after initial PR
 and review/decision reads; declaration hashes must still match, then the PR and
 review/decision are read once more at the mutation boundary. After a successful
 merge response, terminal verification fetches the actual merge commit, requires
-its SHA to match the response SHA, checks its single parent is the reviewed base
-SHA, and compares the actual merge commit tree with `--expected-tree`. Missing
-or mismatched terminal data is never success and is never retried.
+the fetched object's top-level SHA to match the PR's `merge_commit_sha` and the
+response SHA, checks its single parent is the reviewed base SHA, and compares
+the actual merge commit tree with `--expected-tree`. Missing or mismatched
+terminal data is never success and is never retried.
 
 GitHub's merge endpoint supports an exact head SHA precondition, but not an
 atomic base SHA precondition. Verification of the merge commit parent confirms
@@ -101,10 +102,13 @@ repository has no configured workflows/checks/branch protection. That selection
 does not claim CI passed or relax `review-ready`.
 
 `--dry-run` performs these reads and validations without making a mutation.
-Rejected or unknown network completion is reported without retry. A successful
-response is not reported as merged until a terminal read confirms the PR is
-merged at the exact head and source tree and provides a merge commit. No cleanup
-is performed by this command.
+Only an explicit boolean `merged: false` is a definite rejection. Non-object
+responses, a missing `merged` field, or a null/non-boolean `merged` value are
+unknown completion and are reported without retry. A successful response is not
+reported as merged until a terminal read confirms the PR is merged at the exact
+head and source tree and provides a merge commit. Decision-comment mode includes
+its reference and verified body SHA-256 in the merged receipt. No cleanup is
+performed by this command.
 
 The operator assertion and review reference record the designated coordinator's
 intent; they are not independent authentication. Any actor with access to this

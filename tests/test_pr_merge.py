@@ -86,6 +86,7 @@ class FakePorts:
             "head_sha": HEAD,
             "head_tree_sha": HEAD_TREE,
             "merge_commit_sha": MERGE_SHA,
+            "merge_commit_object_sha": MERGE_SHA,
             "merge_commit_tree_sha": TREE,
             "parent_shas": [BASE],
         }
@@ -98,6 +99,7 @@ class FakePorts:
         self.terminal_calls = 0
         self.raise_merge = False
         self.raise_terminal = False
+        self.raise_terminal_identity = False
 
     def snapshot(self):
         self.snapshot_calls += 1
@@ -133,6 +135,8 @@ class FakePorts:
         self.terminal_calls += 1
         if self.raise_terminal:
             raise TimeoutError
+        if self.raise_terminal_identity:
+            raise pr_merge.TerminalVerificationError
         return self.terminal_row
 
 
@@ -309,7 +313,19 @@ class PRMergeTests(unittest.TestCase):
         ports.merge_response = {"merged": False}
         result = self.invoke(ports)
         self.assertEqual(result["status"], "rejected")
+        self.assertFalse(result["retry"])
+        self.assertFalse(result["merged"])
         self.assertEqual(ports.merge_calls, [HEAD])
+        for response in (None, "malformed", {}, {"merged": None}, {"merged": 1}):
+            with self.subTest(response=response):
+                ports = FakePorts()
+                ports.merge_response = response
+                result = self.invoke(ports)
+                self.assertEqual(result["status"], "unknown_completion")
+                self.assertIsNone(result["merged"])
+                self.assertFalse(result["retry"])
+                self.assertEqual(ports.merge_calls, [HEAD])
+                self.assertEqual(ports.terminal_calls, 0)
         ports = FakePorts()
         ports.raise_merge = True
         result = self.invoke(ports)
@@ -321,6 +337,7 @@ class PRMergeTests(unittest.TestCase):
         for field, value in (
             ("head_sha", "d" * 40),
             ("head_tree_sha", "e" * 40),
+            ("merge_commit_object_sha", "f" * 40),
             ("merge_commit_tree_sha", "f" * 40),
             ("merge_commit_sha", None),
         ):
@@ -330,12 +347,25 @@ class PRMergeTests(unittest.TestCase):
                 result = self.invoke(ports)
                 self.assertEqual(result["status"], "terminal_verification_failed")
                 self.assertIsNone(result["merged"])
+                self.assertFalse(result["retry"])
+                self.assertEqual(ports.merge_calls, [HEAD])
+                self.assertEqual(ports.terminal_calls, 1)
 
     def test_unavailable_terminal_read_is_unknown_and_never_retried(self):
         ports = FakePorts()
         ports.raise_terminal = True
         result = self.invoke(ports)
         self.assertEqual(result["status"], "unknown_completion")
+        self.assertFalse(result["retry"])
+        self.assertEqual(ports.merge_calls, [HEAD])
+        self.assertEqual(ports.terminal_calls, 1)
+
+    def test_fetched_terminal_object_identity_failure_never_retries(self):
+        ports = FakePorts()
+        ports.raise_terminal_identity = True
+        result = self.invoke(ports)
+        self.assertEqual(result["status"], "terminal_verification_failed")
+        self.assertIsNone(result["merged"])
         self.assertFalse(result["retry"])
         self.assertEqual(ports.merge_calls, [HEAD])
         self.assertEqual(ports.terminal_calls, 1)
@@ -373,6 +403,7 @@ class PRMergeTests(unittest.TestCase):
         }
         source_commit = {"commit": {"tree": {"sha": HEAD_TREE}}}
         merge_commit = {
+            "sha": MERGE_SHA,
             "commit": {"tree": {"sha": TREE}},
             "parents": [{"sha": BASE}],
         }
@@ -383,6 +414,7 @@ class PRMergeTests(unittest.TestCase):
         ) as api:
             terminal = pr_merge.GHMergePorts("philosample/devtools", 75).terminal()
         self.assertEqual(terminal["merge_commit_sha"], MERGE_SHA)
+        self.assertEqual(terminal["merge_commit_object_sha"], MERGE_SHA)
         self.assertEqual(terminal["head_tree_sha"], HEAD_TREE)
         self.assertEqual(terminal["merge_commit_tree_sha"], TREE)
         self.assertEqual(terminal["parent_shas"], [BASE])
@@ -390,6 +422,30 @@ class PRMergeTests(unittest.TestCase):
             api.call_args_list[2].args,
             (f"repos/philosample/devtools/commits/{MERGE_SHA}",),
         )
+
+    def test_github_terminal_port_rejects_fetched_object_sha_mismatch(self):
+        pr = {
+            "head": {"sha": HEAD},
+            "merged": True,
+            "state": "closed",
+            "merge_commit_sha": MERGE_SHA,
+        }
+        source_commit = {"commit": {"tree": {"sha": HEAD_TREE}}}
+        merge_commit = {
+            "sha": "e" * 40,
+            "commit": {"tree": {"sha": TREE}},
+            "parents": [{"sha": BASE}],
+        }
+        with (
+            patch.object(
+                pr_merge.GHMergePorts,
+                "_api",
+                side_effect=(pr, source_commit, merge_commit),
+            ) as api,
+            self.assertRaises(pr_merge.TerminalVerificationError),
+        ):
+            pr_merge.GHMergePorts("philosample/devtools", 75).terminal()
+        self.assertEqual(api.call_count, 3)
 
     def invoke_decision(self, ports, **updates):
         updates.setdefault("review_reference", None)
@@ -404,6 +460,8 @@ class PRMergeTests(unittest.TestCase):
         self.assertEqual(ports.decision_calls, 2)
         self.assertEqual(ports.review_calls, 0)
         self.assertEqual(ports.merge_calls, [HEAD])
+        self.assertEqual(result["decision_reference"], DECISION_REF)
+        self.assertEqual(result["decision_sha256"], DECISION_HASH)
 
     def test_changed_decision_comment_hash_blocks_before_merge(self):
         ports = FakePorts()
