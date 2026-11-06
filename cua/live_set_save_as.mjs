@@ -91,7 +91,10 @@ function fieldValue(row, id) {
 function windowURL(row) {
   const marker = ', URL: ', begin = row.body.indexOf(marker);
   requireGuard(begin >= 0 && row.body.indexOf(marker, begin + marker.length) < 0, 'unparseable standard-window URL');
-  return setURL(row.body.slice(begin + marker.length));
+  let value = row.body.slice(begin + marker.length);
+  const trailingRaise = ', Secondary Actions: Raise';
+  if (value.endsWith(trailingRaise)) value = value.slice(0, -trailingRaise.length);
+  return setURL(value);
 }
 
 function stopped(rows, required = true) {

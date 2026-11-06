@@ -81,6 +81,31 @@ await test('direct and exact Live Project nesting preserve source with one Save 
       ['key', 'super+shift+g'], ['set', 35, f.directory], ['key', 'Return'], ['click', 33]]);
   });
 });
+await test('standard window URL accepts trailing Secondary Actions in the observed order', async () => {
+  await withFixture({edit: ({text, state}) => ['source', 'save', 'final'].includes(state)
+    ? text.replace(/, Secondary Actions: Raise, URL: ([^\n]+)/,
+      ', URL: $1, Secondary Actions: Raise')
+    : text}, async f => {
+    const result = await preserveLiveSetAs(f.app, f.options);
+    assert.equal(result.status, 'destination_observed');
+    assert.equal(result.destinationURL, f.options.expectedFinalURL);
+    assert.equal(result.saveAttempts, 1);
+  });
+});
+await test('standard window URL rejects unsupported or ambiguous trailing attributes', async () => {
+  for (const variant of ['wrong_attribute', 'duplicate_attribute', 'trailing_garbage']) {
+    await withFixture({edit: ({text, state}) => {
+      if (state !== 'source') return text;
+      const base = text.replace(/, Secondary Actions: Raise, URL: ([^\n]+)/, ', URL: $1');
+      if (variant === 'wrong_attribute') return base.replace(/, URL: ([^\n]+)/, ', URL: $1, Secondary Actions: Lower');
+      if (variant === 'duplicate_attribute') return base.replace(/, URL: ([^\n]+)/, ', URL: $1, Secondary Actions: Raise, Secondary Actions: Raise');
+      return base.replace(/, URL: ([^\n]+)/, ', URL: $1, Secondary Actions: Raise, Extra: unexpected');
+    }}, async f => {
+      await rejected(f, /URL/);
+      assert.deepEqual(f.actions, []);
+    });
+  }
+});
 await test('a Save panel may hide the modal source subtree while visible state is still checked', async () => {
   await withFixture({edit: ({text, state}) => ['save', 'path'].includes(state) ? text.split('\n').slice(2).join('\n') : text}, async f => {
     await preserveLiveSetAs(f.app, f.options); assert.equal(f.actions.filter(a => a[0] === 'click').length, 1);
