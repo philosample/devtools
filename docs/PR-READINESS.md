@@ -62,3 +62,30 @@ reviews and worker-authored chat/model labels cannot attest approval. Required
 checks and review threads are now read-only observations, while receipt
 verification, a future trusted approval boundary and documentation pilot remain
 separate issue #75 gates.
+
+## Explicit operator-asserted merge
+
+`python3 -m codex_devtools pr merge --repo OWNER/REPO --number N --policy policy.json --evidence evidence.json --plan plan.md --expected-head SHA --expected-base SHA --expected-tree SHA --body-sha256 SHA256 --review-reference REVIEW_URL --operator-assertion 'I am the designated coordinator and explicitly authorize this exact-head merge.'`
+is a separate explicit mutation command. It freshly runs `review-ready`,
+requires every blocker except the intentionally unknown coordinator identity
+gate to be absent, and requires verified policy/evidence/plan pins, passing
+required CI, resolved review threads, and verified evidence receipts. It then
+re-reads the open PR head/base/head tree/body hash and the exact approved review
+reference for that same head, immediately before one GitHub head-matched merge
+request. The head tree and body hash are provided as reviewed pins.
+GitHub's merge endpoint supports an exact head SHA precondition, but not an
+atomic base SHA precondition; the base is freshly re-read immediately before
+the request and any intervening change is outside the adapter's atomic guard.
+
+`--dry-run` performs these reads and validations without making a mutation.
+Rejected or unknown network completion is reported without retry. A successful
+response is not reported as merged until a terminal read confirms the PR is
+merged at the exact head and source tree and provides a merge commit. No cleanup
+is performed by this command.
+
+The operator assertion and review reference record the designated coordinator's
+intent; they are not independent authentication. Any actor with access to this
+command could type the assertion under the shared identity. The command does
+not make `review-ready` return ready, treat GitHub's shared-account review as
+independent proof, or create a credential/signing mechanism. Actual invocation
+remains restricted by the program workflow to the designated coordinator.

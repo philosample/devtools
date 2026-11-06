@@ -451,20 +451,29 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--plan")
     worktree_sub.add_parser("audit", help="read-only inventory of registered worktrees")
     pr = commands.add_parser(
-        "pr", help="validate pinned pull-request plans and evidence (read-only)"
+        "pr", help="check pull-request readiness or explicitly merge a reviewed head"
     )
     pr_sub = pr.add_subparsers(dest="action", required=True)
     for action, help_text in (
         ("plan-check", "validate local policy, evidence, and plan declarations"),
         ("review-ready", "compare declarations with a read-only GitHub PR snapshot"),
+        ("merge", "explicitly merge one reviewed exact head after fresh gate checks"),
     ):
         command = pr_sub.add_parser(action, help=help_text)
         command.add_argument("--policy", required=True, type=Path)
         command.add_argument("--evidence", required=True, type=Path)
         command.add_argument("--plan", required=True, type=Path)
-        if action == "review-ready":
+        if action in ("review-ready", "merge"):
             command.add_argument("--repo", required=True)
             command.add_argument("--number", required=True, type=int)
+        if action == "merge":
+            command.add_argument("--expected-head", required=True)
+            command.add_argument("--expected-base", required=True)
+            command.add_argument("--expected-tree", required=True)
+            command.add_argument("--body-sha256", required=True)
+            command.add_argument("--review-reference", required=True)
+            command.add_argument("--operator-assertion", required=True)
+            command.add_argument("--dry-run", action="store_true")
     from .harness_control import register_cli
 
     register_cli(commands)
@@ -509,19 +518,42 @@ def main(argv: list[str] | None = None) -> int:
             _json_out(result)
             return 0
         if args.group == "pr":
-            from . import pr_readiness
+            from . import pr_merge, pr_readiness
 
             if args.action == "plan-check":
                 result, code = pr_readiness.plan_check(
                     args.policy, args.evidence, args.plan
                 )
-            else:
+            elif args.action == "review-ready":
                 result, code = pr_readiness.review_ready(
                     args.repo,
                     args.number,
                     args.policy,
                     args.evidence,
                     args.plan,
+                )
+            else:
+                result = pr_merge.merge_pr(
+                    repository=args.repo,
+                    number=args.number,
+                    expected_head=args.expected_head,
+                    expected_base=args.expected_base,
+                    expected_tree=args.expected_tree,
+                    body_sha256=args.body_sha256,
+                    review_reference=args.review_reference,
+                    operator_assertion=args.operator_assertion,
+                    readiness=lambda: pr_readiness.review_ready(
+                        args.repo,
+                        args.number,
+                        args.policy,
+                        args.evidence,
+                        args.plan,
+                    )[0],
+                    ports=pr_merge.GHMergePorts(args.repo, args.number),
+                    dry_run=args.dry_run,
+                )
+                code = (
+                    0 if result["status"] in ("dry_run_ready", "merged_verified") else 1
                 )
             _json_out(result)
             return code
