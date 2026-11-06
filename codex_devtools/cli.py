@@ -456,6 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     pr_sub = pr.add_subparsers(dest="action", required=True)
     for action, help_text in (
         ("plan-check", "validate local policy, evidence, and plan declarations"),
+        ("evidence-pack", "assemble evidence from an explicit list of local receipts"),
         ("review-ready", "compare declarations with a read-only GitHub PR snapshot"),
         (
             "check-applicability",
@@ -464,7 +465,12 @@ def build_parser() -> argparse.ArgumentParser:
         ("merge", "explicitly merge one reviewed exact head after fresh gate checks"),
     ):
         command = pr_sub.add_parser(action, help=help_text)
-        if action != "check-applicability":
+        if action == "evidence-pack":
+            command.add_argument("--policy", required=True, type=Path)
+            command.add_argument("--manifest", required=True, type=Path)
+            command.add_argument("--plan", required=True, type=Path)
+            command.add_argument("--out", required=True, type=Path)
+        elif action != "check-applicability":
             command.add_argument("--policy", required=True, type=Path)
             command.add_argument("--evidence", required=True, type=Path)
             command.add_argument("--plan", required=True, type=Path)
@@ -541,7 +547,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.group == "pr":
             from . import pr_merge, pr_readiness
 
-            if args.action == "plan-check":
+            if args.action == "evidence-pack":
+                from .pr_evidence_pack import pack
+
+                result = pack(args.policy, args.manifest, args.plan, args.out)
+                code = 0
+            elif args.action == "plan-check":
                 result, code = pr_readiness.plan_check(
                     args.policy, args.evidence, args.plan
                 )
