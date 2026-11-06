@@ -210,7 +210,10 @@ def register_cli(commands) -> None:
     send.add_argument("--args", required=True, help="JSON object of bounded arguments")
     send.add_argument("--wait", type=float, default=5)
     retire = actions.add_parser(
-        "reconcile", help="audit explicit unloaded-target retirement"
+        "reconcile",
+        help=(
+            "audit explicit unloaded-target retirement of a fenced or expired READY owner"
+        ),
     )
     retire.add_argument("--descriptor", required=True, type=Path)
     retire.add_argument("--expected-pins", required=True, type=Path)

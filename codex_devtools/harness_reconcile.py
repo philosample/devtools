@@ -1,4 +1,4 @@
-"""Audited operator assertion to retire one unloaded, fenced harness owner."""
+"""Audited operator assertion to retire one unloaded, fenced or expired-ready owner."""
 
 from __future__ import annotations
 
@@ -97,16 +97,33 @@ def _snapshot(
         _safe(directory, directory=True)
     _decode(_bytes(descriptor))
     current = client.status(descriptor)
-    if current["state"] != "fenced" or current["pins"] != pins:
-        raise ValueError("exact expected pins and fenced state required")
+    if current["pins"] != pins:
+        raise ValueError("exact expected pins required")
     identity = {key: current[key] for key in ("format", "instance", "nonce", "pins")}
     owner = _tree(root / "owner")
     if set(owner) != {"identity.json"} or _decode(owner["identity.json"]) != identity:
         raise ValueError("root owner does not match selected exact identity")
     instance = _tree(descriptor.parent)
+    _retirement_basis(current, instance)
     files = {"owner/" + k: v for k, v in owner.items()}
     files.update({current["instance"] + "/" + k: v for k, v in instance.items()})
     return identity, files
+
+
+def _retirement_basis(current: dict, instance: dict[str, bytes]) -> str:
+    if current["state"] == "fenced":
+        return "fenced"
+    if (
+        current["state"] == "ready"
+        and current["pending"] is None
+        and not current["lease_current"]
+    ):
+        if "command.json" in instance or "actor/identity.json" in instance:
+            raise ValueError("expired READY owner has unresolved command/actor")
+        return "expired_ready_no_pending"
+    raise ValueError(
+        "fenced owner or expired READY owner with no pending command required"
+    )
 
 
 def reconcile(
@@ -130,6 +147,9 @@ def reconcile(
     pin_bytes = _bytes(expected_pins)
     pins = _decode(pin_bytes)
     identity, before = _snapshot(root, descriptor, pins)
+    retirement_basis = _retirement_basis(
+        client.status(descriptor), _tree(descriptor.parent)
+    )
     _safe(evidence_output.parent, directory=True)
     if evidence_output.exists() or evidence_output.is_symlink():
         raise ValueError("evidence output must be a new directory")
@@ -161,6 +181,7 @@ def reconcile(
         "at": datetime.now(timezone.utc).isoformat(),
         "operator_uid": os.getuid(),
         "assertion": "target-unloaded",
+        "retirement_basis": retirement_basis,
         "reason": reason,
         "operator_evidence": operator_evidence,
         "root": str(root),
@@ -199,7 +220,11 @@ def reconcile(
             )
         marker = client._read(evidence_output / "marker.json")
         runner = client._read(evidence_output / "runner.json")
-        if runner.get("status") != "closed" or runner.get("callback_count") != 0:
+        if (
+            runner.get("status") != "closed"
+            or runner.get("callback_count") != 0
+            or runner.get("retirement_basis") != retirement_basis
+        ):
             raise ValueError("inert marker dispatch or incomplete runner")
         if client._read(Path(runner["descriptor"])) != marker:
             raise ValueError("saved marker descriptor changed")
@@ -216,6 +241,7 @@ def reconcile(
             raise ValueError("old instance changed; effects unknown")
         outcome = {
             "status": "retired",
+            "retirement_basis": retirement_basis,
             "marker": marker,
             "marker_callback_count": runner["callback_count"],
             "marker_sha256": hashlib.sha256(

@@ -35,10 +35,16 @@ try {
     if (sha(read(path.join(root,name)))!==digest || sha(read(path.join(evidence,'before',name)))!==digest) throw Error('snapshot changed');
   }
   const descriptor=JSON.parse(read(intent.descriptor));
-  if(descriptor.state!=='fenced' || !equal(Object.fromEntries(['format','instance','nonce','pins'].map(k=>[k,descriptor[k]])),intent.identity) || !equal(JSON.parse(read(path.join(root,'owner','identity.json'))),intent.identity)) throw Error('old identity/state changed');
+  const now=Date.now();
+  const basis=descriptor.state==='fenced' ? 'fenced' :
+    descriptor.state==='ready' && descriptor.pending===null && Number.isFinite(descriptor.expires_at_ms) && descriptor.expires_at_ms<=now
+      ? 'expired_ready_no_pending' : null;
+  if(!basis || basis!==intent.retirement_basis || !equal(Object.fromEntries(['format','instance','nonce','pins'].map(k=>[k,descriptor[k]])),intent.identity) || !equal(JSON.parse(read(path.join(root,'owner','identity.json'))),intent.identity)) throw Error('old identity/state changed');
   // Require exact member inventory so no newly arrived ACK/actor is omitted.
   const members=dir=>fs.readdirSync(dir).flatMap(name=>name==='actor' ? fs.readdirSync(path.join(dir,name)).map(x=>'actor/'+x) : [name]);
-  const current=[...members(path.join(root,'owner')).map(x=>'owner/'+x),...members(oldDir).map(x=>descriptor.instance+'/'+x)].sort();
+  const oldMembers=members(oldDir);
+  if(basis==='expired_ready_no_pending' && (oldMembers.includes('command.json') || fs.existsSync(path.join(oldDir,'actor')))) throw Error('expired READY owner has unresolved command/actor');
+  const current=[...members(path.join(root,'owner')).map(x=>'owner/'+x),...oldMembers.map(x=>descriptor.instance+'/'+x)].sort();
   if(!equal(current,Object.keys(intent.before_sha256).sort())) throw Error('old inventory changed');
   const {createHarnessMailbox}=require(helper);
   mutated=true;
@@ -51,7 +57,7 @@ try {
   const closed=JSON.parse(read(marker.descriptorPath));
   if(closed.state!=='closed' || closed.pending!==null || callbackCount!==0 || fs.existsSync(path.join(root,'owner'))) throw Error('marker retirement incomplete');
   write(path.join(evidence,'marker.json'),closed);
-  write(path.join(evidence,'runner.json'),{status:'closed',callback_count:callbackCount,descriptor:marker.descriptorPath});
+  write(path.join(evidence,'runner.json'),{status:'closed',callback_count:callbackCount,descriptor:marker.descriptorPath,retirement_basis:basis});
 } catch(error) {
   // If helper failed after dropping the old owner but before publishing a new
   // one, conservatively restore an exclusive old-identity ownership fence.
