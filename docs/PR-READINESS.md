@@ -65,14 +65,17 @@ separate issue #75 gates.
 
 ## Explicit operator-asserted merge
 
-`python3 -m codex_devtools pr merge --repo OWNER/REPO --number N --policy policy.json --evidence evidence.json --plan plan.md --expected-head SHA --expected-base SHA --expected-tree SHA --body-sha256 SHA256 --review-reference REVIEW_URL --operator-assertion 'I am the designated coordinator and explicitly authorize this exact-head merge.'`
+`python3 -m codex_devtools pr merge --repo OWNER/REPO --number N --policy policy.json --evidence evidence.json --plan plan.md --expected-head SHA --expected-base SHA --expected-tree SHA --body-sha256 SHA256 --expected-policy-sha256 SHA256 --expected-evidence-sha256 SHA256 --expected-plan-sha256 SHA256 --review-reference REVIEW_URL --operator-assertion 'I am the designated coordinator and explicitly authorize this exact-head merge.'`
 is a separate explicit mutation command. It freshly runs `review-ready`,
 requires every blocker except the intentionally unknown coordinator identity
 gate to be absent, and requires verified policy/evidence/plan pins, passing
 required CI, resolved review threads, and verified evidence receipts. It then
 re-reads the open PR head/base/head tree/body hash and the exact approved review
 reference for that same head, immediately before one GitHub head-matched merge
-request. The head tree and body hash are provided as reviewed pins.
+request. The head tree, body hash, and expected policy/evidence/plan hashes are
+provided as reviewed pins. Readiness is run again after the first snapshot and
+review reads; the declaration hashes must still match, then one final PR and
+review read is performed at the mutation boundary.
 GitHub's merge endpoint supports an exact head SHA precondition, but not an
 atomic base SHA precondition; the base is freshly re-read immediately before
 the request and any intervening change is outside the adapter's atomic guard.

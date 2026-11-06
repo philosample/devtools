@@ -135,8 +135,12 @@ def _digest(value: Any, name: str) -> str:
 
 
 def _review_ready(
-    report: dict[str, Any], expected: dict[str, str], repository: str, number: int
-) -> None:
+    report: dict[str, Any],
+    expected: dict[str, str],
+    expected_declarations: dict[str, str],
+    repository: str,
+    number: int,
+) -> dict[str, str]:
     if (
         not isinstance(report, dict)
         or report.get("command") != "review-ready"
@@ -163,6 +167,10 @@ def _review_ready(
         )
     ):
         raise ValueError("readiness policy, evidence, or plan pins are missing")
+    if pins != expected_declarations:
+        raise ValueError(
+            "fresh readiness policy, evidence, or plan hash differs from the coordinator-reviewed pin"
+        )
     blockers = report.get("blockers")
     if not isinstance(blockers, list):
         raise TypeError("readiness blockers are malformed")
@@ -192,6 +200,7 @@ def _review_ready(
         raise ValueError("review-thread observation is not complete and resolved")
     if receipts.get("status") != "verified" or receipts.get("complete") is not True:
         raise ValueError("required evidence receipts are not verified")
+    return pins
 
 
 def merge_pr(
@@ -202,6 +211,9 @@ def merge_pr(
     expected_base: str,
     expected_tree: str,
     body_sha256: str,
+    expected_policy_sha256: str,
+    expected_evidence_sha256: str,
+    expected_plan_sha256: str,
     review_reference: str,
     operator_assertion: str,
     readiness: Callable[[], dict[str, Any]],
@@ -222,6 +234,18 @@ def merge_pr(
         r"[0-9a-f]{64}", body_sha256
     ):
         raise ValueError("body hash must be a full lowercase SHA-256")
+    expected_declarations = {
+        "policy_sha256": expected_policy_sha256,
+        "evidence_sha256": expected_evidence_sha256,
+        "plan_sha256": expected_plan_sha256,
+    }
+    if any(
+        not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+        for value in expected_declarations.values()
+    ):
+        raise ValueError(
+            "reviewed policy/evidence/plan pins must be full SHA-256 values"
+        )
     if not isinstance(review_reference, str) or not REVIEW_REFERENCE.fullmatch(
         review_reference
     ):
@@ -242,9 +266,10 @@ def merge_pr(
         )
 
     report = readiness()
-    _review_ready(
+    pins = _review_ready(
         report,
         {"head_sha": head, "base_sha": base, "body_sha256": body_sha256},
+        expected_declarations,
         repository,
         number,
     )
@@ -266,6 +291,33 @@ def merge_pr(
         raise ValueError(
             "referenced review is not an approval of the exact current head"
         )
+    # Re-read declarations and remote gates after the first exact review read,
+    # then perform one last compact PR/review read at the mutation boundary.
+    final_report = readiness()
+    final_pins = _review_ready(
+        final_report,
+        {"head_sha": head, "base_sha": base, "body_sha256": body_sha256},
+        expected_declarations,
+        repository,
+        number,
+    )
+    if final_pins != pins:
+        raise ValueError(
+            "readiness declaration pins drifted during the merge preflight"
+        )
+    current = ports.snapshot()
+    if current.get("number") != number or current.get("state") != "OPEN":
+        raise ValueError("PR changed state at the merge boundary")
+    if (
+        current.get("head_sha"),
+        current.get("base_sha"),
+        current.get("head_tree_sha"),
+        current.get("body_sha256"),
+    ) != (head, base, tree, body_sha256):
+        raise ValueError("PR pins changed at the merge boundary")
+    review = ports.review(review_reference)
+    if review.get("state") != "APPROVED" or review.get("commit_sha") != head:
+        raise ValueError("review changed at the merge boundary")
     if dry_run:
         return {
             "command": "merge",

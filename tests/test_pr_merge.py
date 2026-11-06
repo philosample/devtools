@@ -96,6 +96,9 @@ class PRMergeTests(unittest.TestCase):
             "expected_base": BASE,
             "expected_tree": TREE,
             "body_sha256": BODY_HASH,
+            "expected_policy_sha256": "a" * 64,
+            "expected_evidence_sha256": "b" * 64,
+            "expected_plan_sha256": "c" * 64,
             "review_reference": REVIEW,
             "operator_assertion": ASSERTION,
             "readiness": readiness or ready_report,
@@ -107,11 +110,19 @@ class PRMergeTests(unittest.TestCase):
 
     def test_positive_exact_head_single_merge_and_terminal_verification(self):
         ports = FakePorts()
-        result = self.invoke(ports)
+        readiness_calls = 0
+
+        def readiness():
+            nonlocal readiness_calls
+            readiness_calls += 1
+            return ready_report()
+
+        result = self.invoke(ports, readiness=readiness)
         self.assertEqual(result["status"], "merged_verified")
         self.assertEqual(ports.merge_calls, [HEAD])
-        self.assertEqual(ports.snapshot_calls, 1)
-        self.assertEqual(ports.review_calls, 1)
+        self.assertEqual(ports.snapshot_calls, 2)
+        self.assertEqual(ports.review_calls, 2)
+        self.assertEqual(readiness_calls, 2)
         self.assertEqual(ports.terminal_calls, 1)
 
     def test_fresh_head_base_tree_and_body_drift_block_before_merge(self):
@@ -141,6 +152,30 @@ class PRMergeTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.invoke(ports, readiness=lambda report=report: report)
                 self.assertEqual(ports.merge_calls, [])
+
+    def test_changed_evidence_pin_against_coordinator_reviewed_value_never_merges(self):
+        report = ready_report()
+        report["pins"]["evidence_sha256"] = "f" * 64
+        ports = FakePorts()
+        with self.assertRaisesRegex(
+            ValueError, "differs from the coordinator-reviewed pin"
+        ):
+            self.invoke(ports, readiness=lambda: report)
+        self.assertEqual(ports.merge_calls, [])
+        self.assertEqual(ports.snapshot_calls, 0)
+
+    def test_declaration_pin_drift_between_fresh_readiness_calls_never_merges(self):
+        first = ready_report()
+        second = ready_report()
+        second["pins"]["evidence_sha256"] = "f" * 64
+        reports = iter((first, second))
+        ports = FakePorts()
+        with self.assertRaisesRegex(
+            ValueError, "differs from the coordinator-reviewed pin"
+        ):
+            self.invoke(ports, readiness=lambda: next(reports))
+        self.assertEqual(ports.merge_calls, [])
+        self.assertEqual(ports.snapshot_calls, 1)
 
     def test_missing_review_wrong_head_or_nonapproval_blocks(self):
         for review in (
@@ -213,8 +248,8 @@ class PRMergeTests(unittest.TestCase):
         self.assertEqual(result["status"], "dry_run_ready")
         self.assertEqual(ports.merge_calls, [])
         self.assertEqual(ports.terminal_calls, 0)
-        self.assertEqual(ports.snapshot_calls, 1)
-        self.assertEqual(ports.review_calls, 1)
+        self.assertEqual(ports.snapshot_calls, 2)
+        self.assertEqual(ports.review_calls, 2)
 
     def test_rejected_and_unknown_network_completion_never_retry(self):
         ports = FakePorts()
@@ -271,6 +306,12 @@ class PRMergeTests(unittest.TestCase):
                     TREE,
                     "--body-sha256",
                     BODY_HASH,
+                    "--expected-policy-sha256",
+                    "a" * 64,
+                    "--expected-evidence-sha256",
+                    "b" * 64,
+                    "--expected-plan-sha256",
+                    "c" * 64,
                     "--review-reference",
                     REVIEW,
                     "--operator-assertion",
