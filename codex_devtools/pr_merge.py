@@ -39,10 +39,6 @@ DECISION_FIELDS = {
 APPROVAL_GATE = "coordinator_approval"
 
 
-class RemoteRejected(ValueError):
-    """GitHub returned a definite rejection for a mutation request."""
-
-
 class UnknownCompletion(ValueError):
     """The request may have reached GitHub but no terminal response was observed."""
 
@@ -521,13 +517,6 @@ def merge_pr(
 
     try:
         response = ports.merge(head)
-    except RemoteRejected:
-        return {
-            "command": "merge",
-            "status": "rejected",
-            "merged": False,
-            "retry": False,
-        }
     except (UnknownCompletion, OSError, TimeoutError, ValueError) as exc:
         return {
             "command": "merge",

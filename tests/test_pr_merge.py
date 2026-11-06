@@ -98,6 +98,7 @@ class FakePorts:
         self.merge_calls: list[str] = []
         self.terminal_calls = 0
         self.raise_merge = False
+        self.raise_merge_value_error = False
         self.raise_terminal = False
         self.raise_terminal_identity = False
 
@@ -114,6 +115,8 @@ class FakePorts:
         self.merge_calls.append(expected_head)
         if self.raise_merge:
             raise TimeoutError
+        if self.raise_merge_value_error:
+            raise ValueError("remote outcome is ambiguous")
         return self.merge_response
 
     def decision(self, reference):
@@ -330,6 +333,13 @@ class PRMergeTests(unittest.TestCase):
         ports.raise_merge = True
         result = self.invoke(ports)
         self.assertEqual(result["status"], "unknown_completion")
+        self.assertEqual(result["retry"], False)
+        self.assertEqual(ports.merge_calls, [HEAD])
+        ports = FakePorts()
+        ports.raise_merge_value_error = True
+        result = self.invoke(ports)
+        self.assertEqual(result["status"], "unknown_completion")
+        self.assertEqual(result["merged"], None)
         self.assertEqual(result["retry"], False)
         self.assertEqual(ports.merge_calls, [HEAD])
 
