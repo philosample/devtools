@@ -68,6 +68,84 @@ class WorktreeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "released"):
             worktrees.update(self.worktree, "chat-1", pr="13")
 
+    def test_register_normalizes_same_repository_pull_url(self) -> None:
+        self.start()
+        registered_worktree = self.root / "registered URL worktree"
+        git(
+            "worktree",
+            "add",
+            "-b",
+            "codex/fixture-url",
+            str(registered_worktree),
+            "main",
+            cwd=self.repo,
+        )
+        entry = worktrees.register(
+            self.repo,
+            registered_worktree,
+            "chat-1",
+            "STORY-1",
+            "issue #1",
+            pr="https://github.com/example/repo/pull/42",
+        )
+        self.assertEqual(entry["pr"], "42")
+
+    def test_register_rejects_foreign_repository_pull_url(self) -> None:
+        self.start()
+        registered_worktree = self.root / "foreign URL worktree"
+        git(
+            "worktree",
+            "add",
+            "-b",
+            "codex/fixture-foreign-url",
+            str(registered_worktree),
+            "main",
+            cwd=self.repo,
+        )
+        with self.assertRaisesRegex(ValueError, "does not match worktree repository"):
+            worktrees.register(
+                self.repo,
+                registered_worktree,
+                "chat-1",
+                "STORY-1",
+                "issue #1",
+                pr="https://github.com/elsewhere/repo/pull/42",
+            )
+        self.assertNotIn(
+            str(registered_worktree.resolve()),
+            json.loads(self.registry.read_text())["entries"],
+        )
+
+    def test_update_normalizes_pull_url_and_rejects_invalid_references(self) -> None:
+        self.start()
+        updated = worktrees.update(
+            self.worktree,
+            "chat-1",
+            pr="https://github.com/example/repo/pull/42/",
+        )
+        self.assertEqual(updated["pr"], "42")
+        invalid_references = (
+            "https://github.com/elsewhere/repo/pull/42",
+            "https://github.com.evil/example/repo/pull/42",
+            "http://github.com/example/repo/pull/42",
+            "https://github.com/example/repo/issues/42",
+            "https://github.com/example/repo/pull/0",
+            "https://github.com/example/repo/pull/42?tab=files",
+            "https://[malformed/repo/pull/42",
+            " https://github.com/example/repo/pull/42",
+            "not-a-pr",
+            "0",
+        )
+        for reference in invalid_references:
+            with (
+                self.subTest(reference=reference),
+                self.assertRaisesRegex(
+                    ValueError, "invalid GitHub PR reference|does not match"
+                ),
+            ):
+                worktrees.update(self.worktree, "chat-1", pr=reference)
+        self.assertEqual(worktrees.audit()[0]["pr"], "42")
+
     def test_wrong_owner_and_changed_head_refuse_release(self) -> None:
         self.start()
         worktrees.update(self.worktree, "chat-1", pr="12")
@@ -86,7 +164,7 @@ class WorktreeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "owner chat"):
             worktrees.release(self.worktree, "chat-2")
         self.assertTrue(worktrees.release(self.worktree, "chat-1")["released"])
-        with self.assertRaisesRegex(ValueError, "numeric GitHub PR"):
+        with self.assertRaisesRegex(ValueError, "GitHub PR is required"):
             worktrees.cleanup(self.worktree, "chat-1")
         self.assertTrue(self.worktree.exists())
 
@@ -99,7 +177,8 @@ class WorktreeTests(unittest.TestCase):
 
     def test_malformed_pr_cannot_bypass_clean_no_pr_release(self) -> None:
         self.start()
-        worktrees.update(self.worktree, "chat-1", pr="not-a-pr")
+        with self.assertRaisesRegex(ValueError, "invalid GitHub PR reference"):
+            worktrees.update(self.worktree, "chat-1", pr="not-a-pr")
         (self.worktree / "untracked.txt").write_text("keep\n")
         with self.assertRaisesRegex(ValueError, "must be clean"):
             worktrees.release(self.worktree, "chat-1")
@@ -209,6 +288,53 @@ class WorktreeTests(unittest.TestCase):
         self.assertFalse(self.worktree.exists())
         self.assertEqual(worktrees.audit(), [])
         self.assertNotIn("codex/fixture", git("branch", "--list", cwd=self.repo))
+
+    def test_cleanup_accepts_legacy_same_repository_pull_url(self) -> None:
+        entry = self.start()
+        worktrees.update(self.worktree, "chat-1", pr="12")
+        registry = json.loads(self.registry.read_text())
+        registry["entries"][str(self.worktree.resolve())]["pr"] = (
+            "https://github.com/example/repo/pull/12"
+        )
+        self.registry.write_text(json.dumps(registry))
+        worktrees.release(self.worktree, "chat-1")
+        real_run = worktrees._run
+        commands = []
+
+        def gh_result(*args: str, cwd=None) -> str:
+            if args[0] == "gh":
+                commands.append(args)
+                return json.dumps({"state": "MERGED", "headRefOid": entry["head"]})
+            return real_run(*args, cwd=cwd)
+
+        with patch.object(worktrees, "_run", side_effect=gh_result):
+            result = worktrees.cleanup(self.worktree, "chat-1")
+        self.assertEqual(result["merged_pr"], "12")
+        self.assertIn(
+            (
+                "gh",
+                "pr",
+                "view",
+                "12",
+                "--repo",
+                "example/repo",
+                "--json",
+                "state,headRefOid",
+            ),
+            commands,
+        )
+        self.assertFalse(self.worktree.exists())
+
+    def test_cleanup_rejects_legacy_foreign_repository_url(self) -> None:
+        self.start()
+        registry = json.loads(self.registry.read_text())
+        record = registry["entries"][str(self.worktree.resolve())]
+        record["pr"] = "https://github.com/elsewhere/repo/pull/12"
+        record["released"] = True
+        self.registry.write_text(json.dumps(registry))
+        with self.assertRaisesRegex(ValueError, "does not match worktree repository"):
+            worktrees.cleanup(self.worktree, "chat-1")
+        self.assertTrue(self.worktree.exists())
 
 
 if __name__ == "__main__":
