@@ -95,16 +95,25 @@ required CI. A separate closed schema,
 `target_branch` and `target_sha`, and
 `applicability_observation_sha256`. It is accepted only with the decision
 comment path; formal review references cannot select N/A. The canonical
-`codex-devtools-required-check-applicability-v1` observation records endpoint
+`codex-devtools-required-check-applicability-v2` observation records endpoint
 names, API version, HTTP status and raw response body hashes, and is bound by
 the v2 comment alongside repository, PR head/base/source and merge trees, body,
 and policy/evidence/plan pins.
 
 The N/A observation must show the exact target branch at the pinned target SHA
-with `protected: false`, a structured valid-empty `gh pr checks --required`
-result, zero configured workflows, complete empty check-run and individual
-status-context reads for the exact PR head, and an aggregate status with no
-contexts. The aggregate `pending` value is not a pass. The three documented
+with `protected: false`, zero configured workflows, complete empty check-run
+and individual status-context reads for the exact PR head, and an aggregate
+status with no contexts. The aggregate `pending` value is not a pass. The
+required-check CLI observation accepts either structured valid-empty JSON or
+the exact `gh` no-check sentinel: exit code 1, empty stdout, and stderr
+`no checks reported on the '<head-ref>' branch\n`. For the sentinel, `<head-ref>`
+is taken from the fresh PR snapshot and the canonical observation binds that
+source ref to the exact PR head SHA, base SHA, and target branch. It records
+SHA-256 hashes of raw stdout and stderr and a typed `gh_no_checks_reported`
+representation. Any different branch text, nonempty stdout, malformed output,
+other exit, or generic CLI error remains unknown. This typed observation is
+only candidate applicability evidence; it never means CI passed or changes the
+strict `review-ready` result. The three documented
 branch-protection/rules endpoints count as `feature_unsupported` only for a
 private repository and the exact GitHub upgrade response; generic 403/404,
 network or parse errors, missing fields, truncation, duplicates and conflicting

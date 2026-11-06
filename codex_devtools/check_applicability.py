@@ -8,7 +8,7 @@ import re
 from typing import Any
 from urllib.parse import quote
 
-SCHEMA = "codex-devtools-required-check-applicability-v1"
+SCHEMA = "codex-devtools-required-check-applicability-v2"
 API_VERSION = "2022-11-28"
 UPGRADE_MESSAGE = (
     "Upgrade to GitHub Pro or make this repository public to enable this feature."
@@ -31,6 +31,7 @@ OBSERVATION_FIELDS = {
     "target_branch",
     "target_sha",
     "head_sha",
+    "head_ref",
     "repository_private",
     "repository_owner_type",
     "repository_observation",
@@ -84,6 +85,7 @@ def validate_na_observation(
     target_branch: str,
     target_sha: str,
     head_sha: str,
+    head_ref: str,
 ) -> str:
     """Require a complete, exact, empty-check observation and return its hash."""
     if not isinstance(observation, dict) or set(observation) != OBSERVATION_FIELDS:
@@ -94,6 +96,7 @@ def validate_na_observation(
         or observation["target_branch"] != target_branch
         or observation["target_sha"] != target_sha
         or observation["head_sha"] != head_sha
+        or observation["head_ref"] != head_ref
         or observation["repository_private"] is not True
         or observation["repository_owner_type"] != "User"
     ):
@@ -127,16 +130,56 @@ def validate_na_observation(
     required = observation["required_checks"]
     if (
         not isinstance(required, dict)
-        or set(required) != {"command", "exit_code", "body_sha256", "complete", "rows"}
+        or set(required)
+        != {
+            "command",
+            "head_ref",
+            "head_sha",
+            "base_sha",
+            "target_branch",
+            "exit_code",
+            "stdout_sha256",
+            "stderr_sha256",
+            "representation",
+            "complete",
+            "rows",
+        }
         or required.get("command") != "gh pr checks --required --json"
+        or required.get("head_ref") != head_ref
+        or required.get("head_sha") != head_sha
+        or required.get("base_sha") != target_sha
+        or required.get("target_branch") != target_branch
         or type(required.get("exit_code")) is not int
         or required["exit_code"] not in (0, 1, 8)
         or required.get("complete") is not True
         or required.get("rows") != []
-        or not isinstance(required.get("body_sha256"), str)
-        or not SHA256.fullmatch(required["body_sha256"])
+        or not isinstance(required.get("stdout_sha256"), str)
+        or not SHA256.fullmatch(required["stdout_sha256"])
+        or not isinstance(required.get("stderr_sha256"), str)
+        or not SHA256.fullmatch(required["stderr_sha256"])
     ):
         raise ValueError("required-check command did not return a valid empty set")
+    representation = required.get("representation")
+    if representation == {"kind": "structured_json"}:
+        if (
+            required["exit_code"] not in (0, 1, 8)
+            or required["stderr_sha256"] != hashlib.sha256(b"").hexdigest()
+        ):
+            raise ValueError("structured required-check result is invalid")
+    elif representation == {"kind": "gh_no_checks_reported", "branch": head_ref}:
+        if (
+            required["exit_code"] != 1
+            or required["stdout_sha256"] != hashlib.sha256(b"").hexdigest()
+            or required["stderr_sha256"]
+            != hashlib.sha256(
+                f"no checks reported on the '{head_ref}' branch\n".encode()
+            ).hexdigest()
+        ):
+            raise ValueError(
+                "known no-check sentinel does not match the exact PR head ref"
+            )
+    else:
+        raise ValueError("required-check CLI representation is unknown")
 
     workflows = _endpoint_row(
         observation["workflows"],

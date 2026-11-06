@@ -22,6 +22,7 @@ ASSERTION = (
     "I am the designated coordinator and explicitly authorize this exact-head merge."
 )
 MERGE_SHA = "4" * 40
+HEAD_REF = "codex/pr75-remote-check-na"
 
 
 def decision_body(*, head=HEAD, extra=None):
@@ -61,14 +62,21 @@ def na_observation(*, target_branch="main"):
         "target_branch": target_branch,
         "target_sha": BASE,
         "head_sha": HEAD,
+        "head_ref": HEAD_REF,
         "repository_private": True,
         "repository_owner_type": "User",
         "repository_observation": endpoint("repos/philosample/devtools"),
         "branch": endpoint(f"branches/{branch_path}", sha=BASE, protected=False),
         "required_checks": {
             "command": "gh pr checks --required --json",
+            "head_ref": HEAD_REF,
+            "head_sha": HEAD,
+            "base_sha": BASE,
+            "target_branch": target_branch,
             "exit_code": 0,
-            "body_sha256": "e" * 64,
+            "stdout_sha256": "e" * 64,
+            "stderr_sha256": hashlib.sha256(b"").hexdigest(),
+            "representation": {"kind": "structured_json"},
             "complete": True,
             "rows": [],
         },
@@ -205,6 +213,7 @@ class FakePorts:
             "number": 75,
             "state": "OPEN",
             "head_sha": HEAD,
+            "head_ref": HEAD_REF,
             "base_sha": BASE,
             "base_ref": "main",
             "head_tree_sha": HEAD_TREE,
@@ -272,7 +281,7 @@ class FakePorts:
             "body": body,
         }
 
-    def check_applicability(self, *, target_branch, target_sha, head_sha):
+    def check_applicability(self, *, target_branch, target_sha, head_sha, head_ref):
         index = self.applicability_calls
         self.applicability_calls += 1
         if self.applicability_observations is not None:
@@ -710,7 +719,7 @@ class PRMergeTests(unittest.TestCase):
             "number": 86,
             "state": "open",
             "merged": False,
-            "head": {"sha": HEAD},
+            "head": {"sha": HEAD, "ref": HEAD_REF},
             "base": {"sha": BASE, "ref": "main"},
             "body": "reviewed body",
         }
@@ -727,13 +736,20 @@ class PRMergeTests(unittest.TestCase):
             "expected_plan_sha256": "c" * 64,
         }
 
-        def fake_run_for(link_header):
+        def fake_run_for(link_header, required_response=None):
             calls = 0
 
             def fake_run(command, **_kwargs):
                 nonlocal calls
                 calls += 1
                 if command[:3] == ["gh", "pr", "checks"]:
+                    if required_response is not None:
+                        return subprocess.CompletedProcess(
+                            command,
+                            required_response.returncode,
+                            required_response.stdout,
+                            required_response.stderr,
+                        )
                     stdout = b"[]\n" if calls % 2 else "[]\n"
                     return subprocess.CompletedProcess(command, 0, stdout, b"")
                 endpoint = command[-1]
@@ -801,6 +817,40 @@ class PRMergeTests(unittest.TestCase):
                 self.assertFalse(result["merge_authorized"])
                 self.assertFalse(result["ci_passed"])
 
+        sentinel = subprocess.CompletedProcess(
+            ["gh", "pr", "checks"],
+            1,
+            b"",
+            f"no checks reported on the '{HEAD_REF}' branch\n".encode(),
+        )
+        ports = pr_merge.GHMergePorts("philosample/devtools", 86)
+        with patch(
+            "codex_devtools.pr_merge.subprocess.run",
+            side_effect=fake_run_for(None, sentinel),
+        ):
+            result = pr_merge.check_applicability_report(**pins, ports=ports)
+        required = result["observation"]["required_checks"]
+        self.assertEqual(result["head_ref"], HEAD_REF)
+        self.assertEqual(
+            required["representation"],
+            {"kind": "gh_no_checks_reported", "branch": HEAD_REF},
+        )
+        self.assertEqual(required["head_sha"], HEAD)
+        self.assertEqual(required["base_sha"], BASE)
+        self.assertEqual(required["target_branch"], "main")
+        self.assertEqual(required["stdout_sha256"], hashlib.sha256(b"").hexdigest())
+        self.assertEqual(
+            required["stderr_sha256"], hashlib.sha256(sentinel.stderr).hexdigest()
+        )
+        check_applicability.validate_na_observation(
+            result["observation"],
+            repository="philosample/devtools",
+            target_branch="main",
+            target_sha=BASE,
+            head_sha=HEAD,
+            head_ref=HEAD_REF,
+        )
+
         next_link = (
             f"<https://api.github.com/repos/philosample/devtools/commits/{HEAD}"
             '/check-runs?per_page=100&page=2>; rel="next"'
@@ -851,7 +901,10 @@ class PRMergeTests(unittest.TestCase):
         ports = pr_merge.GHMergePorts("philosample/devtools", 75)
         with patch("codex_devtools.pr_merge.subprocess.run", side_effect=fake_run):
             observation = ports.check_applicability(
-                target_branch="release/2026", target_sha=BASE, head_sha=HEAD
+                target_branch="release/2026",
+                target_sha=BASE,
+                head_sha=HEAD,
+                head_ref=HEAD_REF,
             )
         self.assertEqual(observation["branch"]["endpoint"], "branches/release%2F2026")
         self.assertEqual(
@@ -861,6 +914,7 @@ class PRMergeTests(unittest.TestCase):
                 target_branch="release/2026",
                 target_sha=BASE,
                 head_sha=HEAD,
+                head_ref=HEAD_REF,
             ),
             check_applicability.canonical_hash(observation),
         )
@@ -900,7 +954,10 @@ class PRMergeTests(unittest.TestCase):
         ports = pr_merge.GHMergePorts("philosample/devtools", 75)
         with patch("codex_devtools.pr_merge.subprocess.run", side_effect=fake_run):
             observation = ports.check_applicability(
-                target_branch="main", target_sha=BASE, head_sha=HEAD
+                target_branch="main",
+                target_sha=BASE,
+                head_sha=HEAD,
+                head_ref=HEAD_REF,
             )
         with self.assertRaisesRegex(ValueError, "exact private-repository upgrade"):
             check_applicability.validate_na_observation(
@@ -909,6 +966,7 @@ class PRMergeTests(unittest.TestCase):
                 target_branch="main",
                 target_sha=BASE,
                 head_sha=HEAD,
+                head_ref=HEAD_REF,
             )
 
     def invoke_decision(self, ports, **updates):
@@ -965,6 +1023,34 @@ class PRMergeTests(unittest.TestCase):
             (
                 "branch SHA",
                 lambda observation: observation["branch"].update(sha="f" * 40),
+            ),
+            (
+                "source ref mismatch",
+                lambda observation: observation.update(head_ref="codex/wrong-source"),
+            ),
+            (
+                "required-check source identity mismatch",
+                lambda observation: observation["required_checks"].update(
+                    head_ref="codex/wrong-source"
+                ),
+            ),
+            (
+                "required-check base identity mismatch",
+                lambda observation: observation["required_checks"].update(
+                    base_sha="f" * 40
+                ),
+            ),
+            (
+                "required-check target branch mismatch",
+                lambda observation: observation["required_checks"].update(
+                    target_branch="release/changed"
+                ),
+            ),
+            (
+                "required check present",
+                lambda observation: observation["required_checks"].update(
+                    rows=[{"name": "required"}]
+                ),
             ),
             (
                 "protected",
@@ -1098,7 +1184,9 @@ class PRMergeTests(unittest.TestCase):
         self.assertEqual(ports.merge_calls, [])
 
         class UnavailablePorts(FakePorts):
-            def check_applicability(self, *, target_branch, target_sha, head_sha):
+            def check_applicability(
+                self, *, target_branch, target_sha, head_sha, head_ref
+            ):
                 self.applicability_calls += 1
                 raise OSError("network unavailable")
 
@@ -1108,7 +1196,14 @@ class PRMergeTests(unittest.TestCase):
             self.invoke_decision(ports, readiness=ready_report_checks_unknown)
         self.assertEqual(ports.merge_calls, [])
 
-    def test_required_check_cli_needs_a_structured_empty_result(self):
+    def test_required_check_cli_rejects_unrecognized_sentinels_and_failures(self):
+        identity = {
+            "head_ref": HEAD_REF,
+            "head_sha": HEAD,
+            "base_sha": BASE,
+            "target_branch": "main",
+        }
+        sentinel = f"no checks reported on the '{HEAD_REF}' branch\n".encode()
         with (
             patch(
                 "codex_devtools.pr_merge.subprocess.run",
@@ -1117,11 +1212,19 @@ class PRMergeTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "unavailable"),
         ):
             pr_merge.GHMergePorts._required_check_observation(
-                "philosample/devtools", 75
+                "philosample/devtools", 75, **identity
             )
-        for stdout, returncode in ((b"[]\n", 4), (b"no checks reported", 1)):
-            with self.subTest(stdout=stdout, returncode=returncode):
-                completed = subprocess.CompletedProcess([], returncode, stdout, "")
+        failures = (
+            (b"", 1, b"no checks reported on the 'wrong/branch' branch\n"),
+            (b"", 1, b"permission denied\n"),
+            (b"not json", 0, b""),
+            (b"[]\n", 1, sentinel),
+            (b"", 0, sentinel),
+            (b"[]\n", 4, b""),
+        )
+        for stdout, returncode, stderr in failures:
+            with self.subTest(stdout=stdout, returncode=returncode, stderr=stderr):
+                completed = subprocess.CompletedProcess([], returncode, stdout, stderr)
                 with (
                     patch(
                         "codex_devtools.pr_merge.subprocess.run", return_value=completed
@@ -1129,23 +1232,91 @@ class PRMergeTests(unittest.TestCase):
                     self.assertRaises(ValueError),
                 ):
                     pr_merge.GHMergePorts._required_check_observation(
-                        "philosample/devtools", 75
+                        "philosample/devtools", 75, **identity
                     )
 
         completed = subprocess.CompletedProcess([], 0, b"[{}]", b"")
         with patch("codex_devtools.pr_merge.subprocess.run", return_value=completed):
             nonempty = pr_merge.GHMergePorts._required_check_observation(
-                "philosample/devtools", 75
+                "philosample/devtools", 75, **identity
             )
         self.assertEqual(nonempty["rows"], [{}])
 
         completed = subprocess.CompletedProcess([], 1, b"[]\n", b"")
         with patch("codex_devtools.pr_merge.subprocess.run", return_value=completed):
             required = pr_merge.GHMergePorts._required_check_observation(
-                "philosample/devtools", 75
+                "philosample/devtools", 75, **identity
             )
         self.assertEqual(required["rows"], [])
         self.assertTrue(required["complete"])
+        self.assertEqual(required["representation"], {"kind": "structured_json"})
+        self.assertEqual(required["stdout_sha256"], hashlib.sha256(b"[]\n").hexdigest())
+        self.assertEqual(required["stderr_sha256"], hashlib.sha256(b"").hexdigest())
+
+    def test_collector_rejects_head_or_base_drift_before_applicability_reads(self):
+        pins = {
+            "repository": "philosample/devtools",
+            "number": 86,
+            "expected_head": HEAD,
+            "expected_base": BASE,
+            "expected_head_tree": HEAD_TREE,
+            "body_sha256": BODY_HASH,
+            "expected_policy_sha256": "a" * 64,
+            "expected_evidence_sha256": "b" * 64,
+            "expected_plan_sha256": "c" * 64,
+        }
+
+        class DriftPorts:
+            def __init__(self, *, head=HEAD, base=BASE):
+                self.head = head
+                self.base = base
+
+            def snapshot(self):
+                return {
+                    "number": 86,
+                    "state": "OPEN",
+                    "head_sha": self.head,
+                    "head_ref": HEAD_REF,
+                    "base_sha": self.base,
+                    "base_ref": "main",
+                    "head_tree_sha": HEAD_TREE,
+                    "body_sha256": BODY_HASH,
+                }
+
+            def check_applicability(self, **_kwargs):
+                raise AssertionError("drift must stop before applicability reads")
+
+        for field, change in (("head", "5" * 40), ("base", "6" * 40)):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "pins"):
+                pr_merge.check_applicability_report(
+                    **pins, ports=DriftPorts(**{field: change})
+                )
+
+        class MidCollectionDriftPorts(DriftPorts):
+            def __init__(self, field):
+                super().__init__()
+                self.field = field
+                self.snapshots = 0
+
+            def snapshot(self):
+                self.snapshots += 1
+                row = super().snapshot()
+                if self.snapshots == 2:
+                    row = row.copy()
+                    row["head_sha" if self.field == "head" else "base_sha"] = "7" * 40
+                return row
+
+            def check_applicability(self, **_kwargs):
+                return na_observation()
+
+        for field in ("head", "base"):
+            with (
+                self.subTest(mid_collection_field=field),
+                self.assertRaisesRegex(ValueError, "changed during applicability"),
+            ):
+                pr_merge.check_applicability_report(
+                    **pins, ports=MidCollectionDriftPorts(field)
+                )
 
     def test_v2_final_observation_drift_and_comment_change_block_mutation(self):
         observation = na_observation()
@@ -1167,6 +1338,17 @@ class PRMergeTests(unittest.TestCase):
         ports.snapshot_rows = [first, final]
         ports.decision_body = na_decision_body()
         with self.assertRaisesRegex(ValueError, "target branch changed"):
+            self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        self.assertEqual(ports.merge_calls, [])
+        self.assertEqual(ports.snapshot_calls, 2)
+
+        ports = FakePorts()
+        first = ports.snapshot_row.copy()
+        final = ports.snapshot_row.copy()
+        final["head_ref"] = "codex/renamed-source"
+        ports.snapshot_rows = [first, final]
+        ports.decision_body = na_decision_body()
+        with self.assertRaisesRegex(ValueError, "source or target branch changed"):
             self.invoke_decision(ports, readiness=ready_report_checks_unknown)
         self.assertEqual(ports.merge_calls, [])
         self.assertEqual(ports.snapshot_calls, 2)

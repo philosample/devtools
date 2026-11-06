@@ -134,7 +134,12 @@ class MergePorts(Protocol):
     def decision(self, reference: str) -> dict[str, Any]: ...
 
     def check_applicability(
-        self, *, target_branch: str, target_sha: str, head_sha: str
+        self,
+        *,
+        target_branch: str,
+        target_sha: str,
+        head_sha: str,
+        head_ref: str,
     ) -> dict[str, Any]: ...
 
     def merge(self, expected_head: str) -> dict[str, Any]: ...
@@ -233,7 +238,15 @@ class GHMergePorts:
         }
 
     @staticmethod
-    def _required_check_observation(repository: str, number: int) -> dict[str, Any]:
+    def _required_check_observation(
+        repository: str,
+        number: int,
+        *,
+        head_ref: str,
+        head_sha: str,
+        base_sha: str,
+        target_branch: str,
+    ) -> dict[str, Any]:
         from .pr_readiness import CHECK_FIELDS
 
         try:
@@ -256,12 +269,24 @@ class GHMergePorts:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ValueError("required-check observation is unavailable") from exc
         raw = _stdout_bytes(completed.stdout, "required-check CLI")
+        stderr = _stdout_bytes(completed.stderr, "required-check CLI stderr")
         if len(raw) > 1_048_576:
             raise ValueError("required-check response exceeds size limit")
-        try:
-            rows = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError("required-check response is not structured JSON") from exc
+        representation: dict[str, str]
+        expected_stderr = f"no checks reported on the '{head_ref}' branch\n".encode()
+        if completed.returncode == 1 and raw == b"" and stderr == expected_stderr:
+            rows = []
+            representation = {"kind": "gh_no_checks_reported", "branch": head_ref}
+        else:
+            representation = {"kind": "structured_json"}
+            if stderr:
+                raise ValueError("required-check command reported an error on stderr")
+            try:
+                rows = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "required-check response is not structured JSON"
+                ) from exc
         if (
             completed.returncode not in (0, 1, 8)
             or not isinstance(rows, list)
@@ -270,14 +295,25 @@ class GHMergePorts:
             raise ValueError("required-check response is incomplete or malformed")
         return {
             "command": "gh pr checks --required --json",
+            "head_ref": head_ref,
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "target_branch": target_branch,
             "exit_code": completed.returncode,
-            "body_sha256": hashlib.sha256(raw).hexdigest(),
+            "stdout_sha256": hashlib.sha256(raw).hexdigest(),
+            "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+            "representation": representation,
             "complete": True,
             "rows": rows,
         }
 
     def check_applicability(
-        self, *, target_branch: str, target_sha: str, head_sha: str
+        self,
+        *,
+        target_branch: str,
+        target_sha: str,
+        head_sha: str,
+        head_ref: str,
     ) -> dict[str, Any]:
         """Collect one bounded, exact observation; ambiguous responses fail closed."""
         branch_path = quote(target_branch, safe="")
@@ -297,7 +333,14 @@ class GHMergePorts:
         runs_response = self._included_api(run_endpoint)
         statuses_response = self._included_api(statuses_endpoint)
         aggregate_response = self._included_api(aggregate_endpoint)
-        required = self._required_check_observation(self.repository, self.number)
+        required = self._required_check_observation(
+            self.repository,
+            self.number,
+            head_ref=head_ref,
+            head_sha=head_sha,
+            base_sha=target_sha,
+            target_branch=target_branch,
+        )
 
         def api_row(endpoint: str, response: dict[str, Any]) -> dict[str, Any]:
             if response["status_code"] != 200 or response["returncode"] != 0:
@@ -367,6 +410,7 @@ class GHMergePorts:
             "target_branch": target_branch,
             "target_sha": target_sha,
             "head_sha": head_sha,
+            "head_ref": head_ref,
             "repository_private": repo_payload.get("private"),
             "repository_owner_type": repo_payload.get("owner", {}).get("type")
             if isinstance(repo_payload.get("owner"), dict)
@@ -414,6 +458,8 @@ class GHMergePorts:
         pr = self._api(f"repos/{self.repository}/pulls/{self.number}")
         head = pr["head"]["sha"]
         base = pr["base"]["sha"]
+        head_ref = pr["head"]["ref"]
+        base_ref = pr["base"]["ref"]
         head_commit = self._api(f"repos/{self.repository}/commits/{head}")
         body = pr["body"] or ""
         if not isinstance(body, str):
@@ -422,8 +468,9 @@ class GHMergePorts:
             "number": pr["number"],
             "state": "MERGED" if pr.get("merged") else pr["state"].upper(),
             "head_sha": head,
+            "head_ref": head_ref,
             "base_sha": base,
-            "base_ref": pr["base"]["ref"],
+            "base_ref": base_ref,
             "head_tree_sha": head_commit["commit"]["tree"]["sha"],
             "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         }
@@ -543,10 +590,15 @@ def check_applicability_report(
         or current.get("body_sha256") != body_sha256
         or not isinstance(current.get("base_ref"), str)
         or not current["base_ref"]
+        or not isinstance(current.get("head_ref"), str)
+        or not current["head_ref"]
     ):
         raise ValueError("PR pins do not match the requested applicability observation")
     observation = ports.check_applicability(
-        target_branch=current["base_ref"], target_sha=base, head_sha=head
+        target_branch=current["base_ref"],
+        target_sha=base,
+        head_sha=head,
+        head_ref=current["head_ref"],
     )
     observation_sha256 = check_applicability.validate_na_observation(
         observation,
@@ -554,7 +606,21 @@ def check_applicability_report(
         target_branch=current["base_ref"],
         target_sha=base,
         head_sha=head,
+        head_ref=current["head_ref"],
     )
+    final = ports.snapshot()
+    exact_identity = (
+        "number",
+        "state",
+        "head_sha",
+        "head_ref",
+        "base_sha",
+        "base_ref",
+        "head_tree_sha",
+        "body_sha256",
+    )
+    if any(final.get(field) != current.get(field) for field in exact_identity):
+        raise ValueError("PR pins changed during applicability observation")
     return {
         "command": "check-applicability",
         "status": "candidate_evidence",
@@ -563,6 +629,7 @@ def check_applicability_report(
         "repository": repository,
         "pr_number": number,
         "head_sha": head,
+        "head_ref": current["head_ref"],
         "base_sha": base,
         "target_branch": current["base_ref"],
         "head_tree_sha": head_tree,
@@ -697,6 +764,7 @@ def _decision_receipt(
     body_sha256: str,
     declarations: dict[str, str],
     target_branch: str,
+    head_ref: str,
 ) -> dict[str, Any]:
     if not isinstance(reference, str) or not DECISION_REFERENCE.fullmatch(reference):
         raise ValueError("decision reference must identify one explicit GitHub comment")
@@ -775,7 +843,10 @@ def _decision_receipt(
                 "decision v2 required-check applicability pins are malformed"
             )
         observation = ports.check_applicability(
-            target_branch=target_branch, target_sha=base, head_sha=head
+            target_branch=target_branch,
+            target_sha=base,
+            head_sha=head,
+            head_ref=head_ref,
         )
         observation_sha256 = check_applicability.validate_na_observation(
             observation,
@@ -783,6 +854,7 @@ def _decision_receipt(
             target_branch=target_branch,
             target_sha=base,
             head_sha=head,
+            head_ref=head_ref,
         )
         expected.update(
             {
@@ -905,7 +977,13 @@ def merge_pr(
             "PR head, base, source tree, or body changed immediately before merge"
         )
     target_branch = current.get("base_ref")
-    if use_decision and (not isinstance(target_branch, str) or not target_branch):
+    head_ref = current.get("head_ref")
+    if use_decision and (
+        not isinstance(target_branch, str)
+        or not target_branch
+        or not isinstance(head_ref, str)
+        or not head_ref
+    ):
         raise ValueError("PR target branch name is missing or malformed")
     decision_metadata = None
     if use_decision:
@@ -922,6 +1000,7 @@ def merge_pr(
             body_sha256=body_sha256,
             declarations=expected_declarations,
             target_branch=target_branch,
+            head_ref=head_ref,
         )
     allow_required_checks_na = (
         decision_metadata is not None
@@ -967,8 +1046,10 @@ def merge_pr(
         current.get("body_sha256"),
     ) != (head, base, head_tree, body_sha256):
         raise ValueError("PR pins changed at the merge boundary")
-    if use_decision and current.get("base_ref") != target_branch:
-        raise ValueError("PR target branch changed at the merge boundary")
+    if use_decision and (
+        current.get("base_ref") != target_branch or current.get("head_ref") != head_ref
+    ):
+        raise ValueError("PR source or target branch changed at the merge boundary")
     if use_review:
         review = ports.review(review_reference)
         if review.get("state") != "APPROVED" or review.get("commit_sha") != head:
@@ -987,6 +1068,7 @@ def merge_pr(
             body_sha256=body_sha256,
             declarations=expected_declarations,
             target_branch=target_branch,
+            head_ref=head_ref,
         )
         if final_decision_metadata != decision_metadata:
             raise ValueError("coordinator decision or applicability evidence changed")
