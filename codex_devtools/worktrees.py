@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 FORMAT = "codex-devtools-worktrees-v1"
 
@@ -163,6 +164,7 @@ def register(
     repository, worktree = repository.resolve(), worktree.resolve()
     if not owner_chat.strip() or not story.strip() or not plan.strip():
         raise ValueError("owner chat, story and plan are required")
+    pr_number = _pull_request_number(pr, repository)
     branch, head = _identity(repository, worktree)
     path = registry_path()
     with _locked(path):
@@ -170,7 +172,14 @@ def register(
         if str(worktree) in data["entries"]:
             raise ValueError(f"worktree is already registered: {worktree}")
         entry = _new_entry(
-            repository, worktree, branch, head, owner_chat, story, plan, pr
+            repository,
+            worktree,
+            branch,
+            head,
+            owner_chat,
+            story,
+            plan,
+            pr_number or "",
         )
         data["entries"][str(worktree)] = entry
         _write(path, data)
@@ -236,12 +245,14 @@ def update(
         entry = _entry(data, worktree, owner_chat)
         if entry["released"]:
             raise ValueError("released worktree cannot be updated")
-        branch, head = _identity(Path(entry["repository"]), worktree)
+        repository = Path(entry["repository"])
+        branch, head = _identity(repository, worktree)
         if branch != entry["branch"]:
             raise ValueError("worktree branch changed")
+        pr_number = _pull_request_number(pr, repository) if pr is not None else None
         entry["head"] = head
         if pr is not None:
-            entry["pr"] = pr
+            entry["pr"] = pr_number or ""
         if plan is not None:
             if not plan.strip():
                 raise ValueError("plan cannot be empty")
@@ -259,7 +270,8 @@ def release(worktree: Path, owner_chat: str) -> dict:
         branch, head = _identity(Path(entry["repository"]), worktree)
         if branch != entry["branch"] or head != entry["head"]:
             raise ValueError("worktree changed since last registry update")
-        if not re.fullmatch(r"[1-9][0-9]*", entry["pr"]) and _status(worktree):
+        pr_number = _pull_request_number(entry["pr"], Path(entry["repository"]))
+        if pr_number is None and _status(worktree):
             raise ValueError("no-PR worktree must be clean before release")
         entry["released"] = True
         _write(path, data)
@@ -290,6 +302,38 @@ def _github_repo(repository: Path) -> str:
     return f"{match.group(1)}/{match.group(2)}"
 
 
+def _pull_request_number(pr: str, repository: Path) -> str | None:
+    """Validate a PR number or same-repository GitHub pull URL."""
+    if not isinstance(pr, str):
+        raise TypeError("GitHub PR reference must be a string")
+    if not pr:
+        return None
+    if re.fullmatch(r"[1-9][0-9]*", pr):
+        return pr
+    if pr != pr.strip() or any(character.isspace() for character in pr):
+        raise ValueError("invalid GitHub PR reference")
+    try:
+        parsed = urlsplit(pr)
+    except ValueError as exc:
+        raise ValueError("invalid GitHub PR reference") from exc
+    match = re.fullmatch(
+        r"/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)/?",
+        parsed.path,
+    )
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc.lower() != "github.com"
+        or parsed.query
+        or parsed.fragment
+        or match is None
+    ):
+        raise ValueError("invalid GitHub PR reference")
+    url_repository = f"{match.group(1)}/{match.group(2)}"
+    if url_repository.casefold() != _github_repo(repository).casefold():
+        raise ValueError("GitHub PR URL repository does not match worktree repository")
+    return match.group(3)
+
+
 def _status(worktree: Path) -> str:
     return _run(
         "git",
@@ -316,14 +360,15 @@ def cleanup(worktree: Path, owner_chat: str) -> dict:
             raise ValueError("worktree branch or head changed since release")
         if _status(worktree):
             raise ValueError("worktree has tracked or untracked changes")
-        if not re.fullmatch(r"[1-9][0-9]*", entry["pr"]):
-            raise ValueError("a numeric GitHub PR is required for cleanup")
+        pr_number = _pull_request_number(entry["pr"], repository)
+        if pr_number is None:
+            raise ValueError("a GitHub PR is required for cleanup")
         review = json.loads(
             _run(
                 "gh",
                 "pr",
                 "view",
-                entry["pr"],
+                pr_number,
                 "--repo",
                 _github_repo(repository),
                 "--json",
@@ -339,6 +384,6 @@ def cleanup(worktree: Path, owner_chat: str) -> dict:
     return {
         "removed_worktree": str(worktree),
         "removed_branch": branch,
-        "merged_pr": entry["pr"],
+        "merged_pr": pr_number,
         "head": head,
     }
