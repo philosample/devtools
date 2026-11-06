@@ -81,6 +81,7 @@ def na_observation(*, target_branch="main"):
         ),
         "check_runs": endpoint(
             f"commits/{HEAD}/check-runs?per_page=100",
+            total_count=0,
             complete=True,
             truncated=False,
             rows=[],
@@ -139,6 +140,22 @@ def na_decision_body(*, target_branch="main", observation=None, extra=None):
 
 DECISION_BODY = decision_body()
 DECISION_HASH = hashlib.sha256(DECISION_BODY.encode()).hexdigest()
+
+
+def completed_http(command, status, payload, *, link=None, as_text=False):
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+    headers = b"Content-Type: application/json\r\n"
+    if link is not None:
+        headers += f"Link: {link}\r\n".encode("ascii")
+    output = (
+        f"HTTP/2.0 {status} {'OK' if status == 200 else 'Forbidden'}\r\n".encode()
+        + headers
+        + b"\r\n"
+        + body
+    )
+    if as_text:
+        output = output.decode("utf-8")
+    return subprocess.CompletedProcess(command, 0 if status == 200 else 1, output, b"")
 
 
 def ready_report():
@@ -587,6 +604,217 @@ class PRMergeTests(unittest.TestCase):
             pr_merge.GHMergePorts("philosample/devtools", 75).terminal()
         self.assertEqual(api.call_count, 3)
 
+    def test_api_normalizes_completed_process_bytes_and_text(self):
+        payload = {"private": True, "owner": {"type": "User"}}
+        for stdout in (json.dumps(payload).encode(), json.dumps(payload)):
+            with self.subTest(stdout_type=type(stdout).__name__):
+                completed = subprocess.CompletedProcess([], 0, stdout, b"")
+                with patch(
+                    "codex_devtools.pr_merge.subprocess.run", return_value=completed
+                ):
+                    result = pr_merge.GHMergePorts("philosample/devtools", 86)._api(
+                        "repos/philosample/devtools"
+                    )
+                self.assertEqual(result, payload)
+
+    def test_api_http_error_is_unknown_without_stdout_type_crash(self):
+        completed = subprocess.CompletedProcess(
+            [], 1, b'{"message":"Resource not accessible"}\n', b"HTTP 403"
+        )
+        with (
+            patch("codex_devtools.pr_merge.subprocess.run", return_value=completed),
+            self.assertRaises(pr_merge.UnknownCompletion),
+        ):
+            pr_merge.GHMergePorts("philosample/devtools", 86)._api(
+                "repos/philosample/devtools"
+            )
+
+    def test_included_api_normalizes_http_200_and_known_403_and_hashes_raw_body(self):
+        for status, payload, stdout in (
+            (200, {"ok": True}, completed_http([], 200, {"ok": True}).stdout),
+            (
+                403,
+                {"message": check_applicability.UPGRADE_MESSAGE},
+                completed_http(
+                    [],
+                    403,
+                    {"message": check_applicability.UPGRADE_MESSAGE},
+                    as_text=True,
+                ).stdout,
+            ),
+        ):
+            with self.subTest(status=status):
+                if status == 403:
+                    expected_body = (
+                        json.dumps(payload, separators=(",", ":")).encode() + b"\n"
+                    )
+                else:
+                    expected_body = (
+                        json.dumps(payload, separators=(",", ":")).encode() + b"\n"
+                    )
+                completed = subprocess.CompletedProcess(
+                    [], 0 if status == 200 else 1, stdout, b""
+                )
+                with patch(
+                    "codex_devtools.pr_merge.subprocess.run", return_value=completed
+                ):
+                    response = pr_merge.GHMergePorts(
+                        "philosample/devtools", 86
+                    )._included_api("repos/philosample/devtools")
+                self.assertEqual(response["status_code"], status)
+                self.assertEqual(response["payload"], payload)
+                self.assertEqual(
+                    response["body_sha256"], hashlib.sha256(expected_body).hexdigest()
+                )
+
+    def test_included_api_transport_error_is_not_reported_as_size_limit(self):
+        completed = subprocess.CompletedProcess([], 1, b"", b"network error")
+        with (
+            patch("codex_devtools.pr_merge.subprocess.run", return_value=completed),
+            self.assertRaisesRegex(ValueError, "omitted HTTP status"),
+        ):
+            pr_merge.GHMergePorts("philosample/devtools", 86)._included_api(
+                "repos/philosample/devtools"
+            )
+        completed = subprocess.CompletedProcess([], 0, 1, b"")
+        with (
+            patch("codex_devtools.pr_merge.subprocess.run", return_value=completed),
+            self.assertRaisesRegex(ValueError, "stdout must be bytes or text"),
+        ):
+            pr_merge.GHMergePorts("philosample/devtools", 86)._included_api(
+                "repos/philosample/devtools"
+            )
+
+    def test_link_parser_uses_relations_not_page_query_text(self):
+        self.assertTrue(
+            pr_merge._has_next_link(
+                '<https://api.github.com/repos/a/b/commits/x/check-runs?per_page=100&page=2>; rel="next", '
+                '<https://api.github.com/repos/a/b/commits/x/check-runs?per_page=100&page=1>; rel="prev"'
+            )
+        )
+        self.assertFalse(
+            pr_merge._has_next_link(
+                '<https://api.github.com/repos/a/b/commits/x/check-runs?per_page=100&page=1>; rel="prev"'
+            )
+        )
+        self.assertTrue(
+            pr_merge._has_next_link(
+                '<https://api.github.com/repos/a/b/checks?page=2>; rel="prev next"'
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "Link header entry is malformed"):
+            pr_merge._has_next_link("not a Link entry")
+
+    def test_read_only_snapshot_and_collector_parse_real_transport_shapes(self):
+        pr_payload = {
+            "number": 86,
+            "state": "open",
+            "merged": False,
+            "head": {"sha": HEAD},
+            "base": {"sha": BASE, "ref": "main"},
+            "body": "reviewed body",
+        }
+        snapshot_commit = {"commit": {"tree": {"sha": HEAD_TREE}}}
+        pins = {
+            "repository": "philosample/devtools",
+            "number": 86,
+            "expected_head": HEAD,
+            "expected_base": BASE,
+            "expected_head_tree": HEAD_TREE,
+            "body_sha256": BODY_HASH,
+            "expected_policy_sha256": "a" * 64,
+            "expected_evidence_sha256": "b" * 64,
+            "expected_plan_sha256": "c" * 64,
+        }
+
+        def fake_run_for(link_header):
+            calls = 0
+
+            def fake_run(command, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if command[:3] == ["gh", "pr", "checks"]:
+                    stdout = b"[]\n" if calls % 2 else "[]\n"
+                    return subprocess.CompletedProcess(command, 0, stdout, b"")
+                endpoint = command[-1]
+                if (
+                    len(command) > 2
+                    and command[1] == "api"
+                    and "--include" not in command
+                ):
+                    payload = (
+                        pr_payload
+                        if endpoint.endswith("/pulls/86")
+                        else snapshot_commit
+                    )
+                    raw = json.dumps(payload).encode()
+                    return subprocess.CompletedProcess(
+                        command, 0, raw if calls % 2 else raw.decode(), b""
+                    )
+                if endpoint == "repos/philosample/devtools":
+                    status, payload = 200, {"private": True, "owner": {"type": "User"}}
+                elif endpoint == "repos/philosample/devtools/branches/main":
+                    status, payload = 200, {"commit": {"sha": BASE}, "protected": False}
+                elif endpoint.endswith("/actions/workflows?per_page=100"):
+                    status, payload = 200, {"total_count": 0, "workflows": []}
+                elif endpoint.endswith("/check-runs?per_page=100"):
+                    status, payload = 200, {"total_count": 0, "check_runs": []}
+                elif endpoint.endswith("/statuses?per_page=100"):
+                    status, payload = 200, []
+                elif endpoint.endswith("/status"):
+                    status, payload = 200, {"state": "pending", "statuses": []}
+                else:
+                    status, payload = (
+                        403,
+                        {"message": check_applicability.UPGRADE_MESSAGE},
+                    )
+                next_link = (
+                    link_header
+                    if endpoint.endswith("/check-runs?per_page=100")
+                    else None
+                )
+                return completed_http(
+                    command,
+                    status,
+                    payload,
+                    link=next_link,
+                    as_text=bool(calls % 2),
+                )
+
+            return fake_run
+
+        for link_header in (
+            None,
+            (
+                "<https://api.github.com/repos/philosample/devtools/commits/"
+                f'{HEAD}/check-runs?per_page=100&page=1>; rel="prev"'
+            ),
+        ):
+            with self.subTest(link=link_header):
+                ports = pr_merge.GHMergePorts("philosample/devtools", 86)
+                with patch(
+                    "codex_devtools.pr_merge.subprocess.run",
+                    side_effect=fake_run_for(link_header),
+                ):
+                    result = pr_merge.check_applicability_report(**pins, ports=ports)
+                self.assertEqual(result["status"], "candidate_evidence")
+                self.assertFalse(result["merge_authorized"])
+                self.assertFalse(result["ci_passed"])
+
+        next_link = (
+            f"<https://api.github.com/repos/philosample/devtools/commits/{HEAD}"
+            '/check-runs?per_page=100&page=2>; rel="next"'
+        )
+        ports = pr_merge.GHMergePorts("philosample/devtools", 86)
+        with (
+            patch(
+                "codex_devtools.pr_merge.subprocess.run",
+                side_effect=fake_run_for(next_link),
+            ),
+            self.assertRaisesRegex(ValueError, "inventory is not valid-empty"),
+        ):
+            pr_merge.check_applicability_report(**pins, ports=ports)
+
     def test_github_applicability_adapter_builds_slash_branch_observation(self):
         def fake_run(command, **_kwargs):
             if command[:3] == ["gh", "pr", "checks"]:
@@ -771,6 +999,10 @@ class PRMergeTests(unittest.TestCase):
                 lambda observation: observation["check_runs"].update(
                     complete=False, truncated=True
                 ),
+            ),
+            (
+                "contradictory empty check-run count",
+                lambda observation: observation["check_runs"].update(total_count=1),
             ),
             (
                 "workflow present",

@@ -166,23 +166,30 @@ def validate_na_observation(
         ("check_runs", f"commits/{head_sha}/check-runs?per_page=100"),
         ("statuses", f"commits/{head_sha}/statuses?per_page=100"),
     ):
+        fields = {
+            "endpoint",
+            "api_version",
+            "status_code",
+            "body_sha256",
+            "complete",
+            "truncated",
+            "rows",
+        }
+        if field == "check_runs":
+            fields.add("total_count")
         row = _endpoint_row(
             observation[field],
             endpoint=endpoint,
             status_code=200,
-            fields={
-                "endpoint",
-                "api_version",
-                "status_code",
-                "body_sha256",
-                "complete",
-                "truncated",
-                "rows",
-            },
+            fields=fields,
         )
         if (
             row["complete"] is not True
             or row["truncated"] is not False
+            or (
+                field == "check_runs"
+                and (type(row["total_count"]) is not int or row["total_count"] != 0)
+            )
             or row["rows"] != []
         ):
             raise ValueError(f"{field.replace('_', ' ')} inventory is not valid-empty")

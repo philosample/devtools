@@ -58,6 +58,74 @@ class TerminalVerificationError(ValueError):
     """Fetched terminal commit identity does not match its requested SHA."""
 
 
+def _stdout_bytes(stdout: bytes | str, label: str) -> bytes:
+    if isinstance(stdout, bytes):
+        return stdout
+    if isinstance(stdout, str):
+        try:
+            return stdout.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{label} stdout is not valid UTF-8 text") from exc
+    raise ValueError(f"{label} stdout must be bytes or text")
+
+
+def _has_next_link(link_header: str) -> bool:
+    """Parse Link relations without confusing page query parameters for `next`."""
+    if not isinstance(link_header, str):
+        raise TypeError("GitHub Link header must be text")
+    if not link_header.strip():
+        return False
+    entries: list[str] = []
+    start = 0
+    in_target = False
+    in_quote = False
+    for index, character in enumerate(link_header):
+        if character == '"' and not in_target:
+            in_quote = not in_quote
+        elif character == "<" and not in_quote:
+            in_target = True
+        elif character == ">" and not in_quote:
+            in_target = False
+        elif character == "," and not in_target and not in_quote:
+            entries.append(link_header[start:index].strip())
+            start = index + 1
+    if in_target or in_quote:
+        raise ValueError("GitHub Link header delimiters are unbalanced")
+    entries.append(link_header[start:].strip())
+    for entry in entries:
+        match = re.fullmatch(r"<[^<>]+>(.*)", entry)
+        if match is None:
+            raise ValueError("GitHub Link header entry is malformed")
+        parameters = match.group(1).strip()
+        found_relation = False
+        is_next = False
+        while parameters:
+            parameter = re.match(
+                r";\s*([!#$%&'*+.^_`|~0-9A-Za-z-]+)\s*=\s*"
+                r'(?:"((?:[^"\\]|\\.)*)"|([^;\s,]+))(.*)$',
+                parameters,
+            )
+            if parameter is None:
+                raise ValueError("GitHub Link header parameter is malformed")
+            name = parameter.group(1).lower()
+            value = (
+                parameter.group(2)
+                if parameter.group(2) is not None
+                else parameter.group(3)
+            )
+            if name == "rel":
+                if found_relation or not value.strip():
+                    raise ValueError("GitHub Link header relation is malformed")
+                found_relation = True
+                is_next = "next" in value.lower().split()
+            parameters = parameter.group(4).strip()
+        if not found_relation:
+            raise ValueError("GitHub Link header relation is missing")
+        if is_next:
+            return True
+    return False
+
+
 class MergePorts(Protocol):
     def snapshot(self) -> dict[str, Any]: ...
 
@@ -93,7 +161,7 @@ class GHMergePorts:
             command.extend(("-f", f"{key}={value}"))
         try:
             completed = subprocess.run(
-                command, capture_output=True, timeout=20, check=False
+                command, capture_output=True, text=False, timeout=20, check=False
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise UnknownCompletion("GitHub API request completion is unknown") from exc
@@ -101,10 +169,11 @@ class GHMergePorts:
             # gh's nonzero exit alone does not prove whether a mutation reached
             # GitHub before its response was lost.
             raise UnknownCompletion("GitHub API returned no trustworthy completion")
-        if len(completed.stdout.encode("utf-8")) > 1_048_576:
+        raw = _stdout_bytes(completed.stdout, "GitHub API")
+        if len(raw) > 1_048_576:
             raise ValueError("GitHub API response exceeds size limit")
         try:
-            return json.loads(completed.stdout)
+            return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError("GitHub API returned invalid JSON") from exc
 
@@ -121,22 +190,19 @@ class GHMergePorts:
         ]
         try:
             completed = subprocess.run(
-                command, capture_output=True, text=True, timeout=20, check=False
+                command, capture_output=True, text=False, timeout=20, check=False
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ValueError("applicability endpoint is unavailable") from exc
-        raw = completed.stdout
-        if not isinstance(raw, bytes) or len(raw) > 1_048_576:
+        raw = _stdout_bytes(completed.stdout, "applicability API")
+        if len(raw) > 1_048_576:
             raise ValueError("applicability endpoint response exceeds size limit")
         starts = list(re.finditer(rb"(?m)^HTTP/\S+\s+([0-9]{3})(?:\s|$)", raw))
         if not starts:
             raise ValueError("applicability endpoint omitted HTTP status headers")
         status_line = starts[-1]
         status_code = int(status_line.group(1))
-        try:
-            separator = re.search(rb"\r?\n\r?\n", raw[status_line.end() :])
-        except TypeError as exc:
-            raise ValueError("applicability endpoint headers are malformed") from exc
+        separator = re.search(rb"\r?\n\r?\n", raw[status_line.end() :])
         if separator is None:
             raise ValueError("applicability endpoint headers are malformed")
         separator_start = status_line.end() + separator.start()
@@ -145,9 +211,12 @@ class GHMergePorts:
         for line in raw[status_line.end() : separator_start].splitlines():
             name, colon, value = line.partition(b":")
             if colon:
-                headers[name.strip().decode("ascii").lower()] = value.strip().decode(
-                    "utf-8"
-                )
+                header_name = name.strip().decode("ascii").lower()
+                header_value = value.strip().decode("utf-8")
+                if header_name == "link" and header_name in headers:
+                    headers[header_name] += ", " + header_value
+                else:
+                    headers[header_name] = header_value
         body = raw[body_start:]
         body_sha256 = hashlib.sha256(body).hexdigest()
         try:
@@ -186,8 +255,8 @@ class GHMergePorts:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ValueError("required-check observation is unavailable") from exc
-        raw = completed.stdout
-        if not isinstance(raw, bytes) or len(raw) > 1_048_576:
+        raw = _stdout_bytes(completed.stdout, "required-check CLI")
+        if len(raw) > 1_048_576:
             raise ValueError("required-check response exceeds size limit")
         try:
             rows = json.loads(raw)
@@ -262,9 +331,9 @@ class GHMergePorts:
         status_rows = statuses_payload
         if not isinstance(run_rows, list) or not isinstance(workflow_rows, list):
             raise TypeError("applicability endpoint row collection is malformed")
-        workflow_link = "next=" in workflows_response["headers"].get("link", "")
-        run_link = "next=" in runs_response["headers"].get("link", "")
-        status_link = "next=" in statuses_response["headers"].get("link", "")
+        workflow_link = _has_next_link(workflows_response["headers"].get("link", ""))
+        run_link = _has_next_link(runs_response["headers"].get("link", ""))
+        status_link = _has_next_link(statuses_response["headers"].get("link", ""))
         unsupported = []
         for name, template in check_applicability.UNSUPPORTED_ENDPOINTS.items():
             endpoint = template.format(branch=branch_path)
@@ -320,7 +389,9 @@ class GHMergePorts:
             },
             "check_runs": {
                 **api_row(run_endpoint, runs_response),
+                "total_count": runs_payload.get("total_count"),
                 "complete": not run_link
+                and type(runs_payload.get("total_count")) is int
                 and runs_payload.get("total_count") == len(run_rows),
                 "truncated": run_link,
                 "rows": run_rows,
