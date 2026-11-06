@@ -9,7 +9,7 @@ let count = 0;
 async function test(name, run) { await run(); count++; console.log('PASS ' + name); }
 const url = filename => pathToFileURL(filename).href;
 
-async function fixture({nested = false, goToSheet = false, edit, filename = 'Copy With Spaces.als'} = {}) {
+async function fixture({nested = false, goToSheet = false, pathIdFirst = false, edit, filename = 'Copy With Spaces.als'} = {}) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'devtools-save-as-test-')));
   const source = path.join(base, 'Original Source.als');
   await fs.writeFile(source, 'synthetic source bytes; never opened in Live');
@@ -27,7 +27,7 @@ async function fixture({nested = false, goToSheet = false, edit, filename = 'Cop
       assert.deepEqual(args, {emit: false, disableDiffing: true});
       observations++;
       const text = state === 'source' ? normal(source) : state === 'final' ? normal(final) :
-        state === 'path' && goToSheet ? `0 sheet ID: GoToWindow, Secondary Actions: Raise\n  1 button Description: Close, ID: CloseButton\n  35 text field (settable) Value: ${folder}, ID: PathTextField\n  36 list (disabled) Description: path, ID: suggestion` : save();
+      state === 'path' && goToSheet ? `0 sheet ID: GoToWindow, Secondary Actions: Raise\n  1 button Description: Close, ID: CloseButton\n  35 text field (settable) ${pathIdFirst ? `ID: PathTextField, Value: ${folder}` : `Value: ${folder}, ID: PathTextField`}\n  36 list (disabled) Description: path, ID: suggestion` : save();
       return edit ? await edit({text, state, observations, base, source, directory, final, actions, app}) : text;
     },
     async performSecondaryAction(id, action) { freshAction(); actions.push(['raise', id, action]); assert.equal(state, 'source'); assert.equal(id, 0); assert.equal(action, 'Raise'); },
@@ -95,8 +95,18 @@ await test('the native GoToWindow sheet hides Save fields but preserves the exac
     assert.equal(f.actions.filter(a => a[0] === 'click').length, 1);
   });
 });
+await test('Go To Folder accepts the observed settable PathTextField ID-before-Value ordering', async () => {
+  await withFixture({goToSheet: true, pathIdFirst: true}, async f => {
+    const result = await preserveLiveSetAs(f.app, f.options);
+    assert.equal(result.destinationURL, url(f.final));
+    assert.equal(result.saveAttempts, 1);
+    assert.deepEqual(f.actions, [['raise', 0, 'Raise'], ['key', 'super+shift+s'], ['set', 31, f.filename],
+      ['key', 'super+shift+g'], ['set', 35, f.directory], ['key', 'Return'], ['click', 33]]);
+  });
+});
 await test('unrecognized or ambiguous Go To Folder sheets cannot reach Save', async () => {
-  for (const variant of ['wrong_id', 'wrong_role', 'extra_modal', 'missing_path', 'duplicate_path', 'foreign_source', 'replace']) {
+  for (const variant of ['wrong_id', 'wrong_role', 'extra_modal', 'missing_path', 'duplicate_path',
+    'duplicate_path_id_first', 'duplicate_value', 'foreign_source', 'replace']) {
     await withFixture({goToSheet: true, edit: ({text, state}) => {
       if (state !== 'path') return text;
       if (variant === 'wrong_id') return text.replace('ID: GoToWindow,', 'ID: GoToWindowBackup,');
@@ -104,9 +114,15 @@ await test('unrecognized or ambiguous Go To Folder sheets cannot reach Save', as
       if (variant === 'extra_modal') return text + '\n90 dialog Save';
       if (variant === 'missing_path') return text.replace('ID: PathTextField', 'ID: other');
       if (variant === 'duplicate_path') return text + '\n90 text field Value: other, ID: PathTextField';
+      if (variant === 'duplicate_path_id_first') return text + '\n90 text field (settable) ID: PathTextField, Value: other';
+      if (variant === 'duplicate_value') return text.replace('ID: PathTextField', 'ID: PathTextField, Value: other');
       if (variant === 'foreign_source') return text + '\n90 standard window Other, URL: file:///private/tmp/Other.als';
       return text + '\n90 button Replace, ID: overwrite';
-    }}, f => rejected(f, /dialog structure|exactly one|source Set|prompt/, false));
+    }}, async f => {
+      await rejected(f, /dialog structure|exactly one|source Set|prompt|unparseable PathTextField value/, false);
+      if (variant === 'duplicate_value') assert.ok(!f.actions.some(row => row[0] === 'set' && row[1] === 35),
+        'ambiguous initial PathTextField value is rejected before setting it');
+    });
   }
 });
 await test('Set URL parser compares exact decoded file identity and rejects misleading forms', async () => {
