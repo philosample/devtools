@@ -125,10 +125,15 @@ immediately before the single head-matched merge request. The guarded merge
 receipt labels the required-check gate `not_applicable` and includes the
 decision reference, comment-body SHA-256, observation SHA-256 and reason. It
 never synthesizes a passing check or waives another gate. The ordinary
-`review-ready` command is unchanged: an empty required-check response remains
-unknown and `ready: false`. This extension is a coordinator-reviewed code path,
-not evidence that a future live pilot is applicable; no actual merge is part of
-its tests.
+`review-ready` command still reports an empty required-check response as
+unknown and `ready: false`. Its strict output carries only the CLI exit code
+and SHA-256 hashes of raw stdout and stderr; it does not classify the sentinel
+or expose it as a pass. The v2 dry-run bridge accepts that unknown observation
+only when its transport hashes match the validated closed applicability
+observation and its fresh source ref, PR head/base, and target branch pins.
+Generic exit-1 errors and any transport or pin mismatch remain blocked. This
+extension is a coordinator-reviewed code path, not evidence that a future live
+pilot is applicable; no actual merge is part of its tests.
 
 `--expected-head-tree` pins the PR source tree; `--expected-tree` pins the
 reviewed integrated merge result tree. Readiness is run again after initial PR

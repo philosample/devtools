@@ -6,9 +6,10 @@ import io
 import json
 import subprocess
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from codex_devtools import check_applicability, pr_merge
+from codex_devtools import check_applicability, pr_merge, pr_readiness
 from codex_devtools.cli import main
 
 HEAD = "1" * 40
@@ -74,7 +75,7 @@ def na_observation(*, target_branch="main"):
             "base_sha": BASE,
             "target_branch": target_branch,
             "exit_code": 0,
-            "stdout_sha256": "e" * 64,
+            "stdout_sha256": hashlib.sha256(b"[]\n").hexdigest(),
             "stderr_sha256": hashlib.sha256(b"").hexdigest(),
             "representation": {"kind": "structured_json"},
             "complete": True,
@@ -167,7 +168,13 @@ def completed_http(command, status, payload, *, link=None, as_text=False):
 
 
 def ready_report():
-    snapshot = {"head_sha": HEAD, "base_sha": BASE, "body_sha256": BODY_HASH}
+    snapshot = {
+        "head_ref": HEAD_REF,
+        "base_ref": "main",
+        "head_sha": HEAD,
+        "base_sha": BASE,
+        "body_sha256": BODY_HASH,
+    }
     return {
         "command": "review-ready",
         "ready": False,
@@ -188,14 +195,22 @@ def ready_report():
     }
 
 
-def ready_report_checks_unknown():
+def ready_report_checks_unknown(*, target_branch="main"):
     report = ready_report()
     reason = "no required checks were returned; absence is ambiguous"
+    required = na_observation(target_branch=target_branch)["required_checks"]
+    report["pr_snapshot_before"]["base_ref"] = target_branch
+    report["pr_snapshot_after"]["base_ref"] = target_branch
     report["github_required_checks"] = {
         "status": "unknown",
         "complete": False,
         "checks": [],
         "reason": reason,
+        "transport": {
+            "exit_code": required["exit_code"],
+            "stdout_sha256": required["stdout_sha256"],
+            "stderr_sha256": required["stderr_sha256"],
+        },
     }
     report["blockers"].append(
         {
@@ -1014,7 +1029,10 @@ class PRMergeTests(unittest.TestCase):
         ports.snapshot_row["base_ref"] = "release/2026"
         ports.applicability_observation = na_observation(target_branch="release/2026")
         ports.decision_body = na_decision_body(target_branch="release/2026")
-        result = self.invoke_decision(ports, readiness=ready_report_checks_unknown)
+        result = self.invoke_decision(
+            ports,
+            readiness=lambda: ready_report_checks_unknown(target_branch="release/2026"),
+        )
         self.assertEqual(result["status"], "merged_verified")
         self.assertEqual(result["required_checks_disposition"], "not_applicable")
 
@@ -1363,6 +1381,184 @@ class PRMergeTests(unittest.TestCase):
         self.assertEqual(result["status"], "dry_run_ready")
         self.assertEqual(result["required_checks_disposition"], "not_applicable")
         self.assertEqual(ports.merge_calls, [])
+
+    def test_strict_readiness_and_merge_accept_only_exact_cli_sentinel(self):
+        sentinel = f"no checks reported on the '{HEAD_REF}' branch\n".encode()
+        pr_view = {
+            "number": 75,
+            "headRefName": HEAD_REF,
+            "headRefOid": HEAD,
+            "baseRefName": "main",
+            "baseRefOid": BASE,
+            "body": "reviewed body",
+            "state": "OPEN",
+            "reviewDecision": "REVIEW_REQUIRED",
+        }
+        graphql = {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "id": "PR_75",
+                        "headRefOid": HEAD,
+                        "baseRefOid": BASE,
+                        "state": "OPEN",
+                        "reviewThreads": {
+                            "nodes": [],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                        },
+                    }
+                }
+            }
+        }
+
+        def api_payload(endpoint):
+            if endpoint == "repos/philosample/devtools":
+                return 200, {"private": True, "owner": {"type": "User"}}
+            if endpoint == "repos/philosample/devtools/branches/main":
+                return 200, {"commit": {"sha": BASE}, "protected": False}
+            if endpoint.endswith("/actions/workflows?per_page=100"):
+                return 200, {"total_count": 0, "workflows": []}
+            if endpoint.endswith("/check-runs?per_page=100"):
+                return 200, {"total_count": 0, "check_runs": []}
+            if endpoint.endswith("/statuses?per_page=100"):
+                return 200, []
+            if endpoint.endswith("/status"):
+                return 200, {"state": "pending", "statuses": []}
+            return 403, {"message": check_applicability.UPGRADE_MESSAGE}
+
+        def run_case(*, generic_after_candidate):
+            check_calls = 0
+
+            def fake_run(command, **_kwargs):
+                nonlocal check_calls
+                if command[:3] == ["gh", "pr", "checks"]:
+                    check_calls += 1
+                    generic = generic_after_candidate and check_calls == 3
+                    return subprocess.CompletedProcess(
+                        command,
+                        1,
+                        b"",
+                        sentinel if not generic else b"GraphQL: transient failure\n",
+                    )
+                if command[:3] == ["gh", "pr", "view"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, json.dumps(pr_view), ""
+                    )
+                if command[:3] == ["gh", "api", "graphql"]:
+                    return subprocess.CompletedProcess(
+                        command, 0, json.dumps(graphql), ""
+                    )
+                endpoint = command[-1]
+                status, payload = api_payload(endpoint)
+                return completed_http(command, status, payload)
+
+            collector = pr_merge.GHMergePorts("philosample/devtools", 75)
+            with patch("codex_devtools.pr_merge.subprocess.run", side_effect=fake_run):
+                observation = collector.check_applicability(
+                    target_branch="main",
+                    target_sha=BASE,
+                    head_sha=HEAD,
+                    head_ref=HEAD_REF,
+                )
+            ports = FakePorts()
+            ports.applicability_observation = observation
+
+            def collect_again(*, target_branch, target_sha, head_sha, head_ref):
+                return collector.check_applicability(
+                    target_branch=target_branch,
+                    target_sha=target_sha,
+                    head_sha=head_sha,
+                    head_ref=head_ref,
+                )
+
+            ports.check_applicability = collect_again
+            ports.decision_body = na_decision_body(observation=observation)
+            readiness_reports = []
+
+            def strict_readiness():
+                with (
+                    patch(
+                        "codex_devtools.pr_readiness._inputs",
+                        return_value=(
+                            {
+                                "policy": {
+                                    "repository": "philosample/devtools",
+                                    "pr_number": 75,
+                                    "pull_request": {
+                                        "head_sha": HEAD,
+                                        "base_sha": BASE,
+                                        "body_sha256": BODY_HASH,
+                                    },
+                                },
+                                "blockers": [],
+                                "receipt_verification": {
+                                    "status": "verified",
+                                    "complete": True,
+                                    "count": 1,
+                                    "receipts": [],
+                                },
+                            },
+                            {
+                                "policy_sha256": "a" * 64,
+                                "evidence_sha256": "b" * 64,
+                                "plan_sha256": "c" * 64,
+                            },
+                        ),
+                    ),
+                    patch(
+                        "codex_devtools.pr_readiness.subprocess.run",
+                        side_effect=fake_run,
+                    ),
+                ):
+                    report, _ = pr_readiness.review_ready(
+                        "philosample/devtools",
+                        75,
+                        Path("policy"),
+                        Path("evidence"),
+                        Path("plan"),
+                    )
+                readiness_reports.append(report)
+                return report
+
+            if generic_after_candidate:
+                with (
+                    patch(
+                        "codex_devtools.pr_merge.subprocess.run", side_effect=fake_run
+                    ),
+                    self.assertRaisesRegex(
+                        ValueError, "transport differs from exact applicability"
+                    ),
+                ):
+                    self.invoke_decision(
+                        ports, readiness=strict_readiness, dry_run=True
+                    )
+                self.assertFalse(readiness_reports[0]["ready"])
+                self.assertEqual(
+                    readiness_reports[0]["github_required_checks"]["status"],
+                    "unknown",
+                )
+            else:
+                with patch(
+                    "codex_devtools.pr_merge.subprocess.run", side_effect=fake_run
+                ):
+                    result = self.invoke_decision(
+                        ports, readiness=strict_readiness, dry_run=True
+                    )
+                self.assertEqual(result["status"], "dry_run_ready")
+                self.assertFalse(readiness_reports[0]["ready"])
+                self.assertEqual(
+                    readiness_reports[0]["github_required_checks"]["transport"][
+                        "stderr_sha256"
+                    ],
+                    hashlib.sha256(sentinel).hexdigest(),
+                )
+            self.assertEqual(ports.merge_calls, [])
+
+        run_case(generic_after_candidate=False)
+        run_case(generic_after_candidate=True)
 
         ports = FakePorts()
         ports.decision_body = na_decision_body()

@@ -158,6 +158,8 @@ class PRReadinessTests(unittest.TestCase):
         cls,
         *,
         head=HEAD,
+        head_ref="codex/pr75-remote-check-na",
+        base_ref="main",
         base=BASE,
         body=BODY,
         decision="",
@@ -167,7 +169,9 @@ class PRReadinessTests(unittest.TestCase):
         return cls.completed_json(
             {
                 "number": 75,
+                "headRefName": head_ref,
                 "headRefOid": head,
+                "baseRefName": base_ref,
                 "baseRefOid": base,
                 "body": body,
                 "state": state,
@@ -592,7 +596,7 @@ class PRReadinessTests(unittest.TestCase):
                 "--repo",
                 "philosample/devtools",
                 "--json",
-                "number,headRefOid,baseRefOid,body,state,reviewDecision",
+                "number,headRefName,headRefOid,baseRefName,baseRefOid,body,state,reviewDecision",
             ],
         )
         check_argv = run.call_args_list[1].args[0]
@@ -753,9 +757,12 @@ class PRReadinessTests(unittest.TestCase):
 
     @patch("codex_devtools.pr_readiness.subprocess.run")
     def test_no_required_checks_and_permission_failures_remain_unknown(self, run):
+        sentinel_stderr = (
+            b"no checks reported on the 'codex/pr75-remote-check-na' branch\n"
+        )
         for rows, returncode, stderr in (
             ([], 1, "no checks reported"),
-            ("", 1, "no checks reported on this branch"),
+            ("", 1, sentinel_stderr.decode()),
             ("", 4, "HTTP 403: Resource not accessible"),
         ):
             with self.subTest(returncode=returncode):
@@ -774,6 +781,18 @@ class PRReadinessTests(unittest.TestCase):
                 )
                 self.assertEqual(report["github_required_checks"]["status"], "unknown")
                 self.assertIs(report["ready"], False)
+                transport = report["github_required_checks"]["transport"]
+                self.assertEqual(transport["exit_code"], returncode)
+                self.assertEqual(
+                    transport["stdout_sha256"],
+                    hashlib.sha256(
+                        (rows if isinstance(rows, str) else json.dumps(rows)).encode()
+                    ).hexdigest(),
+                )
+                self.assertEqual(
+                    transport["stderr_sha256"],
+                    hashlib.sha256(stderr.encode()).hexdigest(),
+                )
                 gate = next(
                     item
                     for item in report["unverified_gates"]

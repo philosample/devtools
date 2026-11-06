@@ -654,6 +654,7 @@ def _review_ready(
     repository: str,
     number: int,
     allow_required_checks_na: bool = False,
+    applicability_required_checks: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     if (
         not isinstance(report, dict)
@@ -699,10 +700,27 @@ def _review_ready(
     ):
         raise ValueError("readiness has missing, unresolved, or unknown required gates")
     before, after = report.get("pr_snapshot_before"), report.get("pr_snapshot_after")
+    expected_head_ref = expected.get("head_ref")
+    expected_target_branch = expected.get("target_branch")
+    if (
+        not isinstance(expected_head_ref, str)
+        or not expected_head_ref
+        or not isinstance(expected_target_branch, str)
+        or not expected_target_branch
+    ):
+        raise ValueError("fresh PR source or target branch pin is missing")
     for name, row in (("before", before), ("after", after)):
         if not isinstance(row, dict):
             raise TypeError(f"readiness {name} snapshot is missing")
-        if (row.get("head_sha"), row.get("base_sha"), row.get("body_sha256")) != (
+        if (
+            row.get("head_ref"),
+            row.get("base_ref"),
+            row.get("head_sha"),
+            row.get("base_sha"),
+            row.get("body_sha256"),
+        ) != (
+            expected_head_ref,
+            expected_target_branch,
             expected["head_sha"],
             expected["base_sha"],
             expected["body_sha256"],
@@ -717,12 +735,36 @@ def _review_ready(
         item for item in blockers if item.get("gate") == "github_required_checks"
     ]
     if allow_required_checks_na:
+        required = applicability_required_checks
+        if not isinstance(required, dict):
+            raise ValueError("required-check applicability transport is missing")
+        expected_transport = {
+            "exit_code": required.get("exit_code"),
+            "stdout_sha256": required.get("stdout_sha256"),
+            "stderr_sha256": required.get("stderr_sha256"),
+        }
+        if (
+            required.get("head_ref") != expected_head_ref
+            or required.get("head_sha") != expected["head_sha"]
+            or required.get("base_sha") != expected["base_sha"]
+            or required.get("target_branch") != expected_target_branch
+            or checks.get("transport") != expected_transport
+            or not all(
+                isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value)
+                for key, value in expected_transport.items()
+                if key != "exit_code"
+            )
+            or type(expected_transport["exit_code"]) is not int
+        ):
+            raise ValueError(
+                "strict readiness transport differs from exact applicability evidence"
+            )
         if (
             checks.get("status") != "unknown"
             or checks.get("complete") is not False
             or checks.get("checks") != []
-            or checks.get("reason")
-            != "no required checks were returned; absence is ambiguous"
+            or not isinstance(checks.get("reason"), str)
+            or not checks["reason"]
             or len(ci_blockers) != 1
             or ci_blockers[0].get("status") != "unknown"
             or ci_blockers[0].get("reason") != checks.get("reason")
@@ -824,6 +866,7 @@ def _decision_receipt(
         **declarations,
         "operator_asserted": True,
     }
+    applicability_required_checks: dict[str, Any] | None = None
     if receipt.get("schema") == DECISION_SCHEMA:
         expected["schema"] = DECISION_SCHEMA
     elif receipt.get("schema") == DECISION_SCHEMA_V2:
@@ -856,6 +899,7 @@ def _decision_receipt(
             head_sha=head,
             head_ref=head_ref,
         )
+        applicability_required_checks = observation["required_checks"]
         expected.update(
             {
                 "schema": DECISION_SCHEMA_V2,
@@ -882,6 +926,7 @@ def _decision_receipt(
         ),
         "applicability_reason": receipt.get("applicability_reason"),
         "target_branch": target_branch,
+        "applicability_required_checks": applicability_required_checks,
     }
 
 
@@ -978,13 +1023,13 @@ def merge_pr(
         )
     target_branch = current.get("base_ref")
     head_ref = current.get("head_ref")
-    if use_decision and (
+    if (
         not isinstance(target_branch, str)
         or not target_branch
         or not isinstance(head_ref, str)
         or not head_ref
     ):
-        raise ValueError("PR target branch name is missing or malformed")
+        raise ValueError("PR source or target branch name is missing or malformed")
     decision_metadata = None
     if use_decision:
         decision_metadata = _decision_receipt(
@@ -1006,14 +1051,26 @@ def merge_pr(
         decision_metadata is not None
         and decision_metadata["required_checks_disposition"] == "not_applicable"
     )
+    expected_readiness_pins = {
+        "head_ref": head_ref,
+        "head_sha": head,
+        "target_branch": target_branch,
+        "base_sha": base,
+        "body_sha256": body_sha256,
+    }
     report = readiness()
     pins = _review_ready(
         report,
-        {"head_sha": head, "base_sha": base, "body_sha256": body_sha256},
+        expected_readiness_pins,
         expected_declarations,
         repository,
         number,
         allow_required_checks_na=allow_required_checks_na,
+        applicability_required_checks=(
+            decision_metadata.get("applicability_required_checks")
+            if decision_metadata is not None
+            else None
+        ),
     )
     if use_review:
         review = ports.review(review_reference)
@@ -1026,11 +1083,16 @@ def merge_pr(
     final_report = readiness()
     final_pins = _review_ready(
         final_report,
-        {"head_sha": head, "base_sha": base, "body_sha256": body_sha256},
+        expected_readiness_pins,
         expected_declarations,
         repository,
         number,
         allow_required_checks_na=allow_required_checks_na,
+        applicability_required_checks=(
+            decision_metadata.get("applicability_required_checks")
+            if decision_metadata is not None
+            else None
+        ),
     )
     if final_pins != pins:
         raise ValueError(
