@@ -697,7 +697,7 @@ def _fetch_pr(repository: str, number: int) -> dict[str, Any]:
         "--repo",
         repository,
         "--json",
-        "number,headRefOid,baseRefOid,body,state,reviewDecision",
+        "number,headRefName,headRefOid,baseRefName,baseRefOid,body,state,reviewDecision",
     ]
     try:
         completed = subprocess.run(
@@ -719,13 +719,24 @@ def _fetch_pr(repository: str, number: int) -> dict[str, Any]:
         raise ValueError("gh pr view returned invalid JSON") from exc
     snapshot = _closed(
         snapshot,
-        {"number", "headRefOid", "baseRefOid", "body", "state", "reviewDecision"},
+        {
+            "number",
+            "headRefName",
+            "headRefOid",
+            "baseRefName",
+            "baseRefOid",
+            "body",
+            "state",
+            "reviewDecision",
+        },
         "gh pr view response",
     )
     if type(snapshot["number"]) is not int or snapshot["number"] != number:
         raise ValueError("GitHub PR number differs from request")
     _digest(snapshot["headRefOid"], "GitHub headRefOid", short=True)
+    _text(snapshot["baseRefName"], "GitHub baseRefName")
     _digest(snapshot["baseRefOid"], "GitHub baseRefOid", short=True)
+    _text(snapshot["headRefName"], "GitHub headRefName")
     if not isinstance(snapshot["body"], str):
         raise TypeError("GitHub PR body is missing or too large")
     try:
@@ -741,16 +752,28 @@ def _fetch_pr(repository: str, number: int) -> dict[str, Any]:
     return snapshot
 
 
-def _decode_gh_json(stdout: str, label: str) -> Any:
-    if len(stdout.encode("utf-8")) > MAX_INPUT_BYTES:
+def _raw_gh_bytes(value: str | bytes, label: str) -> bytes:
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        try:
+            return value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{label} is not valid UTF-8 text") from exc
+    raise ValueError(f"{label} must be bytes or text")
+
+
+def _decode_gh_json(stdout: str | bytes, label: str) -> Any:
+    raw = _raw_gh_bytes(stdout, label)
+    if len(raw) > MAX_INPUT_BYTES:
         raise ValueError(f"{label} response exceeds size limit")
     try:
         return json.loads(
-            stdout,
+            raw.decode("utf-8"),
             object_pairs_hook=_duplicate_free,
             parse_constant=_reject_constant,
         )
-    except (json.JSONDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ValueError(f"{label} returned invalid JSON") from exc
 
 
@@ -813,7 +836,7 @@ def _read_required_checks(repository: str, number: int) -> dict[str, Any]:
     ]
     try:
         completed = subprocess.run(
-            argv, capture_output=True, text=True, timeout=20, check=False
+            argv, capture_output=True, text=False, timeout=20, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {
@@ -823,76 +846,98 @@ def _read_required_checks(repository: str, number: int) -> dict[str, Any]:
             "reason": f"required checks read unavailable: {type(exc).__name__}",
         }
     try:
-        payload = _decode_gh_json(completed.stdout, "gh pr checks")
-    except ValueError:
-        # `gh pr checks --required` exits 1 with a text message when it reports
-        # no checks. Empty/ambiguous results cannot prove there are no gates.
-        message = "no required checks were returned; absence is ambiguous"
-        if completed.returncode not in (0, 8):
-            message = f"gh pr checks exited {completed.returncode}; required-check state is unknown"
-        return {"status": "unknown", "complete": False, "checks": [], "reason": message}
-    if completed.returncode not in (0, 1, 8):
-        return {
-            "status": "unknown",
-            "complete": False,
-            "checks": [],
-            "reason": f"gh pr checks exited {completed.returncode}; required-check state is unknown",
-        }
-    if not isinstance(payload, list) or len(payload) >= MAX_ITEMS:
-        return {
-            "status": "unknown",
-            "complete": False,
-            "checks": [],
-            "reason": "required-check response is malformed or reached the item bound",
-        }
-    if not payload:
-        return {
-            "status": "unknown",
-            "complete": False,
-            "checks": [],
-            "reason": "no required checks were returned; absence is ambiguous",
-        }
-    try:
-        checks = [_check_result(row, index) for index, row in enumerate(payload)]
-    except (TypeError, ValueError) as exc:
+        stdout_raw = _raw_gh_bytes(completed.stdout, "gh pr checks stdout")
+        stderr_raw = _raw_gh_bytes(completed.stderr, "gh pr checks stderr")
+    except ValueError as exc:
         return {
             "status": "unknown",
             "complete": False,
             "checks": [],
             "reason": str(exc),
         }
+    transport = {
+        "exit_code": completed.returncode,
+        "stdout_sha256": hashlib.sha256(stdout_raw).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr_raw).hexdigest(),
+    }
+
+    def observed(
+        status: str, complete: bool, checks: list[dict[str, str]], reason: str
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "complete": complete,
+            "checks": checks,
+            "reason": reason,
+            "transport": transport,
+        }
+
+    try:
+        payload = _decode_gh_json(stdout_raw, "gh pr checks")
+    except ValueError:
+        # `gh pr checks --required` exits 1 with a text message when it reports
+        # no checks. Empty/ambiguous results cannot prove there are no gates.
+        message = "no required checks were returned; absence is ambiguous"
+        if completed.returncode not in (0, 8):
+            message = f"gh pr checks exited {completed.returncode}; required-check state is unknown"
+        return observed("unknown", False, [], message)
+    if completed.returncode not in (0, 1, 8):
+        return observed(
+            "unknown",
+            False,
+            [],
+            f"gh pr checks exited {completed.returncode}; required-check state is unknown",
+        )
+    if not isinstance(payload, list) or len(payload) >= MAX_ITEMS:
+        return observed(
+            "unknown",
+            False,
+            [],
+            "required-check response is malformed or reached the item bound",
+        )
+    if not payload:
+        return observed(
+            "unknown",
+            False,
+            [],
+            "no required checks were returned; absence is ambiguous",
+        )
+    try:
+        checks = [_check_result(row, index) for index, row in enumerate(payload)]
+    except (TypeError, ValueError) as exc:
+        return observed("unknown", False, [], str(exc))
     keys = [(row["name"], row["workflow"], row["link"]) for row in checks]
     if len(set(keys)) != len(keys):
-        return {
-            "status": "unknown",
-            "complete": False,
-            "checks": checks,
-            "reason": "required-check identities are duplicated or ambiguous",
-        }
+        return observed(
+            "unknown",
+            False,
+            checks,
+            "required-check identities are duplicated or ambiguous",
+        )
     statuses = {row["status"] for row in checks}
     if completed.returncode == 8 and "pending" not in statuses:
-        return {
-            "status": "unknown",
-            "complete": False,
-            "checks": checks,
-            "reason": "gh reported pending checks without a pending check record",
-        }
+        return observed(
+            "unknown",
+            False,
+            checks,
+            "gh reported pending checks without a pending check record",
+        )
     if completed.returncode == 1 and statuses == {"passed"}:
-        return {
-            "status": "unknown",
-            "complete": False,
-            "checks": checks,
-            "reason": "gh reported failure with only passing check records",
-        }
+        return observed(
+            "unknown",
+            False,
+            checks,
+            "gh reported failure with only passing check records",
+        )
     if "unknown" in statuses:
-        return {
-            "status": "unknown",
-            "complete": True,
-            "checks": checks,
-            "reason": "one or more required checks has an unsupported bucket/state combination",
-        }
+        return observed(
+            "unknown",
+            True,
+            checks,
+            "one or more required checks has an unsupported bucket/state combination",
+        )
     status = "passed" if statuses == {"passed"} else "blocked"
-    return {"status": status, "complete": True, "checks": checks, "reason": ""}
+    return observed(status, True, checks, "")
 
 
 def _read_review_threads(repository: str, number: int) -> dict[str, Any]:
@@ -1142,6 +1187,8 @@ def review_ready(
 
     before_summary = (
         {
+            "head_ref": remote_before["headRefName"],
+            "base_ref": remote_before["baseRefName"],
             "head_sha": remote_before["headRefOid"],
             "base_sha": remote_before["baseRefOid"],
             "body_sha256": body_sha(remote_before),
@@ -1153,6 +1200,8 @@ def review_ready(
     )
     after_summary = (
         {
+            "head_ref": remote_after["headRefName"],
+            "base_ref": remote_after["baseRefName"],
             "head_sha": remote_after["headRefOid"],
             "base_sha": remote_after["baseRefOid"],
             "body_sha256": body_sha(remote_after),
