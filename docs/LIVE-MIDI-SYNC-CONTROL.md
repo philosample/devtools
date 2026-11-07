@@ -34,6 +34,21 @@ python3 -m codex_devtools ax live-midi-sync \
   --receipt /private/tmp/live-midi-sync-restore.json
 ```
 
+When a foreground/focus guard refuses before or between presses, the stopped
+receipt may include an optional `focus_diagnostics` object. It records the
+target process `isActive` result, the observed frontmost PID, and the focused
+AX window's role, title, and exact match against the selected Settings window.
+Each fact is tagged `observed`, `unavailable`, or `error`; missing AX values,
+unsupported attributes, and AX error codes stay explicit. The diagnostic is
+bounded to the focused window and these facts; it does not include the Settings
+tree or checkbox values.
+
+These are separate read-only observations captured immediately after refusal,
+not an atomic snapshot or a claim about which value caused an earlier focus
+change. They do not relax any guard, retry, activate Live, press a control, or
+change `manual_inspection_required` semantics. A receipt without this optional
+object remains valid under the existing v1 receipt contract.
+
 Immediately before each press, the native helper re-enumerates the complete
 bounded Settings tree and requires the same Settings window and output controls,
 with every name, description, enabled checkbox state, AX element identity, and
