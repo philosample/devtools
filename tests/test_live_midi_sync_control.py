@@ -346,6 +346,64 @@ class LiveMidiSyncControlTests(unittest.TestCase):
             malformed_saved = json.loads(
                 malformed_receipt_path.read_text(encoding="utf-8")
             )
+            first_candidate = next(
+                row["name"] for row in observed["outputs"] if row["value"] == 1
+            )
+            between_press_receipt = native_report | {
+                "phase": "actions",
+                "manual_inspection_required": True,
+                "error": "target focus or process identity changed before next output",
+                "actions": [
+                    row
+                    | (
+                        {
+                            "attempted": True,
+                            "outcome": "known",
+                            "actual_value": 0,
+                            "prepress_elements": observed["bounds"][
+                                "elements_observed"
+                            ],
+                            "prepress_windows": observed["bounds"]["window_count"],
+                        }
+                        if row["name"] == first_candidate
+                        else {
+                            "attempted": False,
+                            "outcome": "not_attempted",
+                            "actual_value": row["baseline_value"],
+                        }
+                    )
+                    for row in native_report["actions"]
+                ],
+            }
+            between_press_path = Path(temporary) / "between-press-receipt.json"
+            between_press_result = subprocess.CompletedProcess(
+                args=["swift"],
+                returncode=1,
+                stdout=json.dumps(between_press_receipt),
+                stderr="",
+            )
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_midi_sync_control.subprocess.run",
+                    return_value=between_press_result,
+                ),
+            ):
+                between_press = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="isolate",
+                    baseline_path=baseline_path,
+                    output_path=between_press_path,
+                    execute=True,
+                )
+            between_press_saved = json.loads(
+                between_press_path.read_text(encoding="utf-8")
+            )
         self.assertEqual(report, saved)
         self.assertEqual(saved["focus_diagnostics"], diagnostics)
         self.assertFalse(saved["manual_inspection_required"])
@@ -360,6 +418,18 @@ class LiveMidiSyncControlTests(unittest.TestCase):
                 if row["baseline_value"] == 1
             )
         )
+        self.assertEqual(between_press, between_press_saved)
+        self.assertEqual(between_press["phase"], "actions")
+        self.assertTrue(between_press["manual_inspection_required"])
+        self.assertEqual(between_press["focus_diagnostics"], diagnostics)
+        between_rows = {row["name"]: row for row in between_press["actions"]}
+        self.assertEqual(between_rows[first_candidate]["outcome"], "known")
+        self.assertTrue(between_rows[first_candidate]["attempted"])
+        self.assertEqual(between_rows[first_candidate]["actual_value"], 0)
+        for name, row in between_rows.items():
+            if name != first_candidate:
+                self.assertFalse(row["attempted"])
+                self.assertEqual(row["outcome"], "not_attempted")
 
     def test_swift_focus_diagnostics_are_read_only_and_failure_only(self):
         source = (
@@ -387,6 +457,20 @@ class LiveMidiSyncControlTests(unittest.TestCase):
         self.assertIn(
             "recordFocusRefusal(app: app, settings: settings, pid: options.pid, bundleID: options.bundleID)",
             source,
+        )
+
+    def test_swift_sets_actions_phase_before_each_between_press_focus_guard(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_midi_sync.swift"
+        ).read_text(encoding="utf-8")
+        loop = source.split("for name in candidates {", 1)[1].split(
+            "let (freshSettings", 1
+        )[0]
+        self.assertLess(
+            loop.index('phase = "actions"'),
+            loop.index("let currentProcess = try targetCheck"),
         )
 
     def test_baseline_rejects_wrong_identity_incomplete_or_ambiguous_inventory(self):

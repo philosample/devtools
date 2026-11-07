@@ -552,8 +552,8 @@ func run() throws -> [String: Any] {
         recordFocusRefusal(app: app, settings: settings, pid: options.pid, bundleID: options.bundleID)
         throw SyncFailure(message: "exact Live Settings window is not foreground and focused")
     }
-    phase = "actions"
     for name in candidates {
+        phase = "actions"
         let currentProcess = try targetCheck(options.pid, bundleID: options.bundleID)
         let active = currentProcess.isActive
         let foregroundMatches = active
