@@ -198,6 +198,10 @@ class LiveMidiSyncControlTests(unittest.TestCase):
             "focused_window": valid["focused_window"] | {"status": []}
         }
         invalid.append(malformed_window_status)
+        malformed_window_status_dict = valid | {
+            "focused_window": valid["focused_window"] | {"status": {}}
+        }
+        invalid.append(malformed_window_status_dict)
         malformed_window_reason = valid | {
             "focused_window": valid["focused_window"]
             | {
@@ -205,6 +209,33 @@ class LiveMidiSyncControlTests(unittest.TestCase):
             }
         }
         invalid.append(malformed_window_reason)
+        malformed_window_error_reason = valid | {
+            "focused_window": valid["focused_window"]
+            | {
+                "role": {"status": "error", "reason": {}},
+            }
+        }
+        invalid.append(malformed_window_error_reason)
+        for reason in ([], {}):
+            malformed_complete_unavailable_window = valid | {
+                "focused_window": {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "role": {
+                        "status": "unavailable",
+                        "reason": "focused_window_unavailable",
+                    },
+                    "title": {
+                        "status": "unavailable",
+                        "reason": "focused_window_unavailable",
+                    },
+                    "matches_settings": {
+                        "status": "unavailable",
+                        "reason": "focused_window_unavailable",
+                    },
+                }
+            }
+            invalid.append(malformed_complete_unavailable_window)
         for candidate in invalid:
             with self.subTest(candidate=candidate):
                 self.assertFalse(_focus_diagnostics_valid(candidate))

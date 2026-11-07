@@ -584,13 +584,23 @@ def _focus_diagnostics_valid(value: object) -> bool:
             and _focus_fact_valid(focused.get("matches_settings"), **match_fact_options)
         )
     if focused_status == "unavailable":
-        if set(focused) != {
-            "status",
-            "reason",
-            "role",
-            "title",
-            "matches_settings",
-        } or focused.get("reason") not in {"no_value", "attribute_unsupported"}:
+        reason = focused.get("reason")
+        if (
+            set(focused)
+            != {
+                "status",
+                "reason",
+                "role",
+                "title",
+                "matches_settings",
+            }
+            or not isinstance(reason, str)
+            or reason
+            not in {
+                "no_value",
+                "attribute_unsupported",
+            }
+        ):
             return False
         unavailable = {"status": "unavailable", "reason": "focused_window_unavailable"}
         return all(
