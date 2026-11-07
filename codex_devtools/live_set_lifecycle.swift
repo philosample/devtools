@@ -94,12 +94,13 @@ struct SaveCopyWindowAssessment {
 }
 
 func saveCopyWindowBlocks(_ window: SaveCopyWindowAssessment) -> Bool {
+    if window.modal == true { return true }
     if let sharingOverlay = window.sharingOverlay,
        isObservedWindowSharingOverlay(sharingOverlay) {
         return false
     }
     return ["AXDialog", "AXSheet", "AXAlert"].contains(window.role) ||
-        ["AXDialog", "AXSheet"].contains(window.subrole ?? "") || window.modal == true ||
+        ["AXDialog", "AXSheet"].contains(window.subrole ?? "") ||
         window.identifier == "open-panel"
 }
 

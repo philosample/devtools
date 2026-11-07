@@ -601,6 +601,10 @@ precondition(!saveCopyWindowBlocks(SaveCopyWindowAssessment(
     role: "AXWindow", subrole: "AXDialog", identifier: "_NS:8",
     modal: false, sharingOverlay: exactOverlay
 )))
+precondition(saveCopyWindowBlocks(SaveCopyWindowAssessment(
+    role: "AXWindow", subrole: "AXDialog", identifier: "_NS:8",
+    modal: true, sharingOverlay: exactOverlay
+)), "AXModal must block even an exact-looking overlay")
 precondition(!saveCopyWindowsHaveBlocker([SaveCopyWindowAssessment(
     role: "AXWindow", subrole: "AXDialog", identifier: "_NS:8",
     modal: false, sharingOverlay: exactOverlay
