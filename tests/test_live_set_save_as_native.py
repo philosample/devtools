@@ -555,3 +555,162 @@ do {
         self.assertIn("try saveCopyTransport(sourceWindow)", run)
         self.assertIn("try checkedSaveCopyBackup", run)
         self.assertIn("try checkSaveCopyDeadline()", run)
+
+    @unittest.skipUnless(
+        shutil.which("swiftc") and os.uname().sysname == "Darwin",
+        "Swift macOS policy compile",
+    )
+    def test_actual_swift_save_copy_window_policy_matches_closed_overlay_signature(
+        self,
+    ):
+        root = Path(__file__).resolve().parents[1]
+        lifecycle = (root / "codex_devtools/live_set_lifecycle.swift").read_text()
+        transport = (root / "codex_devtools/live_transport.swift").read_text()
+        start = lifecycle.index("struct WindowSharingOverlayChildSignature")
+        end = lifecycle.index("\nstruct SaveCopyWindowAssessment", start)
+        production_policy = lifecycle[start:end]
+
+        transport_start = transport.index("struct WindowSharingOverlayChildSignature")
+        transport_end = transport.index("\nvar options = Options()", transport_start)
+        self.assertEqual(
+            production_policy,
+            transport[transport_start:transport_end],
+            "Save As must keep the exact closed signature used by transport",
+        )
+
+        assessment_start = lifecycle.index("struct SaveCopyWindowAssessment")
+        assessment_end = lifecycle.index("\nfunc bounded(", assessment_start)
+        assessment_policy = lifecycle[assessment_start:assessment_end]
+        program = f"""
+let kAXWindowRole = "AXWindow"
+let kAXButtonRole = "AXButton"
+{production_policy}
+{assessment_policy}
+
+let exactOverlay = WindowSharingOverlaySignature(
+    role: "AXWindow", subrole: "AXDialog", title: "Window", identifier: "_NS:8",
+    children: [WindowSharingOverlayChildSignature(
+        role: "AXButton", title: "WindowSharingSessionButton", identifier: nil, enabled: true
+    )]
+)
+let ordinaryWindow = SaveCopyWindowAssessment(
+    role: "AXWindow", subrole: "AXStandardWindow", identifier: nil,
+    modal: false, sharingOverlay: nil
+)
+precondition(!saveCopyWindowBlocks(SaveCopyWindowAssessment(
+    role: "AXWindow", subrole: "AXDialog", identifier: "_NS:8",
+    modal: false, sharingOverlay: exactOverlay
+)))
+precondition(saveCopyWindowBlocks(SaveCopyWindowAssessment(
+    role: "AXWindow", subrole: "AXDialog", identifier: "_NS:8",
+    modal: true, sharingOverlay: exactOverlay
+)), "AXModal must block even an exact-looking overlay")
+precondition(!saveCopyWindowsHaveBlocker([SaveCopyWindowAssessment(
+    role: "AXWindow", subrole: "AXDialog", identifier: "_NS:8",
+    modal: false, sharingOverlay: exactOverlay
+), ordinaryWindow]))
+precondition(saveCopyWindowsHaveBlocker([SaveCopyWindowAssessment(
+    role: "AXWindow", subrole: "AXDialog", identifier: "_NS:8",
+    modal: false, sharingOverlay: exactOverlay
+), SaveCopyWindowAssessment(
+    role: "AXDialog", subrole: "AXDialog", identifier: nil,
+    modal: true, sharingOverlay: nil
+)]), "a real dialog after the overlay must still block")
+precondition(saveCopyWindowBlocks(SaveCopyWindowAssessment(
+    role: "AXWindow", subrole: "AXStandardWindow", identifier: nil,
+    modal: true, sharingOverlay: nil
+)), "modal non-overlay windows must still block")
+precondition(saveCopyWindowBlocks(SaveCopyWindowAssessment(
+    role: "AXWindow", subrole: "AXStandardWindow", identifier: "open-panel",
+    modal: false, sharingOverlay: nil
+)), "the Open panel remains blocked")
+
+func altered(_ value: WindowSharingOverlaySignature,
+             role: String? = nil, subrole: String? = nil,
+             title: String? = nil, identifier: String? = nil,
+             children: [WindowSharingOverlayChildSignature]? = nil) -> WindowSharingOverlaySignature {{
+    WindowSharingOverlaySignature(
+        role: role ?? value.role, subrole: subrole ?? value.subrole,
+        title: title ?? value.title, identifier: identifier ?? value.identifier,
+        children: children ?? value.children
+    )
+}}
+let child = exactOverlay.children[0]
+let rejected = [
+    altered(exactOverlay, role: "AXDialog"),
+    altered(exactOverlay, subrole: "AXSheet"),
+    altered(exactOverlay, title: "Save Changes"),
+    altered(exactOverlay, identifier: "_NS:9"),
+    altered(exactOverlay, children: []),
+    altered(exactOverlay, children: [child, child]),
+    altered(exactOverlay, children: [WindowSharingOverlayChildSignature(
+        role: "AXStaticText", title: child.title, identifier: nil, enabled: true
+    )]),
+    altered(exactOverlay, children: [WindowSharingOverlayChildSignature(
+        role: child.role, title: "Confirm", identifier: nil, enabled: true
+    )]),
+    altered(exactOverlay, children: [WindowSharingOverlayChildSignature(
+        role: child.role, title: child.title, identifier: "unexpected", enabled: true
+    )]),
+    altered(exactOverlay, children: [WindowSharingOverlayChildSignature(
+        role: child.role, title: child.title, identifier: nil, enabled: false
+    )])
+]
+for candidate in rejected {{
+    precondition(!isObservedWindowSharingOverlay(candidate))
+    precondition(saveCopyWindowBlocks(SaveCopyWindowAssessment(
+        role: candidate.role, subrole: candidate.subrole, identifier: candidate.identifier,
+        modal: false, sharingOverlay: candidate
+    )), "a near-match dialog must still block")
+}}
+print("PASS exact overlay and fail-closed Save As scan policy")
+"""
+        swift = self.root / "save-copy-window-policy.swift"
+        binary = self.root / "save-copy-window-policy"
+        swift.write_text(program)
+        compiled = subprocess.run(
+            ["swiftc", str(swift), "-o", str(binary)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(compiled.returncode, 0, compiled.stderr)
+        result = subprocess.run(
+            [str(binary)], check=False, capture_output=True, text=True, timeout=10
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(),
+            "PASS exact overlay and fail-closed Save As scan policy",
+        )
+
+    def test_save_copy_scan_reads_exact_overlay_children_and_keeps_other_guards(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools/live_set_lifecycle.swift"
+        ).read_text()
+        assessment = source[
+            source.index("func saveCopyWindowAssessment(") : source.index(
+                "func saveCopyWindows(", source.index("func saveCopyWindowAssessment(")
+            )
+        ]
+        scan = source[
+            source.index("func saveCopyWindows(") : source.index(
+                "func projectRequiredButton(", source.index("func saveCopyWindows(")
+            )
+        ]
+        self.assertIn('subrole == "AXDialog"', assessment)
+        self.assertIn('windowTitle == "Window"', assessment)
+        self.assertIn('windowIdentifier == "_NS:8"', assessment)
+        self.assertIn("let childElements = try children(window)", assessment)
+        self.assertIn("childElements.map", assessment)
+        self.assertIn("attributeBool(child, kAXEnabledAttribute as String)", assessment)
+        self.assertIn("if let allowed, CFEqual(window, allowed) { return nil }", scan)
+        self.assertIn("windows(app).compactMap", scan)
+        self.assertIn("saveCopyWindowsHaveBlocker(assessments)", scan)
+        self.assertIn("window.modal == true", source)
+        self.assertIn('window.identifier == "open-panel"', source)
+        self.assertIn(
+            '["AXDialog", "AXSheet", "AXAlert"].contains(window.role)', source
+        )

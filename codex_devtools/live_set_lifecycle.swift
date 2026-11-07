@@ -52,6 +52,62 @@ func checkSaveCopyDeadline() throws {
 
 let menuReadinessTimeout: TimeInterval = 2
 
+// Keep the Save As exception identical to the closed signature used by the
+// transport inspector. This file is compiled as a standalone helper, so the
+// small pure predicate is intentionally local rather than a shared build API.
+struct WindowSharingOverlayChildSignature: Equatable {
+    let role: String
+    let title: String?
+    let identifier: String?
+    let enabled: Bool
+}
+
+struct WindowSharingOverlaySignature: Equatable {
+    let role: String
+    let subrole: String?
+    let title: String?
+    let identifier: String?
+    let children: [WindowSharingOverlayChildSignature]
+}
+
+func isObservedWindowSharingOverlay(_ signature: WindowSharingOverlaySignature) -> Bool {
+    signature == WindowSharingOverlaySignature(
+        role: kAXWindowRole as String,
+        subrole: "AXDialog",
+        title: "Window",
+        identifier: "_NS:8",
+        children: [WindowSharingOverlayChildSignature(
+            role: kAXButtonRole as String,
+            title: "WindowSharingSessionButton",
+            identifier: nil,
+            enabled: true
+        )]
+    )
+}
+
+struct SaveCopyWindowAssessment {
+    let role: String
+    let subrole: String?
+    let identifier: String?
+    let modal: Bool?
+    let sharingOverlay: WindowSharingOverlaySignature?
+}
+
+func saveCopyWindowBlocks(_ window: SaveCopyWindowAssessment) -> Bool {
+    if window.modal == true { return true }
+    if let sharingOverlay = window.sharingOverlay,
+       isObservedWindowSharingOverlay(sharingOverlay) {
+        return false
+    }
+    return ["AXDialog", "AXSheet", "AXAlert"].contains(window.role) ||
+        ["AXDialog", "AXSheet"].contains(window.subrole ?? "") ||
+        window.identifier == "open-panel"
+}
+
+func saveCopyWindowsHaveBlocker(_ windows: [SaveCopyWindowAssessment]) -> Bool {
+    windows.contains { saveCopyWindowBlocks($0) }
+}
+
 func bounded(_ value: String?, limit: Int = 256) -> Any {
     guard let value else { return NSNull() }
     return String(value.prefix(limit))
@@ -822,13 +878,49 @@ func projectRequiredSignature(_ rows: [[String: Any]]) -> Bool {
     return true
 }
 
-func saveCopyWindows(_ app: AXUIElement, allowing allowed: AXUIElement? = nil) throws {
-    for window in try windows(app) {
-        if let allowed, CFEqual(window, allowed) { continue }
-        let kind = try role(window), subrole = optionalAX(window, kAXSubroleAttribute as String) as? String
-        try require(!["AXDialog", "AXSheet", "AXAlert"].contains(kind) && subrole != "AXDialog" &&
-                    attributeBool(window, "AXModal") != true && identifier(window) != "open-panel", "unexpected dialog during same-process Save As; no prompt accepted")
+func saveCopyWindowAssessment(_ window: AXUIElement) throws -> SaveCopyWindowAssessment {
+    let kind = try role(window)
+    let subrole = optionalAX(window, kAXSubroleAttribute as String) as? String
+    let windowTitle = title(window)
+    let windowIdentifier = identifier(window)
+    var sharingOverlay: WindowSharingOverlaySignature?
+    if kind == (kAXWindowRole as String), subrole == "AXDialog",
+       windowTitle == "Window", windowIdentifier == "_NS:8" {
+        let childElements = try children(window)
+        let childSignatures = try childElements.map { child -> WindowSharingOverlayChildSignature in
+            guard let childEnabled = attributeBool(child, kAXEnabledAttribute as String) else {
+                throw LifecycleFailure(phase: phase, message: "sharing overlay child enabled state is unavailable")
+            }
+            return WindowSharingOverlayChildSignature(
+                role: try role(child),
+                title: title(child),
+                identifier: identifier(child),
+                enabled: childEnabled
+            )
+        }
+        sharingOverlay = WindowSharingOverlaySignature(
+            role: kind,
+            subrole: subrole,
+            title: windowTitle,
+            identifier: windowIdentifier,
+            children: childSignatures
+        )
     }
+    return SaveCopyWindowAssessment(
+        role: kind,
+        subrole: subrole,
+        identifier: windowIdentifier,
+        modal: attributeBool(window, "AXModal"),
+        sharingOverlay: sharingOverlay
+    )
+}
+
+func saveCopyWindows(_ app: AXUIElement, allowing allowed: AXUIElement? = nil) throws {
+    let assessments = try windows(app).compactMap { window -> SaveCopyWindowAssessment? in
+        if let allowed, CFEqual(window, allowed) { return nil }
+        return try saveCopyWindowAssessment(window)
+    }
+    try require(!saveCopyWindowsHaveBlocker(assessments), "unexpected dialog during same-process Save As; no prompt accepted")
 }
 
 func projectRequiredButton(_ app: AXUIElement) throws -> (AXUIElement, AXUIElement) {
