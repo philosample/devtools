@@ -190,6 +190,21 @@ class LiveMidiSyncControlTests(unittest.TestCase):
             | {"matches_settings": {"status": "observed", "value": 0}}
         }
         invalid.append(malformed_match)
+        malformed_process_reason = valid | {
+            "process_is_active": {"status": "unavailable", "reason": []}
+        }
+        invalid.append(malformed_process_reason)
+        malformed_window_status = valid | {
+            "focused_window": valid["focused_window"] | {"status": []}
+        }
+        invalid.append(malformed_window_status)
+        malformed_window_reason = valid | {
+            "focused_window": valid["focused_window"]
+            | {
+                "role": {"status": "unavailable", "reason": {}},
+            }
+        }
+        invalid.append(malformed_window_reason)
         for candidate in invalid:
             with self.subTest(candidate=candidate):
                 self.assertFalse(_focus_diagnostics_valid(candidate))
@@ -265,10 +280,55 @@ class LiveMidiSyncControlTests(unittest.TestCase):
                     execute=True,
                 )
             saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+            malformed_diagnostics = diagnostics | {
+                "process_is_active": {"status": "unavailable", "reason": []}
+            }
+            malformed_receipt = native_report | {
+                "focus_diagnostics": malformed_diagnostics
+            }
+            malformed_receipt_path = Path(temporary) / "malformed-receipt.json"
+            malformed_result = subprocess.CompletedProcess(
+                args=["swift"],
+                returncode=1,
+                stdout=json.dumps(malformed_receipt),
+                stderr="",
+            )
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_midi_sync_control.subprocess.run",
+                    return_value=malformed_result,
+                ),
+            ):
+                malformed = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="isolate",
+                    baseline_path=baseline_path,
+                    output_path=malformed_receipt_path,
+                    execute=True,
+                )
+            malformed_saved = json.loads(
+                malformed_receipt_path.read_text(encoding="utf-8")
+            )
         self.assertEqual(report, saved)
         self.assertEqual(saved["focus_diagnostics"], diagnostics)
         self.assertFalse(saved["manual_inspection_required"])
         self.assertTrue(all(row["attempted"] is False for row in saved["actions"]))
+        self.assertEqual(malformed, malformed_saved)
+        self.assertEqual(malformed["phase"], "native-helper-invalid-receipt")
+        self.assertTrue(malformed["manual_inspection_required"])
+        self.assertTrue(
+            all(
+                row["attempted"] is None and row["outcome"] == "unknown"
+                for row in malformed["actions"]
+                if row["baseline_value"] == 1
+            )
+        )
 
     def test_swift_focus_diagnostics_are_read_only_and_failure_only(self):
         source = (

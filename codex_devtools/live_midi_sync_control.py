@@ -510,14 +510,21 @@ def _focus_fact_valid(
             return isinstance(value, str) and 0 < len(value) <= 128
         return False
     if fact["status"] == "unavailable":
+        reason = fact.get("reason")
         return (
             set(fact) == {"status", "reason"}
-            and fact.get("reason") in unavailable_reasons
+            and isinstance(reason, str)
+            and reason in unavailable_reasons
         )
     if fact["status"] == "error":
         if set(fact) == {"status", "error_code"}:
             return type(fact.get("error_code")) is int and fact["error_code"] != 0
-        return set(fact) == {"status", "reason"} and fact.get("reason") in error_reasons
+        reason = fact.get("reason")
+        return (
+            set(fact) == {"status", "reason"}
+            and isinstance(reason, str)
+            and reason in error_reasons
+        )
     return False
 
 
@@ -547,7 +554,10 @@ def _focus_diagnostics_valid(value: object) -> bool:
         return False
 
     focused = value.get("focused_window")
-    if not isinstance(focused, dict) or focused.get("status") not in {
+    if not isinstance(focused, dict):
+        return False
+    focused_status = focused.get("status")
+    if not isinstance(focused_status, str) or focused_status not in {
         "observed",
         "unavailable",
         "error",
@@ -566,14 +576,14 @@ def _focus_diagnostics_valid(value: object) -> bool:
         "value_type": bool,
         "unavailable_reasons": {"focused_window_unavailable"},
     }
-    if focused["status"] == "observed":
+    if focused_status == "observed":
         return (
             set(focused) == {"status", "role", "title", "matches_settings"}
             and _focus_fact_valid(focused.get("role"), **window_fact_options)
             and _focus_fact_valid(focused.get("title"), **window_fact_options)
             and _focus_fact_valid(focused.get("matches_settings"), **match_fact_options)
         )
-    if focused["status"] == "unavailable":
+    if focused_status == "unavailable":
         if set(focused) != {
             "status",
             "reason",
