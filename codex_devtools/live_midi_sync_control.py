@@ -21,6 +21,7 @@ MAX_DEPTH = 12
 MAX_WINDOWS = 64
 MAX_BASELINE_AGE_SECONDS = 300.0
 NATIVE_TIMEOUT_SECONDS = 180
+FOCUS_DIAGNOSTICS_FORMAT = "codex-devtools-live-midi-sync-focus-diagnostics-v1"
 
 
 def _utc_timestamp(value: object, label: str) -> datetime:
@@ -488,6 +489,145 @@ def _initial_receipt(operation: str, baseline: dict, baseline_hash: str) -> dict
     }
 
 
+def _focus_fact_valid(
+    fact: object,
+    *,
+    value_type: type,
+    unavailable_reasons: set[str],
+    error_reasons: set[str] | frozenset[str] = frozenset(),
+) -> bool:
+    if not isinstance(fact, dict) or not isinstance(fact.get("status"), str):
+        return False
+    if fact["status"] == "observed":
+        value = fact.get("value")
+        if set(fact) != {"status", "value"}:
+            return False
+        if value_type is int:
+            return type(value) is int and 1 <= value <= 2_147_483_647
+        if value_type is bool:
+            return type(value) is bool
+        if value_type is str:
+            return isinstance(value, str) and 0 < len(value) <= 128
+        return False
+    if fact["status"] == "unavailable":
+        reason = fact.get("reason")
+        return (
+            set(fact) == {"status", "reason"}
+            and isinstance(reason, str)
+            and reason in unavailable_reasons
+        )
+    if fact["status"] == "error":
+        if set(fact) == {"status", "error_code"}:
+            return type(fact.get("error_code")) is int and fact["error_code"] != 0
+        reason = fact.get("reason")
+        return (
+            set(fact) == {"status", "reason"}
+            and isinstance(reason, str)
+            and reason in error_reasons
+        )
+    return False
+
+
+def _focus_diagnostics_valid(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "format",
+        "captured_after_guard_refusal",
+        "process_is_active",
+        "frontmost_pid",
+        "focused_window",
+    }:
+        return False
+    if (
+        value.get("format") != FOCUS_DIAGNOSTICS_FORMAT
+        or value.get("captured_after_guard_refusal") is not True
+        or not _focus_fact_valid(
+            value.get("process_is_active"),
+            value_type=bool,
+            unavailable_reasons={"process_unavailable", "process_identity_changed"},
+        )
+        or not _focus_fact_valid(
+            value.get("frontmost_pid"),
+            value_type=int,
+            unavailable_reasons={"no_frontmost_application"},
+        )
+    ):
+        return False
+
+    focused = value.get("focused_window")
+    if not isinstance(focused, dict):
+        return False
+    focused_status = focused.get("status")
+    if not isinstance(focused_status, str) or focused_status not in {
+        "observed",
+        "unavailable",
+        "error",
+    }:
+        return False
+    window_fact_options = {
+        "value_type": str,
+        "unavailable_reasons": {
+            "focused_window_unavailable",
+            "no_value",
+            "attribute_unsupported",
+        },
+        "error_reasons": {"unexpected_type", "value_out_of_bounds"},
+    }
+    match_fact_options = {
+        "value_type": bool,
+        "unavailable_reasons": {"focused_window_unavailable"},
+    }
+    if focused_status == "observed":
+        return (
+            set(focused) == {"status", "role", "title", "matches_settings"}
+            and _focus_fact_valid(focused.get("role"), **window_fact_options)
+            and _focus_fact_valid(focused.get("title"), **window_fact_options)
+            and _focus_fact_valid(focused.get("matches_settings"), **match_fact_options)
+        )
+    if focused_status == "unavailable":
+        reason = focused.get("reason")
+        if (
+            set(focused)
+            != {
+                "status",
+                "reason",
+                "role",
+                "title",
+                "matches_settings",
+            }
+            or not isinstance(reason, str)
+            or reason
+            not in {
+                "no_value",
+                "attribute_unsupported",
+            }
+        ):
+            return False
+        unavailable = {"status": "unavailable", "reason": "focused_window_unavailable"}
+        return all(
+            focused.get(name) == unavailable
+            for name in ("role", "title", "matches_settings")
+        )
+    if set(focused) == {"status", "error_code", "role", "title", "matches_settings"}:
+        code = focused.get("error_code")
+        return (
+            type(code) is int
+            and code != 0
+            and focused.get("role") == {"status": "error", "error_code": code}
+            and focused.get("title") == {"status": "error", "error_code": code}
+            and focused.get("matches_settings")
+            == {"status": "unavailable", "reason": "focused_window_unavailable"}
+        )
+    if set(focused) == {"status", "reason", "role", "title", "matches_settings"}:
+        return (
+            focused.get("reason") == "unexpected_type"
+            and focused.get("role") == {"status": "error", "reason": "unexpected_type"}
+            and focused.get("title") == {"status": "error", "reason": "unexpected_type"}
+            and focused.get("matches_settings")
+            == {"status": "error", "reason": "unexpected_type"}
+        )
+    return False
+
+
 def _native_receipt_valid(
     report: object,
     *,
@@ -518,6 +658,12 @@ def _native_receipt_valid(
         or not isinstance(report.get("phase"), str)
         or report.get("read_only") is not False
         or type(report.get("manual_inspection_required")) is not bool
+    ):
+        return False
+    if "focus_diagnostics" in report and (
+        status != "stopped"
+        or report.get("phase") not in {"preflight", "actions"}
+        or not _focus_diagnostics_valid(report["focus_diagnostics"])
     ):
         return False
     original = {row["name"]: row["value"] for row in baseline["outputs"]}

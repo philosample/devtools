@@ -342,6 +342,122 @@ func focusedSettingsWindow(_ app: AXUIElement, expected: AXUIElement) throws -> 
     return CFEqual(window, expected)
 }
 
+func focusObserved(_ value: Any) -> [String: Any] {
+    ["status": "observed", "value": value]
+}
+
+func focusUnavailable(_ reason: String) -> [String: Any] {
+    ["status": "unavailable", "reason": reason]
+}
+
+func focusError(_ reason: String) -> [String: Any] {
+    ["status": "error", "reason": reason]
+}
+
+func focusError(_ error: AXError) -> [String: Any] {
+    ["status": "error", "error_code": Int(error.rawValue)]
+}
+
+func focusedWindowString(_ window: AXUIElement, attribute: String) -> [String: Any] {
+    AXUIElementSetMessagingTimeout(window, 2.0)
+    var value: CFTypeRef?
+    let error = AXUIElementCopyAttributeValue(window, attribute as CFString, &value)
+    switch error {
+    case .success:
+        guard let text = value as? String else { return focusError("unexpected_type") }
+        guard !text.isEmpty, text.unicodeScalars.count <= 128 else { return focusError("value_out_of_bounds") }
+        return focusObserved(text)
+    case .noValue:
+        return focusUnavailable("no_value")
+    case .attributeUnsupported:
+        return focusUnavailable("attribute_unsupported")
+    default:
+        return focusError(error)
+    }
+}
+
+func focusRefusalDiagnostic(app: AXUIElement, expectedSettings: AXUIElement, pid: pid_t, bundleID: String) -> [String: Any] {
+    let processFact: [String: Any]
+    if let process = NSRunningApplication(processIdentifier: pid) {
+        processFact = process.bundleIdentifier == bundleID
+            ? focusObserved(process.isActive)
+            : focusUnavailable("process_identity_changed")
+    } else {
+        processFact = focusUnavailable("process_unavailable")
+    }
+
+    let frontmostFact: [String: Any]
+    if let frontmost = NSWorkspace.shared.frontmostApplication {
+        frontmostFact = focusObserved(Int(frontmost.processIdentifier))
+    } else {
+        frontmostFact = focusUnavailable("no_frontmost_application")
+    }
+
+    AXUIElementSetMessagingTimeout(app, 2.0)
+    var focusedValue: CFTypeRef?
+    let focusedError = AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &focusedValue)
+    let focused: [String: Any]
+    switch focusedError {
+    case .success:
+        if let focusedValue, CFGetTypeID(focusedValue) == AXUIElementGetTypeID() {
+            let window = unsafeBitCast(focusedValue, to: AXUIElement.self)
+            focused = [
+                "status": "observed",
+                "role": focusedWindowString(window, attribute: kAXRoleAttribute as String),
+                "title": focusedWindowString(window, attribute: kAXTitleAttribute as String),
+                "matches_settings": focusObserved(CFEqual(window, expectedSettings)),
+            ]
+        } else {
+            let error = focusError("unexpected_type")
+            focused = [
+                "status": "error",
+                "reason": "unexpected_type",
+                "role": error,
+                "title": error,
+                "matches_settings": error,
+            ]
+        }
+    case .noValue:
+        let unavailable = focusUnavailable("focused_window_unavailable")
+        focused = ["status": "unavailable", "reason": "no_value",
+                   "role": unavailable, "title": unavailable, "matches_settings": unavailable]
+    case .attributeUnsupported:
+        let unavailable = focusUnavailable("focused_window_unavailable")
+        focused = ["status": "unavailable", "reason": "attribute_unsupported",
+                   "role": unavailable, "title": unavailable, "matches_settings": unavailable]
+    default:
+        let error = focusError(focusedError)
+        let unavailable = focusUnavailable("focused_window_unavailable")
+        focused = ["status": "error", "error_code": Int(focusedError.rawValue),
+                   "role": error, "title": error, "matches_settings": unavailable]
+    }
+
+    return [
+        "format": "codex-devtools-live-midi-sync-focus-diagnostics-v1",
+        "captured_after_guard_refusal": true,
+        "process_is_active": processFact,
+        "frontmost_pid": frontmostFact,
+        "focused_window": focused,
+    ]
+}
+
+func recordFocusRefusal(app: AXUIElement, settings: AXUIElement, pid: pid_t, bundleID: String) {
+    guard var current = receipt else { return }
+    current["focus_diagnostics"] = focusRefusalDiagnostic(
+        app: app, expectedSettings: settings, pid: pid, bundleID: bundleID
+    )
+    receipt = current
+}
+
+func focusedSettingsWindowOrRecord(app: AXUIElement, settings: AXUIElement, pid: pid_t, bundleID: String) throws -> Bool {
+    do {
+        return try focusedSettingsWindow(app, expected: settings)
+    } catch {
+        recordFocusRefusal(app: app, settings: settings, pid: pid, bundleID: bundleID)
+        throw error
+    }
+}
+
 func targetCheck(_ pid: pid_t, bundleID: String) throws -> NSRunningApplication {
     guard let process = NSRunningApplication(processIdentifier: pid), process.bundleIdentifier == bundleID else {
         throw SyncFailure(message: "exact target PID/bundle identity is no longer running")
@@ -424,15 +540,31 @@ func run() throws -> [String: Any] {
             throw SyncFailure(message: "required AXPress action is unavailable: \(name)")
         }
     }
-    guard process.isActive, NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
-          try focusedSettingsWindow(app, expected: settings) else {
+    let processActive = process.isActive
+    let frontmostMatches = processActive
+        && NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid
+    let focusedSettingsMatches = processActive && frontmostMatches
+        ? try focusedSettingsWindowOrRecord(
+            app: app, settings: settings, pid: options.pid, bundleID: options.bundleID
+        )
+        : false
+    guard processActive, frontmostMatches, focusedSettingsMatches else {
+        recordFocusRefusal(app: app, settings: settings, pid: options.pid, bundleID: options.bundleID)
         throw SyncFailure(message: "exact Live Settings window is not foreground and focused")
     }
-    phase = "actions"
     for name in candidates {
-        guard try targetCheck(options.pid, bundleID: options.bundleID).isActive,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
-              try focusedSettingsWindow(app, expected: settings) else {
+        phase = "actions"
+        let currentProcess = try targetCheck(options.pid, bundleID: options.bundleID)
+        let active = currentProcess.isActive
+        let foregroundMatches = active
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid
+        let windowMatches = active && foregroundMatches
+            ? try focusedSettingsWindowOrRecord(
+                app: app, settings: settings, pid: options.pid, bundleID: options.bundleID
+            )
+            : false
+        guard active, foregroundMatches, windowMatches else {
+            recordFocusRefusal(app: app, settings: settings, pid: options.pid, bundleID: options.bundleID)
             throw SyncFailure(message: "target focus or process identity changed before \(name)")
         }
         let (freshSettings, freshControls, freshElementCount, freshWindowCount) = try matchingOutputs(app)
@@ -461,9 +593,17 @@ func run() throws -> [String: Any] {
                 throw SyncFailure(message: "output Sync state changed during prepress validation: \(rowName)")
             }
         }
-        guard try targetCheck(options.pid, bundleID: options.bundleID).isActive,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
-              try focusedSettingsWindow(app, expected: freshSettings) else {
+        let finalProcess = try targetCheck(options.pid, bundleID: options.bundleID)
+        let finalActive = finalProcess.isActive
+        let finalForegroundMatches = finalActive
+            && NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid
+        let finalWindowMatches = finalActive && finalForegroundMatches
+            ? try focusedSettingsWindowOrRecord(
+                app: app, settings: freshSettings, pid: options.pid, bundleID: options.bundleID
+            )
+            : false
+        guard finalActive, finalForegroundMatches, finalWindowMatches else {
+            recordFocusRefusal(app: app, settings: freshSettings, pid: options.pid, bundleID: options.bundleID)
             throw SyncFailure(message: "target focus or process identity changed before pressing \(name)")
         }
         try validateBaselineFreshness(baselineDate)

@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import subprocess
@@ -11,6 +12,7 @@ from unittest.mock import patch
 from codex_devtools.cli import build_parser
 from codex_devtools.live_midi_sync_control import (
     RECEIPT_FORMAT,
+    _focus_diagnostics_valid,
     _native_receipt_valid,
     baseline_from_snapshot,
     run_live_midi_sync,
@@ -100,6 +102,376 @@ class LiveMidiSyncControlTests(unittest.TestCase):
         )
         self.assertTrue(result["read_only"])
         self.assertEqual(result["settings_window"], {"title": "Settings", "index": 0})
+
+    def test_focus_diagnostics_keep_the_three_refusal_facts_separate(self):
+        diagnostics = {
+            "format": "codex-devtools-live-midi-sync-focus-diagnostics-v1",
+            "captured_after_guard_refusal": True,
+            "process_is_active": {"status": "observed", "value": True},
+            "frontmost_pid": {"status": "observed", "value": 12345},
+            "focused_window": {
+                "status": "observed",
+                "role": {"status": "observed", "value": "AXWindow"},
+                "title": {"status": "observed", "value": "Settings"},
+                "matches_settings": {"status": "observed", "value": False},
+            },
+        }
+        self.assertTrue(_focus_diagnostics_valid(diagnostics))
+
+    def test_focus_diagnostics_preserve_unavailable_and_ax_error_states(self):
+        diagnostics = {
+            "format": "codex-devtools-live-midi-sync-focus-diagnostics-v1",
+            "captured_after_guard_refusal": True,
+            "process_is_active": {
+                "status": "unavailable",
+                "reason": "process_unavailable",
+            },
+            "frontmost_pid": {
+                "status": "unavailable",
+                "reason": "no_frontmost_application",
+            },
+            "focused_window": {
+                "status": "error",
+                "error_code": -25204,
+                "role": {"status": "error", "error_code": -25204},
+                "title": {"status": "error", "error_code": -25204},
+                "matches_settings": {
+                    "status": "unavailable",
+                    "reason": "focused_window_unavailable",
+                },
+            },
+        }
+        self.assertTrue(_focus_diagnostics_valid(diagnostics))
+        unavailable_window = diagnostics | {
+            "focused_window": {
+                "status": "unavailable",
+                "reason": "no_value",
+                "role": {
+                    "status": "unavailable",
+                    "reason": "focused_window_unavailable",
+                },
+                "title": {
+                    "status": "unavailable",
+                    "reason": "focused_window_unavailable",
+                },
+                "matches_settings": {
+                    "status": "unavailable",
+                    "reason": "focused_window_unavailable",
+                },
+            },
+        }
+        self.assertTrue(_focus_diagnostics_valid(unavailable_window))
+
+    def test_focus_diagnostics_reject_malformed_or_unbounded_facts(self):
+        valid = {
+            "format": "codex-devtools-live-midi-sync-focus-diagnostics-v1",
+            "captured_after_guard_refusal": True,
+            "process_is_active": {"status": "observed", "value": False},
+            "frontmost_pid": {"status": "observed", "value": 12345},
+            "focused_window": {
+                "status": "observed",
+                "role": {"status": "observed", "value": "AXWindow"},
+                "title": {"status": "observed", "value": "Other window"},
+                "matches_settings": {"status": "observed", "value": False},
+            },
+        }
+        invalid = []
+        extra = valid | {"whole_ax_tree": []}
+        invalid.append(extra)
+        malformed_pid = valid | {"frontmost_pid": {"status": "observed", "value": True}}
+        invalid.append(malformed_pid)
+        too_long_title = valid | {
+            "focused_window": valid["focused_window"]
+            | {"title": {"status": "observed", "value": "x" * 129}}
+        }
+        invalid.append(too_long_title)
+        malformed_match = valid | {
+            "focused_window": valid["focused_window"]
+            | {"matches_settings": {"status": "observed", "value": 0}}
+        }
+        invalid.append(malformed_match)
+        malformed_process_reason = valid | {
+            "process_is_active": {"status": "unavailable", "reason": []}
+        }
+        invalid.append(malformed_process_reason)
+        malformed_window_status = valid | {
+            "focused_window": valid["focused_window"] | {"status": []}
+        }
+        invalid.append(malformed_window_status)
+        malformed_window_status_dict = valid | {
+            "focused_window": valid["focused_window"] | {"status": {}}
+        }
+        invalid.append(malformed_window_status_dict)
+        malformed_window_reason = valid | {
+            "focused_window": valid["focused_window"]
+            | {
+                "role": {"status": "unavailable", "reason": {}},
+            }
+        }
+        invalid.append(malformed_window_reason)
+        malformed_window_error_reason = valid | {
+            "focused_window": valid["focused_window"]
+            | {
+                "role": {"status": "error", "reason": {}},
+            }
+        }
+        invalid.append(malformed_window_error_reason)
+        for reason in ([], {}):
+            malformed_complete_unavailable_window = valid | {
+                "focused_window": {
+                    "status": "unavailable",
+                    "reason": reason,
+                    "role": {
+                        "status": "unavailable",
+                        "reason": "focused_window_unavailable",
+                    },
+                    "title": {
+                        "status": "unavailable",
+                        "reason": "focused_window_unavailable",
+                    },
+                    "matches_settings": {
+                        "status": "unavailable",
+                        "reason": "focused_window_unavailable",
+                    },
+                }
+            }
+            invalid.append(malformed_complete_unavailable_window)
+        for candidate in invalid:
+            with self.subTest(candidate=candidate):
+                self.assertFalse(_focus_diagnostics_valid(candidate))
+
+    def test_focus_refusal_diagnostics_survive_wrapper_without_action_changes(self):
+        observed = baseline()
+        diagnostics = {
+            "format": "codex-devtools-live-midi-sync-focus-diagnostics-v1",
+            "captured_after_guard_refusal": True,
+            "process_is_active": {"status": "observed", "value": True},
+            "frontmost_pid": {"status": "observed", "value": 12345},
+            "focused_window": {
+                "status": "observed",
+                "role": {"status": "observed", "value": "AXWindow"},
+                "title": {"status": "observed", "value": "Settings"},
+                "matches_settings": {"status": "observed", "value": False},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            baseline_path = Path(temporary) / "baseline.json"
+            receipt_path = Path(temporary) / "receipt.json"
+            baseline_bytes = json.dumps(observed).encode()
+            baseline_path.write_bytes(baseline_bytes)
+            baseline_hash = hashlib.sha256(baseline_bytes).hexdigest()
+            native_report = {
+                "format": RECEIPT_FORMAT,
+                "status": "stopped",
+                "phase": "preflight",
+                "operation": "isolate",
+                "read_only": False,
+                "target": observed["target"],
+                "baseline_sha256": baseline_hash,
+                "expected_output_count": observed["expected_output_count"],
+                "actions": [
+                    {
+                        "name": row["name"],
+                        "description": row["description"],
+                        "baseline_value": row["value"],
+                        "desired_value": 0,
+                        "attempted": False,
+                        "outcome": "not_attempted",
+                        "actual_value": row["value"],
+                    }
+                    for row in observed["outputs"]
+                ],
+                "manual_inspection_required": False,
+                "error": "exact Live Settings window is not foreground and focused",
+                "focus_diagnostics": diagnostics,
+            }
+            result = subprocess.CompletedProcess(
+                args=["swift"],
+                returncode=1,
+                stdout=json.dumps(native_report),
+                stderr="",
+            )
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_midi_sync_control.subprocess.run",
+                    return_value=result,
+                ),
+            ):
+                report = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="isolate",
+                    baseline_path=baseline_path,
+                    output_path=receipt_path,
+                    execute=True,
+                )
+            saved = json.loads(receipt_path.read_text(encoding="utf-8"))
+            malformed_diagnostics = diagnostics | {
+                "process_is_active": {"status": "unavailable", "reason": []}
+            }
+            malformed_receipt = native_report | {
+                "focus_diagnostics": malformed_diagnostics
+            }
+            malformed_receipt_path = Path(temporary) / "malformed-receipt.json"
+            malformed_result = subprocess.CompletedProcess(
+                args=["swift"],
+                returncode=1,
+                stdout=json.dumps(malformed_receipt),
+                stderr="",
+            )
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_midi_sync_control.subprocess.run",
+                    return_value=malformed_result,
+                ),
+            ):
+                malformed = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="isolate",
+                    baseline_path=baseline_path,
+                    output_path=malformed_receipt_path,
+                    execute=True,
+                )
+            malformed_saved = json.loads(
+                malformed_receipt_path.read_text(encoding="utf-8")
+            )
+            first_candidate = next(
+                row["name"] for row in observed["outputs"] if row["value"] == 1
+            )
+            between_press_receipt = native_report | {
+                "phase": "actions",
+                "manual_inspection_required": True,
+                "error": "target focus or process identity changed before next output",
+                "actions": [
+                    row
+                    | (
+                        {
+                            "attempted": True,
+                            "outcome": "known",
+                            "actual_value": 0,
+                            "prepress_elements": observed["bounds"][
+                                "elements_observed"
+                            ],
+                            "prepress_windows": observed["bounds"]["window_count"],
+                        }
+                        if row["name"] == first_candidate
+                        else {
+                            "attempted": False,
+                            "outcome": "not_attempted",
+                            "actual_value": row["baseline_value"],
+                        }
+                    )
+                    for row in native_report["actions"]
+                ],
+            }
+            between_press_path = Path(temporary) / "between-press-receipt.json"
+            between_press_result = subprocess.CompletedProcess(
+                args=["swift"],
+                returncode=1,
+                stdout=json.dumps(between_press_receipt),
+                stderr="",
+            )
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_midi_sync_control.subprocess.run",
+                    return_value=between_press_result,
+                ),
+            ):
+                between_press = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="isolate",
+                    baseline_path=baseline_path,
+                    output_path=between_press_path,
+                    execute=True,
+                )
+            between_press_saved = json.loads(
+                between_press_path.read_text(encoding="utf-8")
+            )
+        self.assertEqual(report, saved)
+        self.assertEqual(saved["focus_diagnostics"], diagnostics)
+        self.assertFalse(saved["manual_inspection_required"])
+        self.assertTrue(all(row["attempted"] is False for row in saved["actions"]))
+        self.assertEqual(malformed, malformed_saved)
+        self.assertEqual(malformed["phase"], "native-helper-invalid-receipt")
+        self.assertTrue(malformed["manual_inspection_required"])
+        self.assertTrue(
+            all(
+                row["attempted"] is None and row["outcome"] == "unknown"
+                for row in malformed["actions"]
+                if row["baseline_value"] == 1
+            )
+        )
+        self.assertEqual(between_press, between_press_saved)
+        self.assertEqual(between_press["phase"], "actions")
+        self.assertTrue(between_press["manual_inspection_required"])
+        self.assertEqual(between_press["focus_diagnostics"], diagnostics)
+        between_rows = {row["name"]: row for row in between_press["actions"]}
+        self.assertEqual(between_rows[first_candidate]["outcome"], "known")
+        self.assertTrue(between_rows[first_candidate]["attempted"])
+        self.assertEqual(between_rows[first_candidate]["actual_value"], 0)
+        for name, row in between_rows.items():
+            if name != first_candidate:
+                self.assertFalse(row["attempted"])
+                self.assertEqual(row["outcome"], "not_attempted")
+
+    def test_swift_focus_diagnostics_are_read_only_and_failure_only(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_midi_sync.swift"
+        ).read_text(encoding="utf-8")
+        helper = source.split("func focusRefusalDiagnostic", 1)[1].split(
+            "func recordFocusRefusal", 1
+        )[0]
+        self.assertIn("process.isActive", helper)
+        self.assertIn("NSWorkspace.shared.frontmostApplication", helper)
+        self.assertIn("kAXFocusedWindowAttribute", helper)
+        self.assertIn("kAXRoleAttribute", helper)
+        self.assertIn("kAXTitleAttribute", helper)
+        self.assertIn("CFEqual(window, expectedSettings)", helper)
+        self.assertNotIn("AXUIElementPerformAction", helper)
+        self.assertNotIn("activate(", helper)
+        error_wrapper = source.split("func focusedSettingsWindowOrRecord", 1)[1].split(
+            "func targetCheck", 1
+        )[0]
+        self.assertIn("catch", error_wrapper)
+        self.assertIn("recordFocusRefusal", error_wrapper)
+        self.assertIn("throw error", error_wrapper)
+        self.assertIn(
+            "recordFocusRefusal(app: app, settings: settings, pid: options.pid, bundleID: options.bundleID)",
+            source,
+        )
+
+    def test_swift_sets_actions_phase_before_each_between_press_focus_guard(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_midi_sync.swift"
+        ).read_text(encoding="utf-8")
+        loop = source.split("for name in candidates {", 1)[1].split(
+            "let (freshSettings", 1
+        )[0]
+        self.assertLess(
+            loop.index('phase = "actions"'),
+            loop.index("let currentProcess = try targetCheck"),
+        )
 
     def test_baseline_rejects_wrong_identity_incomplete_or_ambiguous_inventory(self):
         with self.assertRaisesRegex(ValueError, "exact PID"):
