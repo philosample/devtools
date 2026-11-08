@@ -541,6 +541,44 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
         self.assertIsNone(run.call_args.kwargs["action"])
         self.assertFalse(run.call_args.kwargs["execute"])
 
+    def test_cli_routes_read_only_focus_window_preflight_to_transport_handler(self):
+        output = io.StringIO()
+        with (
+            patch(
+                "codex_devtools.live_transport_control.run_live_transport",
+                return_value={"status": "preflight_ready", "read_only": True},
+            ) as run,
+            redirect_stdout(output),
+        ):
+            code = main(
+                [
+                    "ax",
+                    "live-transport",
+                    "--pid",
+                    str(PID),
+                    "--expected-bundle-id",
+                    BUNDLE,
+                    "--set",
+                    "/private/tmp/recall.als",
+                    "--action",
+                    "focus-window",
+                    "--expected-generation",
+                    "123456",
+                    "--snapshot-observed-at-utc",
+                    "2026-11-08T12:00:00.000Z",
+                    "--snapshot-launch-date",
+                    "2026-11-08T11:00:00.000Z",
+                    "--window-identity",
+                    "1685072705",
+                    "--receipt",
+                    "/private/tmp/preflight.json",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["status"], "preflight_ready")
+        self.assertEqual(run.call_args.kwargs["action"], "focus-window")
+        self.assertFalse(run.call_args.kwargs["execute"])
+
     def test_cli_rejects_action_without_execute(self):
         with (
             patch("codex_devtools.live_transport_control.run_live_transport") as run,

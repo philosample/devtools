@@ -818,7 +818,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.pid,
                 expected_bundle_id=args.expected_bundle_id,
                 set_path=args.set_path,
-                action=args.operation if args.execute else None,
+                action=args.operation,
                 play_for_seconds=args.play_for_seconds,
                 expected_count=args.expected_output_count,
                 receipt_path=args.receipt,
