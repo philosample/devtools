@@ -372,13 +372,41 @@ func syncSettingsWindowMatches(
     return inputEqual(originalWindow, currentWindow)
 }
 
+func syncWindowBoundsMatch(_ original: Any?, _ current: Any?) -> Bool {
+    guard var originalBounds = original as? [String: Any],
+          var currentBounds = current as? [String: Any] else { return false }
+    for bounds in [originalBounds, currentBounds] {
+        guard let count = bounds["window_count"] as? NSNumber,
+              let observed = bounds["windows_observed"] as? NSNumber,
+              let truncated = bounds["windows_truncated"] as? NSNumber,
+              CFGetTypeID(count) != CFBooleanGetTypeID(),
+              CFGetTypeID(observed) != CFBooleanGetTypeID(),
+              CFGetTypeID(truncated) == CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(count),
+              !CFNumberIsFloatType(observed),
+              count.doubleValue == Double(count.intValue),
+              observed.doubleValue == Double(observed.intValue),
+              (1...maximumWindows).contains(count.intValue),
+              observed.intValue == count.intValue,
+              !truncated.boolValue else { return false }
+    }
+    originalBounds.removeValue(forKey: "window_count")
+    originalBounds.removeValue(forKey: "windows_observed")
+    currentBounds.removeValue(forKey: "window_count")
+    currentBounds.removeValue(forKey: "windows_observed")
+    return inputEqual(originalBounds, currentBounds)
+}
+
 func historicalSyncRestoreValues(_ original: [String: Any], _ current: [String: Any]) throws -> [String: Int] {
     let before = try syncCheckboxRows(original, expectedCount: options.expectedCount)
     let after = try syncCheckboxRows(current, expectedCount: options.expectedCount)
-    for key in ["target", "bounds", "expected_output_count"] {
+    for key in ["target", "expected_output_count"] {
         guard inputEqual(original[key], current[key]) else {
             throw SyncFailure(message: "historical current Sync inventory changed: \(key)")
         }
+    }
+    guard syncWindowBoundsMatch(original["bounds"], current["bounds"]) else {
+        throw SyncFailure(message: "historical current Sync inventory changed: bounds")
     }
     guard syncSettingsWindowMatches(
         original["settings_window"], current["settings_window"],
@@ -461,7 +489,7 @@ func compareSyncInventoryValues(
           let liveBounds = live["bounds"] as? [String: Any] else {
         throw SyncFailure(message: "complete Sync inventory bounds are unavailable")
     }
-    guard inputEqual(originalBounds, liveBounds) else {
+    guard syncWindowBoundsMatch(originalBounds, liveBounds) else {
         throw SyncFailure(message: "complete Sync inventory bounds changed")
     }
     guard syncSettingsWindowMatches(

@@ -689,6 +689,37 @@ class LiveMidiSyncControlTests(unittest.TestCase):
             ):
                 historical_restore_expected(original, changed)
 
+    def test_historical_restore_allows_only_valid_total_window_count_drift(self):
+        original, current = historical_pair()
+        original["bounds"]["window_count"] = 4
+        original["bounds"]["windows_observed"] = 4
+        current["bounds"]["window_count"] = 2
+        current["bounds"]["windows_observed"] = 2
+        expected = historical_restore_expected(original, current)
+        output = next(row for row in current["outputs"] if row["name"] == "A")
+        self.assertEqual(expected[output["identity"]], output["value"])
+
+        for mutation in (
+            lambda bounds: bounds.update(
+                elements_observed=bounds["elements_observed"] + 1
+            ),
+            lambda bounds: bounds.update(window_count=0),
+            lambda bounds: bounds.update(window_count=65),
+            lambda bounds: bounds.update(window_count=True),
+            lambda bounds: bounds.update(window_count=2.0),
+            lambda bounds: bounds.update(windows_observed=3),
+            lambda bounds: bounds.update(windows_observed=True),
+            lambda bounds: bounds.update(windows_observed=2.0),
+            lambda bounds: bounds.update(windows_truncated=True),
+        ):
+            changed = json.loads(json.dumps(current))
+            mutation(changed["bounds"])
+            with (
+                self.subTest(bounds=changed["bounds"]),
+                self.assertRaisesRegex(ValueError, "bounds"),
+            ):
+                historical_restore_expected(original, changed)
+
     def test_historical_restore_rejects_generation_keyset_non_sync_drift_and_off_to_on(
         self,
     ):
@@ -1385,6 +1416,45 @@ func nativeShape(_ inventory: [String: Any]) -> [String: Any] {
      "settings_window": inventory["settings_window"]!,
      "bounds": inventory["bounds"]!,
      "checkboxes": inventory["checkboxes"]!]
+}
+var originalCountDrift = original
+var originalCountBounds = originalCountDrift["bounds"] as! [String: Any]
+originalCountBounds["window_count"] = 4
+originalCountBounds["windows_observed"] = 4
+originalCountDrift["bounds"] = originalCountBounds
+var currentCountDrift = current
+var currentCountBounds = currentCountDrift["bounds"] as! [String: Any]
+currentCountBounds["window_count"] = 2
+currentCountBounds["windows_observed"] = 2
+currentCountDrift["bounds"] = currentCountBounds
+let countDriftValues = try historicalSyncRestoreValues(originalCountDrift, currentCountDrift)
+let nativeCountComparison = try compareSyncInventoryValues(
+    nativeShape(originalCountDrift), nativeShape(currentCountDrift), values: countDriftValues
+)
+precondition(nativeCountComparison.count == originalRows.count,
+             "total window count drift 4 to 2 must preserve complete Sync identity")
+func countDriftRejects(_ inventory: [String: Any]) -> Bool {
+    do { _ = try historicalSyncRestoreValues(originalCountDrift, inventory); return false }
+    catch { return true }
+}
+for (field, value): (String, Any) in [
+    ("window_count", 0), ("window_count", 65), ("window_count", true),
+    ("window_count", 2.0), ("windows_observed", 3), ("windows_observed", true),
+    ("windows_observed", 2.0), ("windows_truncated", true),
+    ("elements_observed", (currentCountBounds["elements_observed"] as! Int) + 1),
+] {
+    var invalid = currentCountDrift
+    var bounds = invalid["bounds"] as! [String: Any]
+    bounds[field] = value
+    invalid["bounds"] = bounds
+    precondition(countDriftRejects(invalid), "invalid or changed bound \(field) must stop")
+    var invalidNativeRejected = false
+    do {
+        _ = try compareSyncInventoryValues(
+            nativeShape(originalCountDrift), nativeShape(invalid), values: countDriftValues
+        )
+    } catch { invalidNativeRejected = true }
+    precondition(invalidNativeRejected, "native invalid or changed bound \(field) must stop")
 }
 let live = nativeShape(current)
 let compared = try compareSyncInventoryValues(current, live, values: values)
