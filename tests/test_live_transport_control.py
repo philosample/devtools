@@ -913,6 +913,7 @@ print(String(data: data, encoding: .utf8)!)
         action = source[action_start:action_end]
         self.assertEqual(action.count("AXUIElementSetAttributeValue("), 1)
         self.assertNotIn("AXUIElementPerformAction(", action)
+        self.assertIn("positionWindowReadbackObservation(", action)
         set_action_start = source.index("func setAction(")
         set_action_end = source.index("\nfunc press(", set_action_start)
         settle_start = source.index("struct PositionReadbackPending")
@@ -1064,6 +1065,33 @@ for driftMessage in ["Live process changed during window positioning", "exact cu
     preconditionFailure("drift was accepted")
   }} catch let failure as TransportFailure {{ precondition(failure.message == driftMessage) }}
   precondition(setterCalls == 1 && readCalls == 1)
+}}
+for driftField in ["title", "geometry"] {{
+  fakeNow = 0
+  setterCalls = 0
+  readCalls = 0
+  var cgReadbackCalls = 0
+  var driftedAX = window
+  if driftField == "title" {{
+    driftedAX["title"] = "Changed editor title"
+  }} else {{
+    driftedAX["geometry"] = ["x":25.0,"y":44.0,"width":641.0,"height":197.0]
+  }}
+  do {{
+    _ = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow += 1_000_000 }}, write:{{ setterCalls += 1 }}, read:{{
+      readCalls += 1
+      return try positionWindowReadbackObservation(
+        axRecord:driftedAX, original:window, requested:requested,
+        originalSize:CGSize(width:640,height:197),
+        cgReadback:{{ _ in cgReadbackCalls += 1; throw cgMiss }}
+      )
+    }})
+    preconditionFailure("AX metadata or size drift was retried as a transient CG miss")
+  }} catch let failure as TransportFailure {{
+    if driftField == "title" {{ precondition(failure.message.contains("identity or metadata changed")) }}
+    else {{ precondition(failure.message.contains("size changed")) }}
+  }}
+  precondition(setterCalls == 1 && readCalls == 1 && cgReadbackCalls == 0)
 }}
 """
             main_swift = Path(temporary) / "main.swift"
