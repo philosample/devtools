@@ -646,6 +646,80 @@ func windowGeometry(_ window: AXUIElement) throws -> [String: Double] {
     return ["x": point.x, "y": point.y, "width": dimensions.width, "height": dimensions.height]
 }
 
+struct FocusCGObservation {
+    let pid: pid_t
+    let name: String?
+    let number: Int?
+    let layer: Int?
+    let x: Double?
+    let y: Double?
+    let width: Double?
+    let height: Double?
+    let onscreen: Bool
+}
+
+struct FocusCGCandidate: Equatable {
+    let number: Int
+    let layer: Int
+}
+
+func focusCGGeometryMatches(_ row: FocusCGObservation, geometry: [String: Double]) -> Bool {
+    let pairs: [(Double?, String)] = [
+        (row.x, "x"), (row.y, "y"), (row.width, "width"), (row.height, "height"),
+    ]
+    for (actual, key) in pairs {
+        guard let actual, actual.isFinite, let expected = geometry[key], expected.isFinite,
+              abs(actual - expected) < 2 else { return false }
+    }
+    return (row.width ?? 0) > 0 && (row.height ?? 0) > 0
+}
+
+func focusCGCandidateSet(_ rows: [FocusCGObservation], pid: pid_t,
+                         title: String, geometry: [String: Double]) throws -> [FocusCGCandidate] {
+    try require(rows.count <= maxWindows, "current-desktop Live CG inventory exceeds its bound")
+    try require(rows.allSatisfy { $0.pid == pid }, "focus CG inventory contains another process")
+    let matching = rows.filter {
+        $0.onscreen && $0.name == title && focusCGGeometryMatches($0, geometry: geometry)
+    }
+    try require(!matching.isEmpty, "no current-desktop CG window matches the selected AX window")
+    try require(matching.allSatisfy {
+        $0.number != nil && ($0.layer == 0 || $0.layer == 3)
+    }, "matching CG window has a missing number or an unreviewed layer")
+    let candidates = matching.map { FocusCGCandidate(number: $0.number!, layer: $0.layer!) }
+        .sorted { ($0.number, $0.layer) < ($1.number, $1.layer) }
+    try require(Set(candidates.map(\.number)).count == candidates.count,
+                "current-desktop CG candidate numbers are duplicated")
+    return candidates
+}
+
+func currentFocusCGCandidateSet(pid: pid_t, title: String,
+                                geometry: [String: Double]) throws -> [FocusCGCandidate] {
+    let flags: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+    guard let entries = CGWindowListCopyWindowInfo(flags, kCGNullWindowID) as? [[String: Any]] else {
+        throw TransportFailure(phase: phase, message: "current-desktop CG inventory is unavailable")
+    }
+    let owned = entries.filter { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid }
+    let rows = owned.map { entry -> FocusCGObservation in
+        let bounds = entry[kCGWindowBounds as String] as? [String: NSNumber]
+        return FocusCGObservation(
+            pid: pid,
+            name: entry[kCGWindowName as String] as? String,
+            number: (entry[kCGWindowNumber as String] as? NSNumber)?.intValue,
+            layer: (entry[kCGWindowLayer as String] as? NSNumber)?.intValue,
+            x: bounds?["X"]?.doubleValue,
+            y: bounds?["Y"]?.doubleValue,
+            width: bounds?["Width"]?.doubleValue,
+            height: bounds?["Height"]?.doubleValue,
+            onscreen: true
+        )
+    }
+    return try focusCGCandidateSet(rows, pid: pid, title: title, geometry: geometry)
+}
+
+func focusCGCandidateReport(_ candidates: [FocusCGCandidate]) -> [[String: Int]] {
+    candidates.map { ["number": $0.number, "layer": $0.layer] }
+}
+
 func focusWindowRecord(_ window: AXUIElement, app: AXUIElement, pid: pid_t, url: URL, generation: Int64) throws -> [String: Any] {
     try require(try role(window) == (kAXWindowRole as String), "selected AX element is not a window")
     let subrole = optionalString(window, kAXSubroleAttribute as String) ?? ""
@@ -661,14 +735,70 @@ func focusWindowRecord(_ window: AXUIElement, app: AXUIElement, pid: pid_t, url:
     let identifier = optionalString(window, "AXIdentifier")
     let geometry = try windowGeometry(window)
     let number = windowNumber(window)
-    let cg = try currentDesktopWindow(pid: pid, title: title, number: number, geometry: geometry)
+    let cgCandidates = try currentFocusCGCandidateSet(pid: pid, title: title, geometry: geometry)
+    try require(number == nil || cgCandidates.contains { $0.number == number },
+                "AX window number is absent from its matching current-desktop CG candidate set")
     return [
         "identity": String(CFHash(window)), "role": try role(window), "subrole": subrole,
         "title": title, "identifier": identifier as Any? ?? NSNull(),
         "document": optionalString(window, kAXDocumentAttribute as String) as Any? ?? NSNull(),
         "geometry": geometry, "window_number": number as Any? ?? NSNull(),
-        "cg_window_number": cg,
+        "cg_candidates": focusCGCandidateReport(cgCandidates),
     ]
+}
+
+func selectedFocusWindow(_ app: AXUIElement, identity: String) throws -> AXUIElement {
+    let matches = try focusWindows(app).filter { String(CFHash($0)) == identity }
+    try require(matches.count == 1, "selected AX window identity is missing or ambiguous")
+    return matches[0]
+}
+
+func raiseExactFocusWindow(_ app: AXUIElement, process: NSRunningApplication,
+                           pid: pid_t, bundleID: String, generation: Int64,
+                           url: URL, setWindowIdentity: String,
+                           identity: String, pinnedRecord: [String: Any]) throws {
+    try require(currentProcessMatches(pid, bundleID: bundleID) && processGeneration(process) == generation,
+                "Live process identity changed before focus")
+    if !frontmost(pid) {
+        try require(process.activate(), "exact Live process activation failed")
+    }
+    try require(waitUntil({ frontmost(pid) }, seconds: 5), "exact Live PID did not become frontmost")
+
+    let beforeRaiseWindow = try selectedFocusWindow(app, identity: identity)
+    let beforeRaiseRecord = try focusWindowRecord(beforeRaiseWindow, app: app, pid: pid, url: url, generation: generation)
+    let currentSetWindow = try exactFocusSetWindow(app, url: url)
+    try require(String(CFHash(currentSetWindow)) == setWindowIdentity,
+                "exact Set window identity changed before AXRaise")
+    try require(NSDictionary(dictionary: pinnedRecord).isEqual(to: beforeRaiseRecord),
+                "pinned AX window or CG candidate set changed before AXRaise")
+    try require(currentProcessMatches(pid, bundleID: bundleID) && processGeneration(process) == generation && frontmost(pid),
+                "Live process or foreground changed before AXRaise")
+    if !focusedWindowIs(app, beforeRaiseWindow) {
+        let supported = try actionNames(beforeRaiseWindow)
+        try require(supported.contains(kAXRaiseAction as String), "exact AX window does not support AXRaise")
+        let immediateWindow = try selectedFocusWindow(app, identity: identity)
+        let immediatelyBeforeRaise = try focusWindowRecord(immediateWindow, app: app, pid: pid, url: url, generation: generation)
+        try require(NSDictionary(dictionary: pinnedRecord).isEqual(to: immediatelyBeforeRaise),
+                    "AX window or CG candidate set changed immediately before AXRaise")
+        try require(currentProcessMatches(pid, bundleID: bundleID) && processGeneration(process) == generation && frontmost(pid),
+                    "Live process or foreground changed immediately before AXRaise")
+        try require(String(CFHash(try exactFocusSetWindow(app, url: url))) == setWindowIdentity,
+                    "exact Set window identity changed immediately before AXRaise")
+        let error = AXUIElementPerformAction(immediateWindow, kAXRaiseAction as CFString)
+        try require(error == .success, "raising exact AX window failed (\(error.rawValue))")
+    }
+    try require(waitUntil({ frontmost(pid) && focusedWindowIs(app, beforeRaiseWindow) }, seconds: 5),
+                "exact AX window did not become focused")
+
+    let afterWindow = try selectedFocusWindow(app, identity: identity)
+    let afterRecord = try focusWindowRecord(afterWindow, app: app, pid: pid, url: url, generation: generation)
+    let finalSetWindow = try exactFocusSetWindow(app, url: url)
+    try require(currentProcessMatches(pid, bundleID: bundleID) && processGeneration(process) == generation,
+                "Live process identity changed during focus")
+    try require(String(CFHash(finalSetWindow)) == setWindowIdentity,
+                "exact Set window identity changed during focus")
+    try require(NSDictionary(dictionary: pinnedRecord).isEqual(to: afterRecord) && focusedWindowIs(app, afterWindow),
+                "AX window focus or pinned CG candidate set changed during focus")
 }
 
 func currentDesktopWindow(pid: pid_t, title: String, number: Int?, geometry: [String: Double]) throws -> Int {
@@ -813,13 +943,16 @@ func focusWindowAction(_ app: AXUIElement, process: NSRunningApplication, url: U
     }
     try require(currentProcessMatches(options.pid, bundleID: options.bundleID), "Live process changed before focus")
     try require(processGeneration(process) == gen, "Live process generation changed before focus")
-    try raiseAndFocus(app, pid: options.pid, process: process, window: window,
-                      title: record["title"] as! String, number: record["cg_window_number"] as? Int)
+    let pinnedRecord = record
+    try raiseExactFocusWindow(app, process: process, pid: options.pid, bundleID: options.bundleID,
+                              generation: gen, url: url, setWindowIdentity: setWindowIdentity,
+                              identity: options.windowIdentity, pinnedRecord: pinnedRecord)
     try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && processGeneration(process) == gen,
                 "Live process changed during focus")
     let freshSetWindow = try exactFocusSetWindow(app, url: url)
     try require(CFHash(freshSetWindow) == CFHash(setWindow), "exact current Set window identity changed during focus")
-    let after = try focusWindowRecord(window, app: app, pid: options.pid, url: url, generation: gen)
+    let afterWindow = try selectedFocusWindow(app, identity: options.windowIdentity)
+    let after = try focusWindowRecord(afterWindow, app: app, pid: options.pid, url: url, generation: gen)
     try require(NSDictionary(dictionary: record).isEqual(to: after) && frontmost(options.pid) && focusedWindowIs(app, window),
                 "exact target window changed or did not remain focused")
     return ["format": "codex-devtools-live-focus-window-result-v1", "status": "complete",

@@ -221,14 +221,17 @@ class LiveTransportControlTests(unittest.TestCase):
                 "snapshot_observed_at_utc": "2026-11-08T12:00:00.000Z",
                 "snapshot_launch_date": "2026-11-08T11:00:00.000Z",
                 "window": {
-                    "identity": "1685072705",
+                    "identity": "1685072721",
                     "role": "AXWindow",
                     "subrole": "AXStandardWindow",
-                    "title": "TR-1000 Ctrl",
+                    "title": "[INTTR_Operator_Parameter_Window]",
                     "identifier": None,
                     "document": None,
                     "window_number": None,
-                    "cg_window_number": 555,
+                    "cg_candidates": [
+                        {"number": 31731, "layer": 0},
+                        {"number": 31737, "layer": 0},
+                    ],
                     "geometry": {"x": 1, "y": 2, "width": 300, "height": 200},
                 },
             }
@@ -237,7 +240,7 @@ class LiveTransportControlTests(unittest.TestCase):
                 "pid": PID,
                 "bundle_id": BUNDLE,
                 "set_path": set_path,
-                "identity": "1685072705",
+                "identity": "1685072721",
                 "generation": 123456,
                 "preflight_hash": None,
                 "returncode": 0,
@@ -247,6 +250,12 @@ class LiveTransportControlTests(unittest.TestCase):
             self.assertFalse(_valid_focus_report(report, **fields))
             report["target"]["process_generation"] = 123456
             report["window"]["identity"] = "1685072657"
+            self.assertFalse(_valid_focus_report(report, **fields))
+            report["window"]["identity"] = "1685072721"
+            report["window"]["cg_candidates"][1]["layer"] = 9
+            self.assertFalse(_valid_focus_report(report, **fields))
+            report["window"]["cg_candidates"][1]["layer"] = 0
+            report["window"]["window_number"] = 31739
             self.assertFalse(_valid_focus_report(report, **fields))
 
     def test_focus_window_execution_refuses_changed_preflight_hash_before_native_compile(
@@ -294,14 +303,17 @@ class LiveTransportControlTests(unittest.TestCase):
                 "process_generation": 123456,
             }
             window = {
-                "identity": "1685072705",
+                "identity": "1685072721",
                 "role": "AXWindow",
                 "subrole": "AXStandardWindow",
-                "title": "TR-1000 Ctrl",
+                "title": "[INTTR_Operator_Parameter_Window]",
                 "identifier": None,
                 "document": None,
                 "window_number": None,
-                "cg_window_number": 555,
+                "cg_candidates": [
+                    {"number": 31731, "layer": 0},
+                    {"number": 31737, "layer": 0},
+                ],
                 "geometry": {"x": 1, "y": 2, "width": 300, "height": 200},
             }
             preflight = {
@@ -350,7 +362,7 @@ class LiveTransportControlTests(unittest.TestCase):
                     expected_bundle_id=BUNDLE,
                     set_path=set_path,
                     action="focus-window",
-                    window_identity="1685072705",
+                    window_identity="1685072721",
                     expected_generation=123456,
                     snapshot_observed_at_utc="2026-11-08T12:00:00.000Z",
                     snapshot_launch_date="2026-11-08T11:00:00.000Z",
@@ -383,6 +395,61 @@ class LiveTransportControlTests(unittest.TestCase):
             self.assertIn(digest, native_run.call_args_list[1].args[0])
 
     @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_swift_focus_candidate_set_accepts_only_bounded_exact_geometry_rows(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        start = source.index("struct FocusCGObservation {")
+        end = source.index("\nfunc currentFocusCGCandidateSet(", start)
+        matcher = source[start:end]
+        harness = f"""
+import Foundation
+let maxWindows = 64
+struct TransportFailure: Error {{ let phase: String; let message: String }}
+var phase = "focus-window-preflight"
+func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {{
+    if try !condition() {{ throw TransportFailure(phase: phase, message: message) }}
+}}
+{matcher}
+let pid: pid_t = 47314
+let engineer = [
+  FocusCGObservation(pid:pid, name:"[INTTR_Operator_Parameter_Window]", number:31737, layer:0, x:100, y:97, width:760, height:198, onscreen:true),
+  FocusCGObservation(pid:pid, name:"[INTTR_Operator_Parameter_Window]", number:31731, layer:0, x:100, y:97, width:760, height:198, onscreen:true),
+  FocusCGObservation(pid:pid, name:"[INTTR_Operator_Parameter_Window]", number:31729, layer:0, x:860, y:97, width:760, height:198, onscreen:true),
+]
+let tr = [
+  FocusCGObservation(pid:pid, name:"TR-1000 Ctrl", number:31735, layer:3, x:100, y:97, width:760, height:198, onscreen:true),
+  FocusCGObservation(pid:pid, name:"TR-1000 Ctrl", number:31730, layer:3, x:100, y:97, width:760, height:198, onscreen:true),
+]
+let geometry = ["x":100.0,"y":97.0,"width":760.0,"height":198.0]
+let engineerResult = try focusCGCandidateSet(engineer, pid:pid, title:"[INTTR_Operator_Parameter_Window]", geometry:geometry)
+let trResult = try focusCGCandidateSet(tr, pid:pid, title:"TR-1000 Ctrl", geometry:geometry)
+precondition(engineerResult == [FocusCGCandidate(number:31731, layer:0), FocusCGCandidate(number:31737, layer:0)])
+precondition(trResult == [FocusCGCandidate(number:31730, layer:3), FocusCGCandidate(number:31735, layer:3)])
+do {{ _ = try focusCGCandidateSet([], pid:pid, title:"TR-1000 Ctrl", geometry:geometry); preconditionFailure("zero candidates accepted") }} catch {{}}
+do {{ _ = try focusCGCandidateSet([FocusCGObservation(pid:pid, name:"TR-1000 Ctrl", number:1, layer:9, x:100, y:97, width:760, height:198, onscreen:true)], pid:pid, title:"TR-1000 Ctrl", geometry:geometry); preconditionFailure("unknown layer accepted") }} catch {{}}
+do {{ _ = try focusCGCandidateSet(Array(repeating: engineer[0], count:65), pid:pid, title:"[INTTR_Operator_Parameter_Window]", geometry:geometry); preconditionFailure("oversized inventory accepted") }} catch {{}}
+"""
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            main_swift = Path(temporary) / "main.swift"
+            binary = Path(temporary) / "focus-candidates"
+            main_swift.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                ["/usr/bin/xcrun", "swiftc", str(main_swift), "-o", str(binary)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
     def test_swift_focus_receipt_policy_accepts_only_fresh_exact_target(self):
         source = (
             Path(__file__).resolve().parents[1]
@@ -399,16 +466,19 @@ import ApplicationServices
 let now = Date(timeIntervalSince1970: 1_800_000_000)
 let formatter = ISO8601DateFormatter()
 formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-let window: [String: Any] = ["identity":"1685072705", "role":"AXWindow", "subrole":"AXStandardWindow", "title":"TR-1000 Ctrl", "identifier":NSNull(), "document":NSNull(), "window_number":NSNull(), "cg_window_number":555, "geometry":["x":1.0,"y":2.0,"width":300.0,"height":200.0]]
+let window: [String: Any] = ["identity":"1685072721", "role":"AXWindow", "subrole":"AXStandardWindow", "title":"[INTTR_Operator_Parameter_Window]", "identifier":NSNull(), "document":NSNull(), "window_number":NSNull(), "cg_candidates":[["number":31731,"layer":0],["number":31737,"layer":0]], "geometry":["x":100.0,"y":97.0,"width":760.0,"height":198.0]]
 let receipt: [String: Any] = ["format":"codex-devtools-live-focus-window-preflight-v1", "status":"preflight_ready", "read_only":true, "observed_at_utc":formatter.string(from: now), "target":["pid":58198,"bundle_identifier":"com.ableton.live","process_generation":123456], "set_url":"file:///tmp/recall.als", "set_window_identity":"11111", "window":window]
-precondition(focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:window, now:now.addingTimeInterval(30)))
-precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:window, now:now.addingTimeInterval(31)))
-precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123457, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:window, now:now))
-precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/other.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:window, now:now))
+precondition(focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072721", currentWindow:window, now:now.addingTimeInterval(30)))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072721", currentWindow:window, now:now.addingTimeInterval(31)))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123457, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072721", currentWindow:window, now:now))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/other.als", setWindowIdentity:"11111", identity:"1685072721", currentWindow:window, now:now))
 var changed = window
 changed["title"] = "Other"
-precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:changed, now:now))
-precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"22222", identity:"1685072705", currentWindow:window, now:now))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072721", currentWindow:changed, now:now))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"22222", identity:"1685072721", currentWindow:window, now:now))
+var changedCandidates = window
+changedCandidates["cg_candidates"] = [["number":31731,"layer":0]]
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072721", currentWindow:changedCandidates, now:now))
 """
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)
@@ -460,7 +530,7 @@ let window: [String: Any] = [
   "identity": "1668292321", "role": "AXWindow", "subrole": "AXStandardWindow",
   "title": "M1-SDKFree-TR-Window592", "identifier": NSNull(), "document": url,
   "geometry": ["x": 475.0, "y": 106.0, "width": 1920.0, "height": 1055.0],
-  "window_number": NSNull(), "cg_window_number": 31405,
+  "window_number": NSNull(), "cg_candidates": [["number": 31405, "layer": 0]],
 ]
 let report = focusWindowPreflightReport(
   observedAt: "2026-11-08T08:06:40.094Z",
@@ -648,7 +718,7 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
                     "--snapshot-launch-date",
                     "2026-11-08T11:00:00.000Z",
                     "--window-identity",
-                    "1685072705",
+                    "1685072721",
                     "--receipt",
                     "/private/tmp/preflight.json",
                 ]

@@ -272,6 +272,25 @@ def _valid_focus_report(
         and geometry["width"] > 0
         and geometry["height"] > 0
     )
+    candidates = window.get("cg_candidates") if isinstance(window, dict) else None
+    valid_candidates = (
+        isinstance(candidates, list)
+        and 0 < len(candidates) <= 64
+        and all(
+            isinstance(candidate, dict)
+            and set(candidate) == {"number", "layer"}
+            and type(candidate.get("number")) is int
+            and candidate["number"] >= 0
+            and type(candidate.get("layer")) is int
+            and candidate["layer"] in {0, 3}
+            for candidate in candidates
+        )
+        and len({candidate["number"] for candidate in candidates}) == len(candidates)
+        and candidates
+        == sorted(
+            candidates, key=lambda candidate: (candidate["number"], candidate["layer"])
+        )
+    )
     return (
         returncode == 0
         and report.get("read_only") is (not execute)
@@ -292,11 +311,16 @@ def _valid_focus_report(
         )
         and (window.get("document") is None or isinstance(window.get("document"), str))
         and valid_geometry
-        and type(window.get("cg_window_number")) is int
-        and window["cg_window_number"] >= 0
+        and valid_candidates
         and (
             window.get("window_number") is None
-            or type(window.get("window_number")) is int
+            or (
+                type(window.get("window_number")) is int
+                and any(
+                    candidate["number"] == window["window_number"]
+                    for candidate in candidates
+                )
+            )
         )
         and isinstance(report.get("set_window_identity"), str)
         and (
