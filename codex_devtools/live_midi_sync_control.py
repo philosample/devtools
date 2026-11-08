@@ -502,9 +502,11 @@ def _validate_checkbox_inventory(value: dict) -> dict[str, dict]:
 def historical_restore_expected(original: dict, current: dict) -> dict[str, int]:
     if original.get("format") != FORMAT or current.get("format") != FORMAT:
         raise ValueError("historical restore requires complete v2 Sync inventories")
-    for key in ("target", "bounds", "expected_output_count"):
+    for key in ("target", "expected_output_count"):
         if original[key] != current[key]:
             raise ValueError(f"historical current inventory changed: {key}")
+    if not _sync_bounds_match(original.get("bounds"), current.get("bounds")):
+        raise ValueError("historical current inventory changed: bounds")
     original_window = original.get("settings_window")
     current_window = current.get("settings_window")
     if (
@@ -574,6 +576,32 @@ def historical_restore_expected(original: dict, current: dict) -> dict[str, int]
                 "historical current output Sync rows disagree with checkbox inventory"
             )
     return expected
+
+
+def _sync_bounds_match(original: object, current: object) -> bool:
+    if not isinstance(original, dict) or not isinstance(current, dict):
+        return False
+    for bounds in (original, current):
+        count = bounds.get("window_count")
+        observed = bounds.get("windows_observed")
+        if (
+            type(count) is not int
+            or not 1 <= count <= MAX_WINDOWS
+            or type(observed) is not int
+            or observed != count
+            or type(bounds.get("windows_truncated")) is not bool
+            or bounds["windows_truncated"] is not False
+        ):
+            return False
+    return {
+        key: value
+        for key, value in original.items()
+        if key not in {"window_count", "windows_observed"}
+    } == {
+        key: value
+        for key, value in current.items()
+        if key not in {"window_count", "windows_observed"}
+    }
 
 
 def row_identity_by_description(inventory: dict, description: str) -> str:
