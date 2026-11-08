@@ -631,12 +631,20 @@ class LiveTransportControlTests(unittest.TestCase):
         document_end = source.index("\nfunc selectedFocusWindow(", document_start)
         receipt_start = source.index("func focusReceiptIsCurrent(")
         receipt_end = source.index("\nfunc focusWindowPreflightReport(", receipt_start)
+        focus_ax_record_start = source.index("func focusWindowAXRecord(")
+        focus_cg_record_start = source.index(
+            "\nfunc focusWindowRecordWithCG(", focus_ax_record_start
+        )
         focus_record_start = source.index("func focusWindowRecord(")
         focus_record_end = source.index(
             "\nfunc validatedFocusWindowDocument(", focus_record_start
         )
         self.assertIn(
             "validatedFocusWindowDocument(optionalString(window, kAXDocumentAttribute as String))",
+            source[focus_ax_record_start:focus_cg_record_start],
+        )
+        self.assertIn(
+            "focusWindowRecordWithCG(focusWindowAXRecord(window), pid: pid)",
             source[focus_record_start:focus_record_end],
         )
         contract = "\n".join(
@@ -913,8 +921,11 @@ print(String(data: data, encoding: .utf8)!)
         action = source[action_start:action_end]
         self.assertEqual(action.count("AXUIElementSetAttributeValue("), 1)
         self.assertNotIn("AXUIElementPerformAction(", action)
+        self.assertIn("positionWindowReadbackObservation(", action)
         set_action_start = source.index("func setAction(")
         set_action_end = source.index("\nfunc press(", set_action_start)
+        settle_start = source.index("struct PositionReadbackPending")
+        settle_end = source.index("\nfunc waitForValueUntilDeadline(", settle_start)
         production = (
             source[start:report_start]
             + source[report_start:display_start]
@@ -922,6 +933,7 @@ print(String(data: data, encoding: .utf8)!)
             + source[settable_start:settable_end]
             + source[success_start:success_end]
             + source[set_action_start:set_action_end]
+            + source[settle_start:settle_end]
         )
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             set_path = Path(temporary) / "M1-SDKFree-TR-Window592.als"
@@ -937,6 +949,7 @@ var manualInspectionRequired = false
 func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {{
     if try !condition() {{ throw TransportFailure(phase: phase, message: message) }}
 }}
+func pumpRunLoopTurn(until deadline: UInt64) {{}}
 {production}
 let now = Date(timeIntervalSince1970: 1_800_000_000)
 let formatter = ISO8601DateFormatter()
@@ -1013,6 +1026,81 @@ let sizeChanged = positionWindowResultReport(
 )
 let sizeChangedData = try! JSONSerialization.data(withJSONObject:sizeChanged, options:[.sortedKeys])
 print(String(data:sizeChangedData, encoding:.utf8)!)
+let settledWindow: [String: Any] = ["geometry":["x":1000.25,"y":350.0,"width":640.0,"height":197.0]]
+let cgMiss = TransportFailure(phase:"position-window-readback", message:"no current-desktop CG window matches the selected AX window")
+var fakeNow: UInt64 = 0
+var setterCalls = 0
+var readCalls = 0
+let settled = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow += 1_000_000 }}, write:{{ setterCalls += 1 }}, read:{{
+  readCalls += 1
+  if readCalls == 1 {{ throw cgMiss }}
+  return settledWindow
+}})
+precondition(setterCalls == 1 && readCalls == 2)
+precondition(positionReadbackMatches(settled["geometry"] as! [String: Double], requested:requested, originalSize:CGSize(width:640,height:197)))
+fakeNow = 0
+setterCalls = 0
+readCalls = 0
+do {{
+  _ = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow = 2_000_000_000 }}, write:{{ setterCalls += 1 }}, read:{{ readCalls += 1; throw cgMiss }})
+  preconditionFailure("persistent CG miss was accepted")
+}} catch let failure as TransportFailure {{
+  precondition(failure.phase == "position-window-readback")
+  precondition(failure.message.contains("did not settle"))
+}}
+precondition(setterCalls == 1 && readCalls == 1)
+fakeNow = 0
+setterCalls = 0
+readCalls = 0
+do {{
+  _ = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow += 1_000_000 }}, write:{{ setterCalls += 1 }}, read:{{
+    readCalls += 1
+    fakeNow = 2_000_000_001
+    return settledWindow
+  }})
+  preconditionFailure("late readback was accepted after the deadline")
+}} catch let failure as TransportFailure {{ precondition(failure.message.contains("did not settle")) }}
+precondition(setterCalls == 1 && readCalls == 1)
+for driftMessage in ["Live process changed during window positioning", "exact current Set window changed during positioning", "selected window identity or metadata changed during positioning"] {{
+  fakeNow = 0
+  setterCalls = 0
+  readCalls = 0
+  do {{
+    _ = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow += 1_000_000 }}, write:{{ setterCalls += 1 }}, read:{{
+      readCalls += 1
+      throw TransportFailure(phase:"position-window-readback", message:driftMessage)
+    }})
+    preconditionFailure("drift was accepted")
+  }} catch let failure as TransportFailure {{ precondition(failure.message == driftMessage) }}
+  precondition(setterCalls == 1 && readCalls == 1)
+}}
+for driftField in ["title", "geometry"] {{
+  fakeNow = 0
+  setterCalls = 0
+  readCalls = 0
+  var cgReadbackCalls = 0
+  var driftedAX = window
+  if driftField == "title" {{
+    driftedAX["title"] = "Changed editor title"
+  }} else {{
+    driftedAX["geometry"] = ["x":25.0,"y":44.0,"width":641.0,"height":197.0]
+  }}
+  do {{
+    _ = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow += 1_000_000 }}, write:{{ setterCalls += 1 }}, read:{{
+      readCalls += 1
+      return try positionWindowReadbackObservation(
+        axRecord:driftedAX, original:window, requested:requested,
+        originalSize:CGSize(width:640,height:197),
+        cgReadback:{{ _ in cgReadbackCalls += 1; throw cgMiss }}
+      )
+    }})
+    preconditionFailure("AX metadata or size drift was retried as a transient CG miss")
+  }} catch let failure as TransportFailure {{
+    if driftField == "title" {{ precondition(failure.message.contains("identity or metadata changed")) }}
+    else {{ precondition(failure.message.contains("size changed")) }}
+  }}
+  precondition(setterCalls == 1 && readCalls == 1 && cgReadbackCalls == 0)
+}}
 """
             main_swift = Path(temporary) / "main.swift"
             binary = Path(temporary) / "position-window-policy"

@@ -564,6 +564,72 @@ func waitUntil(_ predicate: () -> Bool, seconds: TimeInterval) -> Bool {
     return predicate()
 }
 
+struct PositionReadbackPending: Error {}
+
+func positionWindowReadbackObservation(
+    axRecord: [String: Any],
+    original: [String: Any],
+    requested: [String: Double],
+    originalSize: CGSize,
+    cgReadback: ([String: Any]) throws -> [String: Any]
+) throws -> [String: Any] {
+    try require(axRecord["identity"] as? String == original["identity"] as? String &&
+                axRecord["role"] as? String == original["role"] as? String &&
+                axRecord["subrole"] as? String == original["subrole"] as? String &&
+                axRecord["title"] as? String == original["title"] as? String &&
+                axRecord["identifier"] as? String == original["identifier"] as? String &&
+                axRecord["document"] as? String == original["document"] as? String,
+                "selected window identity or metadata changed during positioning")
+    guard let geometry = axRecord["geometry"] as? [String: Double] else {
+        throw TransportFailure(phase: phase, message: "positioned window geometry is unavailable")
+    }
+    try require(positionReadbackSizeMatches(geometry, originalSize: originalSize),
+                "window size changed during position readback")
+    guard positionReadbackMatches(geometry, requested: requested, originalSize: originalSize) else {
+        throw PositionReadbackPending()
+    }
+    return try cgReadback(axRecord)
+}
+
+func positionReadbackIsTransientCGMiss(_ error: Error) -> Bool {
+    guard let failure = error as? TransportFailure else { return false }
+    return failure.phase == "position-window-readback" &&
+        failure.message == "no current-desktop CG window matches the selected AX window"
+}
+
+func settlePositionWindowReadback(
+    seconds: TimeInterval = 2,
+    now: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+    pump: (UInt64) -> Void = { pumpRunLoopTurn(until: $0) },
+    read: () throws -> [String: Any]
+) throws -> [String: Any] {
+    let deadline = now() + UInt64(seconds * 1_000_000_000)
+    while now() < deadline {
+        do {
+            let observation = try read()
+            guard now() <= deadline else { break }
+            return observation
+        } catch let pending as PositionReadbackPending {
+            _ = pending
+        } catch {
+            guard positionReadbackIsTransientCGMiss(error) else { throw error }
+        }
+        pump(deadline)
+    }
+    throw TransportFailure(phase: "position-window-readback", message: "AX/CG position readback did not settle within the bounded deadline")
+}
+
+func positionWindowWriteAndSettle(
+    seconds: TimeInterval = 2,
+    now: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+    pump: (UInt64) -> Void = { pumpRunLoopTurn(until: $0) },
+    write: () throws -> Void,
+    read: () throws -> [String: Any]
+) throws -> [String: Any] {
+    try write()
+    return try settlePositionWindowReadback(seconds: seconds, now: now, pump: pump, read: read)
+}
+
 func waitForValueUntilDeadline(
     _ expected: Int,
     deadline: UInt64,
@@ -755,7 +821,7 @@ func focusCGCandidateReport(_ candidates: [FocusCGCandidate]) -> [[String: Int]]
     candidates.map { ["number": $0.number, "layer": $0.layer] }
 }
 
-func focusWindowRecord(_ window: AXUIElement, app: AXUIElement, pid: pid_t, generation: Int64) throws -> [String: Any] {
+func focusWindowAXRecord(_ window: AXUIElement) throws -> [String: Any] {
     try require(try role(window) == (kAXWindowRole as String), "selected AX element is not a window")
     let subrole = optionalString(window, kAXSubroleAttribute as String) ?? ""
     try require(!["AXDialog", "AXSheet", "AXPopover", "AXSystemDialog"].contains(subrole), "dialogs and sheets cannot be focused")
@@ -768,16 +834,30 @@ func focusWindowRecord(_ window: AXUIElement, app: AXUIElement, pid: pid_t, gene
     let identifier = optionalString(window, "AXIdentifier")
     let geometry = try windowGeometry(window)
     let number = windowNumber(window)
-    let cgCandidates = try currentFocusCGCandidateSet(pid: pid, title: title, geometry: geometry)
-    try require(number == nil || cgCandidates.contains { $0.number == number },
-                "AX window number is absent from its matching current-desktop CG candidate set")
     return [
         "identity": String(CFHash(window)), "role": try role(window), "subrole": subrole,
         "title": title, "identifier": identifier as Any? ?? NSNull(),
         "document": document as Any? ?? NSNull(),
         "geometry": geometry, "window_number": number as Any? ?? NSNull(),
-        "cg_candidates": focusCGCandidateReport(cgCandidates),
     ]
+}
+
+func focusWindowRecordWithCG(_ axRecord: [String: Any], pid: pid_t) throws -> [String: Any] {
+    guard let title = axRecord["title"] as? String,
+          let geometry = axRecord["geometry"] as? [String: Double] else {
+        throw TransportFailure(phase: phase, message: "selected AX window title or geometry is invalid")
+    }
+    let cgCandidates = try currentFocusCGCandidateSet(pid: pid, title: title, geometry: geometry)
+    let number = (axRecord["window_number"] as? NSNumber)?.intValue
+    try require(number == nil || cgCandidates.contains { $0.number == number },
+                "AX window number is absent from its matching current-desktop CG candidate set")
+    var record = axRecord
+    record["cg_candidates"] = focusCGCandidateReport(cgCandidates)
+    return record
+}
+
+func focusWindowRecord(_ window: AXUIElement, app: AXUIElement, pid: pid_t, generation: Int64) throws -> [String: Any] {
+    try focusWindowRecordWithCG(focusWindowAXRecord(window), pid: pid)
 }
 
 func validatedFocusWindowDocument(_ raw: String?) throws -> String? {
@@ -1094,28 +1174,28 @@ func positionWindowAction(_ app: AXUIElement, process: NSRunningApplication, url
     }
     setAction("position", outcome: "unknown")
     AXUIElementSetMessagingTimeout(window, 2.0)
-    let writeResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
-    guard writeResult == .success else {
-        throw TransportFailure(phase: phase, message: "AXPosition setter outcome is uncertain (\(writeResult.rawValue)); inspect manually")
-    }
-
     phase = "position-window-readback"
-    try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && processGeneration(process) == generation,
-                "Live process changed during window positioning")
-    try require(CFHash(try exactFocusSetWindow(app, url: url)) == CFHash(setWindow), "exact current Set window changed during positioning")
-    let afterWindow = try selectedFocusWindow(app, identity: identity)
-    let after = try focusWindowRecord(afterWindow, app: app, pid: options.pid, generation: generation)
+    let after = try positionWindowWriteAndSettle(write: {
+        let writeResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+        guard writeResult == .success else {
+            throw TransportFailure(phase: "position-window-write", message: "AXPosition setter outcome is uncertain (\(writeResult.rawValue)); inspect manually")
+        }
+    }, read: {
+        try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && processGeneration(process) == generation,
+                    "Live process changed during window positioning")
+        try require(CFHash(try exactFocusSetWindow(app, url: url)) == CFHash(setWindow), "exact current Set window changed during positioning")
+        let afterWindow = try selectedFocusWindow(app, identity: identity)
+        let axRecord = try focusWindowAXRecord(afterWindow)
+        return try positionWindowReadbackObservation(
+            axRecord: axRecord, original: record, requested: requested, originalSize: size,
+            cgReadback: { try focusWindowRecordWithCG($0, pid: options.pid) }
+        )
+    })
     guard let afterGeometry = after["geometry"] as? [String: Double] else {
         throw TransportFailure(phase: phase, message: "positioned window geometry is unavailable")
     }
     try require(positionReadbackMatches(afterGeometry, requested: requested, originalSize: size),
                 "window position or size did not match the requested readback")
-    try require(after["role"] as? String == record["role"] as? String &&
-                after["subrole"] as? String == record["subrole"] as? String &&
-                after["title"] as? String == record["title"] as? String &&
-                after["identifier"] as? String == record["identifier"] as? String &&
-                after["document"] as? String == record["document"] as? String,
-                "selected window identity or metadata changed during positioning")
     let finalPosition = CGPoint(x: afterGeometry["x"] ?? .nan, y: afterGeometry["y"] ?? .nan)
     let finalSize = CGSize(width: afterGeometry["width"] ?? .nan, height: afterGeometry["height"] ?? .nan)
     try require(try currentActiveDisplayContains(finalPosition, size: finalSize), "positioned window is outside current displays")
@@ -1198,7 +1278,13 @@ func positionReadbackMatches(_ actual: [String: Double], requested: [String: Dou
           [x, y, width, height, targetX, targetY,
            originalSize.width, originalSize.height].allSatisfy(\.isFinite) else { return false }
     return abs(x - targetX) < 0.5 && abs(y - targetY) < 0.5 &&
-        abs(width - originalSize.width) < 0.001 &&
+        positionReadbackSizeMatches(actual, originalSize: originalSize)
+}
+
+func positionReadbackSizeMatches(_ actual: [String: Double], originalSize: CGSize) -> Bool {
+    guard let width = actual["width"], let height = actual["height"],
+          [width, height, originalSize.width, originalSize.height].allSatisfy(\.isFinite) else { return false }
+    return abs(width - originalSize.width) < 0.001 &&
         abs(height - originalSize.height) < 0.001
 }
 
