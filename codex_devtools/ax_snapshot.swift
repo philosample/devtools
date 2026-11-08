@@ -99,7 +99,7 @@ func elementRecord(_ element: AXUIElement, index: Int, parent: Int?, depth: Int)
         ("value", kAXValueAttribute as String),
         ("enabled", kAXEnabledAttribute as String)
     ]
-    var record: [String: Any] = ["index": index, "depth": depth]
+    var record: [String: Any] = ["index": index, "depth": depth, "identity": String(CFHash(element))]
     if let parent { record["parent_index"] = parent }
     var errors: [String: Int32] = [:]
     var truncatedAttributes: [String] = []
@@ -148,7 +148,8 @@ func main() {
         fail("could not read target application windows (AX error \(windowError ?? -1))")
     }
     let windowRecords = windows.prefix(maximumWindows).enumerated().map { index, window in
-        ["index": index, "title": attributeText(window, kAXTitleAttribute as String) ?? ""] as [String: Any]
+        ["index": index, "title": attributeText(window, kAXTitleAttribute as String) ?? "",
+         "identity": String(CFHash(window))] as [String: Any]
     }
     var selected = Array(windows.enumerated())
     if let exactTitle = options.windowTitle {
@@ -204,7 +205,8 @@ func main() {
         "observed_at_utc": formatter.string(from: Date()),
         "read_only": true,
         "permission": "Accessibility already trusted; no prompt requested",
-        "target": ["pid": options.pid, "process_name": app.localizedName ?? "", "bundle_identifier": app.bundleIdentifier ?? ""],
+        "target": ["pid": options.pid, "process_name": app.localizedName ?? "", "bundle_identifier": app.bundleIdentifier ?? "",
+                   "launch_date": app.launchDate.map { formatter.string(from: $0) } ?? ""],
         "bounds": ["max_elements": options.maxElements, "max_depth": options.maxDepth, "max_windows": maximumWindows, "windows_observed": windowRecords.count, "window_count": windows.count, "windows_truncated": windows.count > maximumWindows, "elements_observed": total, "truncated": anyTruncated, "window_title_filter": windowTitleFilter],
         "windows": windowRecords,
         "trees": trees

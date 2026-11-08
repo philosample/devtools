@@ -15,6 +15,7 @@ from codex_devtools.live_midi_sync_control import (
     _focus_diagnostics_valid,
     _native_receipt_valid,
     baseline_from_snapshot,
+    historical_restore_expected,
     run_live_midi_sync,
     transition_plan,
     validate_baseline,
@@ -29,6 +30,7 @@ def snapshot(values=None, *, observed_at=None):
     elements = [
         {
             "index": 0,
+            "identity": "5000",
             "depth": 0,
             "role": "AXWindow",
             "title": "Settings",
@@ -37,6 +39,7 @@ def snapshot(values=None, *, observed_at=None):
     elements.extend(
         {
             "index": index,
+            "identity": str(5000 + index),
             "depth": 1,
             "role": "AXCheckBox",
             "description": f"{name}: MIDI Output: Sync",
@@ -48,6 +51,7 @@ def snapshot(values=None, *, observed_at=None):
     elements.append(
         {
             "index": len(elements),
+            "identity": str(5000 + len(elements)),
             "depth": 1,
             "role": "AXCheckBox",
             "description": "IAC Driver: MIDI Input: Sync",
@@ -66,6 +70,7 @@ def snapshot(values=None, *, observed_at=None):
             "pid": 58198,
             "process_name": "Live",
             "bundle_identifier": "com.ableton.live",
+            "launch_date": "2026-11-07T12:00:00.000Z",
         },
         "bounds": {
             "max_elements": 1500,
@@ -78,7 +83,7 @@ def snapshot(values=None, *, observed_at=None):
             "truncated": False,
             "window_title_filter": "Settings",
         },
-        "windows": [{"index": 0, "title": "Settings"}],
+        "windows": [{"index": 0, "title": "Settings", "identity": "7000"}],
         "trees": [{"window_index": 0, "elements": elements}],
     }
 
@@ -92,6 +97,26 @@ def baseline(values=None):
     )
 
 
+def historical_pair():
+    original = json.loads(json.dumps(baseline()))
+    original["observed_at_utc"] = (
+        (datetime.now(timezone.utc) - timedelta(minutes=10))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    current = json.loads(json.dumps(original))
+    current["observed_at_utc"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
+    row = next(item for item in current["outputs"] if item["name"] == "A")
+    row["value"] = 0
+    checkbox = next(
+        item for item in current["checkboxes"] if item["identity"] == row["identity"]
+    )
+    checkbox["value"] = 0
+    return original, current
+
+
 class LiveMidiSyncControlTests(unittest.TestCase):
     def test_complete_snapshot_builds_sorted_exact_baseline(self):
         result = baseline()
@@ -101,7 +126,12 @@ class LiveMidiSyncControlTests(unittest.TestCase):
             {row["name"]: row["value"] for row in result["outputs"]}, VALUES
         )
         self.assertTrue(result["read_only"])
-        self.assertEqual(result["settings_window"], {"title": "Settings", "index": 0})
+        self.assertEqual(
+            result["settings_window"],
+            {"title": "Settings", "index": 0, "identity": "7000"},
+        )
+        self.assertEqual(result["format"], "codex-devtools-live-midi-sync-baseline-v2")
+        self.assertEqual(len(result["checkboxes"]), len(VALUES) + 1)
 
     def test_focus_diagnostics_keep_the_three_refusal_facts_separate(self):
         diagnostics = {
@@ -540,13 +570,28 @@ class LiveMidiSyncControlTests(unittest.TestCase):
         row["index"] = len(duplicate["trees"][0]["elements"])
         duplicate["trees"][0]["elements"].append(row)
         duplicate["bounds"]["elements_observed"] += 1
-        with self.assertRaisesRegex(ValueError, "duplicate output Sync"):
+        with self.assertRaisesRegex(
+            ValueError, "duplicated or malformed|duplicate output Sync"
+        ):
             baseline_from_snapshot(
                 duplicate,
                 expected_pid=58198,
                 expected_bundle_id="com.ableton.live",
                 expected_count=3,
             )
+        for invalid_format in ([], {}):
+            malformed_format = baseline()
+            malformed_format["format"] = invalid_format
+            with (
+                self.subTest(format=invalid_format),
+                self.assertRaisesRegex(ValueError, "format is unsupported"),
+            ):
+                validate_baseline(
+                    malformed_format,
+                    expected_pid=58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                )
 
     def test_baseline_freshness_is_bounded(self):
         observed = baseline()
@@ -558,6 +603,116 @@ class LiveMidiSyncControlTests(unittest.TestCase):
                 expected_count=3,
                 now=datetime.now(timezone.utc) + timedelta(minutes=6),
             )
+
+    def test_legacy_v1_baseline_keeps_ordinary_validation_but_cannot_authorize_history(
+        self,
+    ):
+        observed = json.loads(json.dumps(baseline()))
+        observed["format"] = "codex-devtools-live-midi-sync-baseline-v1"
+        observed["target"].pop("launch_date")
+        observed["settings_window"].pop("identity")
+        observed.pop("checkboxes")
+        for row in observed["outputs"]:
+            row.pop("identity")
+            row.pop("index")
+        self.assertIs(
+            validate_baseline(
+                observed,
+                expected_pid=58198,
+                expected_bundle_id="com.ableton.live",
+                expected_count=3,
+            ),
+            observed,
+        )
+        old, current = historical_pair()
+        old.update(observed)
+        with self.assertRaisesRegex(ValueError, "complete v2"):
+            historical_restore_expected(old, current)
+
+    def test_historical_restore_accepts_expired_original_and_fresh_partial_sync_state(
+        self,
+    ):
+        original, current = historical_pair()
+        values = historical_restore_expected(original, current)
+        output = next(row for row in original["outputs"] if row["name"] == "A")
+        self.assertEqual(values[output["identity"]], 0)
+        validate_baseline(
+            original,
+            expected_pid=58198,
+            expected_bundle_id="com.ableton.live",
+            expected_count=3,
+            allow_stale=True,
+        )
+        validate_baseline(
+            current,
+            expected_pid=58198,
+            expected_bundle_id="com.ableton.live",
+            expected_count=3,
+        )
+        future_original = json.loads(json.dumps(original))
+        future_original["observed_at_utc"] = (
+            (datetime.now(timezone.utc) + timedelta(seconds=10))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        with self.assertRaisesRegex(ValueError, "freshness window"):
+            validate_baseline(
+                future_original,
+                expected_pid=58198,
+                expected_bundle_id="com.ableton.live",
+                expected_count=3,
+                allow_stale=True,
+            )
+
+    def test_historical_restore_rejects_generation_keyset_non_sync_drift_and_off_to_on(
+        self,
+    ):
+        original, current = historical_pair()
+        cases = []
+        generation = json.loads(json.dumps(current))
+        generation["target"]["launch_date"] = "2026-11-07T12:00:02.000Z"
+        cases.append(("generation", generation, "target"))
+        settings = json.loads(json.dumps(current))
+        settings["settings_window"]["identity"] = "other-window"
+        cases.append(("window", settings, "settings_window"))
+        bounds = json.loads(json.dumps(current))
+        bounds["bounds"]["elements_observed"] += 1
+        cases.append(("bounds", bounds, "bounds"))
+        keyset = json.loads(json.dumps(current))
+        keyset["checkboxes"].pop()
+        cases.append(("keyset", keyset, "checkbox identity/order"))
+        non_sync = json.loads(json.dumps(current))
+        non_sync["checkboxes"][-1]["value"] = 0
+        cases.append(("non-sync", non_sync, "outside output Sync"))
+        originally_off = json.loads(json.dumps(current))
+        off_row = next(
+            row for row in originally_off["outputs"] if row["name"] == "B (Port 1)"
+        )
+        off_row["value"] = 1
+        next(
+            row
+            for row in originally_off["checkboxes"]
+            if row["identity"] == off_row["identity"]
+        )["value"] = 1
+        cases.append(("off-to-on", originally_off, "originally-off"))
+        stale = json.loads(json.dumps(current))
+        stale["observed_at_utc"] = (
+            (datetime.now(timezone.utc) - timedelta(minutes=6))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        cases.append(("stale", stale, "freshness window"))
+        for label, candidate, message in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, message):
+                if label == "stale":
+                    validate_baseline(
+                        candidate,
+                        expected_pid=58198,
+                        expected_bundle_id="com.ableton.live",
+                        expected_count=3,
+                    )
+                else:
+                    historical_restore_expected(original, candidate)
 
     def test_isolate_only_changes_baseline_enabled_rows(self):
         plan = transition_plan("isolate", VALUES, VALUES)
@@ -617,6 +772,215 @@ class LiveMidiSyncControlTests(unittest.TestCase):
         self.assertEqual(
             outcomes, {"A": "unknown", "B (Port 1)": "not_attempted", "C": "unknown"}
         )
+
+    def test_historical_restore_pins_both_hashes_and_calls_native_with_current_inventory(
+        self,
+    ):
+        original, current = historical_pair()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_path = root / "original.json"
+            current_path = root / "fresh-current.json"
+            receipt_path = root / "receipt.json"
+            original_bytes = json.dumps(original).encode()
+            current_bytes = json.dumps(current).encode()
+            baseline_path.write_bytes(original_bytes)
+            current_path.write_bytes(current_bytes)
+            baseline_hash = hashlib.sha256(original_bytes).hexdigest()
+            current_hash = hashlib.sha256(current_bytes).hexdigest()
+            observed_values = {row["name"]: row["value"] for row in original["outputs"]}
+            current_values = {row["name"]: row["value"] for row in current["outputs"]}
+            actions = []
+            for row in original["outputs"]:
+                name = row["name"]
+                before = current_values[name]
+                desired = row["value"]
+                changed = before != desired
+                item = {
+                    "name": name,
+                    "description": row["description"],
+                    "baseline_value": desired,
+                    "desired_value": desired,
+                    "attempted": changed,
+                    "outcome": "known" if changed else "not_attempted",
+                    "actual_value": desired if changed else before,
+                }
+                if changed:
+                    item.update(
+                        prepress_elements=original["bounds"]["elements_observed"],
+                        prepress_windows=original["bounds"]["window_count"],
+                    )
+                actions.append(item)
+            native_report = {
+                "format": RECEIPT_FORMAT,
+                "status": "complete",
+                "phase": "complete",
+                "operation": "restore",
+                "read_only": False,
+                "target": original["target"],
+                "baseline_sha256": baseline_hash,
+                "scope": "historical-restore",
+                "current_observation_sha256": current_hash,
+                "expected_output_count": len(VALUES),
+                "settings_window": {"title": "Settings"},
+                "observed_elements_before": original["bounds"]["elements_observed"],
+                "observed_elements_after": original["bounds"]["elements_observed"],
+                "observed_windows_before": original["bounds"]["window_count"],
+                "observed_windows_after": original["bounds"]["window_count"],
+                "observed_values": observed_values,
+                "actions": actions,
+                "manual_inspection_required": False,
+                "error": None,
+            }
+            commands = []
+
+            def native_call(command, **kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=0,
+                    stdout=json.dumps(native_report),
+                    stderr="",
+                )
+
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_midi_sync_control.subprocess.run",
+                    side_effect=native_call,
+                ),
+            ):
+                report = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="restore",
+                    baseline_path=baseline_path,
+                    historical_current_path=current_path,
+                    output_path=receipt_path,
+                    execute=True,
+                )
+            command = commands[0]
+            self.assertIn("--historical-current-inventory", command)
+            current_flag = command.index("--historical-current-inventory")
+            self.assertEqual(command[current_flag + 1], str(current_path))
+            hash_flag = command.index("--historical-current-sha256")
+            self.assertEqual(command[hash_flag + 1], current_hash)
+            self.assertEqual(report["baseline_sha256"], baseline_hash)
+            self.assertEqual(report["current_observation_sha256"], current_hash)
+            self.assertEqual(baseline_path.read_bytes(), original_bytes)
+            self.assertEqual(current_path.read_bytes(), current_bytes)
+            bad_hash = dict(native_report, current_observation_sha256="0" * 64)
+            self.assertFalse(
+                _native_receipt_valid(
+                    bad_hash,
+                    operation="restore",
+                    baseline=original,
+                    baseline_hash=baseline_hash,
+                    current_hash=current_hash,
+                    returncode=0,
+                )
+            )
+
+    def test_historical_current_must_be_fresh_and_legacy_isolate_is_denied(self):
+        original, current = historical_pair()
+        stale = json.loads(json.dumps(current))
+        stale["observed_at_utc"] = (
+            (datetime.now(timezone.utc) - timedelta(minutes=6))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_path = root / "original.json"
+            current_path = root / "stale-current.json"
+            receipt_path = root / "receipt.json"
+            baseline_path.write_text(json.dumps(original), encoding="utf-8")
+            current_path.write_text(json.dumps(stale), encoding="utf-8")
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch("codex_devtools.live_midi_sync_control.subprocess.run") as native,
+            ):
+                report = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="restore",
+                    baseline_path=baseline_path,
+                    historical_current_path=current_path,
+                    output_path=receipt_path,
+                    execute=True,
+                )
+            self.assertEqual(report["phase"], "baseline-validation")
+            self.assertIn("freshness window", report["error"])
+            native.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "only for restore"):
+                run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="isolate",
+                    baseline_path=baseline_path,
+                    historical_current_path=current_path,
+                    output_path=root / "other-receipt.json",
+                    execute=True,
+                )
+
+    def test_historical_files_are_rechecked_after_pending_receipt_before_native_launch(
+        self,
+    ):
+        original, current = historical_pair()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            baseline_path = root / "original.json"
+            current_path = root / "current.json"
+            receipt_path = root / "receipt.json"
+            baseline_path.write_text(json.dumps(original), encoding="utf-8")
+            current_path.write_text(json.dumps(current), encoding="utf-8")
+            from codex_devtools import live_midi_sync_control as control
+
+            replace_receipt = control._replace_owned_json
+
+            def mutate_after_pending(path, identity, report):
+                result = replace_receipt(path, identity, report)
+                if report.get("phase") == "native-helper-pending":
+                    current_path.write_text(
+                        json.dumps(current, indent=2), encoding="utf-8"
+                    )
+                return result
+
+            with (
+                patch(
+                    "codex_devtools.live_midi_sync_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_midi_sync_control._replace_owned_json",
+                    side_effect=mutate_after_pending,
+                ),
+                patch("codex_devtools.live_midi_sync_control.subprocess.run") as native,
+            ):
+                report = run_live_midi_sync(
+                    58198,
+                    expected_bundle_id="com.ableton.live",
+                    expected_count=3,
+                    action="restore",
+                    baseline_path=baseline_path,
+                    historical_current_path=current_path,
+                    output_path=receipt_path,
+                    execute=True,
+                )
+            self.assertEqual(report["phase"], "historical-current-revalidation")
+            self.assertIn("changed after wrapper validation", report["error"])
+            self.assertFalse(report["manual_inspection_required"])
+            self.assertTrue(all(not row["attempted"] for row in report["actions"]))
+            native.assert_not_called()
 
     def test_native_completion_receipt_requires_exact_attempt_and_readback_rows(self):
         observed = baseline()
@@ -788,10 +1152,15 @@ class LiveMidiSyncControlTests(unittest.TestCase):
         self.assertIn("fresh.description == descriptions[rowName]", action_loop)
         self.assertIn("fresh.value == current[rowName]", action_loop)
         self.assertIn("checkboxValue(freshControls[rowName]!.element)", action_loop)
-        self.assertIn("validateBaselineFreshness(baselineDate)", action_loop)
+        self.assertIn(
+            "validateBaselineFreshness(historicalDate ?? baselineDate)", action_loop
+        )
         press_index = action_loop.index("AXUIElementPerformAction(freshControl.element")
         self.assertLess(
-            action_loop.rindex("validateBaselineFreshness(baselineDate)"), press_index
+            action_loop.rindex(
+                "validateBaselineFreshness(historicalDate ?? baselineDate)"
+            ),
+            press_index,
         )
         self.assertIn("result.maximumBaselineAgeSeconds = parsed", source)
         self.assertIn("try validateBaselineFreshness(date)", source)
@@ -818,6 +1187,39 @@ class LiveMidiSyncControlTests(unittest.TestCase):
         )
         self.assertEqual(args.action, "live-midi-sync")
         self.assertEqual(args.operation, "isolate")
+
+    def test_cli_historical_inventory_is_restore_only(self):
+        base_args = [
+            "ax",
+            "live-midi-sync",
+            "--pid",
+            "58198",
+            "--expected-bundle-id",
+            "com.ableton.live",
+            "--expected-count",
+            "3",
+            "--execute",
+            "--baseline",
+            "/tmp/original-v2.json",
+            "--historical-current-inventory",
+            "/tmp/current-v2.json",
+            "--receipt",
+            "/tmp/restore.json",
+            "--action",
+            "restore",
+        ]
+        parsed = build_parser().parse_args(base_args)
+        self.assertEqual(
+            parsed.historical_current_inventory, Path("/tmp/current-v2.json")
+        )
+        base_args[base_args.index("restore")] = "isolate"
+        stderr = io.StringIO()
+        from codex_devtools.cli import main
+
+        with redirect_stdout(io.StringIO()), patch("sys.stderr", stderr):
+            status = main(base_args)
+        self.assertEqual(status, 2)
+        self.assertIn("only with --action restore", stderr.getvalue())
 
     def test_cli_default_inspect_is_read_only_and_can_write_new_baseline(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -869,6 +1271,164 @@ class LiveMidiSyncControlTests(unittest.TestCase):
         self.assertEqual(saved["status"], "observed")
         self.assertTrue(saved["read_only"])
         self.assertEqual(printed, saved)
+
+
+class LiveMidiSyncNativeHistoricalPolicyTests(unittest.TestCase):
+    def test_native_restore_arguments_and_each_press_revalidate_full_inventory(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "codex_devtools/live_midi_sync.swift"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'guard result.operation == "restore", result.historicalCurrentHash.count == 64',
+            source,
+        )
+        self.assertIn("options.historicalCurrentHash", source)
+        self.assertIn("requirePinnedSHA256(", source)
+        self.assertIn("currentDate.timeIntervalSince(baselineDate) >= -5", source)
+        action_loop = source.split("for name in candidates {", 1)[1].split(
+            'phase = "final-readback"', 1
+        )[0]
+        self.assertIn(
+            "inputInventory(app, validateInputGroups: false, completeSyncInventory: true)",
+            action_loop,
+        )
+        self.assertIn("compareSyncLiveInventory(", action_loop)
+        self.assertIn(
+            "validateBaselineFreshness(historicalDate ?? baselineDate)", action_loop
+        )
+
+    @unittest.skipUnless(
+        Path("/usr/bin/swift").exists(),
+        "Swift source-policy execution requires macOS toolchain",
+    )
+    def test_actual_native_historical_comparison_policy_without_ax_execution(self):
+        original, current = historical_pair()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "inventory.json"
+            fixture.write_text(json.dumps({"original": original, "current": current}))
+            source = (
+                Path(__file__).resolve().parents[1]
+                / "codex_devtools/live_midi_sync.swift"
+            ).read_text(encoding="utf-8")
+            source = source.split("\ndo {\n    options = try parseOptions()", 1)[0]
+            harness = root / "sync-policy.swift"
+            harness.write_text(
+                source
+                + r"""
+options.expectedCount = 3
+let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1]))
+let fixture = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+let original = fixture["original"] as! [String: Any]
+let current = fixture["current"] as! [String: Any]
+let values = try historicalSyncRestoreValues(original, current)
+let originalRows = try syncCheckboxRows(original, expectedCount: 3)
+let firstOutput = originalRows.first { ($0["description"] as? String) == "A: MIDI Output: Sync" }!
+precondition(values[firstOutput["identity"] as! String] == 0)
+func nativeShape(_ inventory: [String: Any]) -> [String: Any] {
+    ["target": inventory["target"]!,
+     "settings_window": inventory["settings_window"]!,
+     "bounds": inventory["bounds"]!,
+     "checkboxes": inventory["checkboxes"]!]
+}
+let live = nativeShape(current)
+let compared = try compareSyncInventoryValues(current, live, values: values)
+precondition(compared.count == originalRows.count, "Python v2 baseline must match native-shaped live inventory")
+func compareRejects(_ candidate: [String: Any]) -> Bool {
+    do { _ = try compareSyncInventoryValues(current, candidate, values: values); return false }
+    catch { return true }
+}
+var liveChanged = live
+var liveTarget = liveChanged["target"] as! [String: Any]
+liveTarget["launch_date"] = "2026-11-07T12:00:02.000Z"
+liveChanged["target"] = liveTarget
+precondition(compareRejects(liveChanged), "native process generation drift must stop")
+liveChanged = live
+var liveWindow = liveChanged["settings_window"] as! [String: Any]
+liveWindow["index"] = 1
+liveChanged["settings_window"] = liveWindow
+precondition(compareRejects(liveChanged), "native Settings index drift must stop")
+liveChanged = live
+var liveRows = liveChanged["checkboxes"] as! [[String: Any]]
+liveRows.removeLast()
+liveChanged["checkboxes"] = liveRows
+precondition(compareRejects(liveChanged), "native checkbox keyset drift must stop")
+liveChanged = live
+liveRows = liveChanged["checkboxes"] as! [[String: Any]]
+liveRows[liveRows.count - 1]["value"] = 0
+liveChanged["checkboxes"] = liveRows
+precondition(compareRejects(liveChanged), "native non-Sync drift must stop")
+liveChanged = live
+liveRows = liveChanged["checkboxes"] as! [[String: Any]]
+let offID = (current["outputs"] as! [[String: Any]]).first { ($0["name"] as? String) == "B (Port 1)" }!["identity"] as! String
+let offCheckboxIndex = liveRows.firstIndex { ($0["identity"] as? String) == offID }!
+liveRows[offCheckboxIndex]["value"] = 1
+liveChanged["checkboxes"] = liveRows
+precondition(compareRejects(liveChanged), "native originally-off output change must stop")
+let pinned = Data([1, 2, 3, 4])
+let pinnedHash = SHA256.hash(data: pinned).map { String(format: "%02x", $0) }.joined()
+try requirePinnedSHA256(pinned, expected: pinnedHash, label: "fixture")
+var tamperedBytes = pinned
+tamperedBytes.append(5)
+var hashRejected = false
+do { _ = try requirePinnedSHA256(tamperedBytes, expected: pinnedHash, label: "fixture") }
+catch { hashRejected = true }
+precondition(hashRejected, "tampered current bytes must fail exact hash binding")
+func rejects(_ value: [String: Any]) -> Bool {
+    do { _ = try historicalSyncRestoreValues(original, value); return false }
+    catch { return true }
+}
+var changed = current
+var target = changed["target"] as! [String: Any]
+target["launch_date"] = "2026-11-07T12:00:02.000Z"
+changed["target"] = target
+precondition(rejects(changed), "process generation drift must stop")
+changed = current
+var window = changed["settings_window"] as! [String: Any]
+window["identity"] = "other-window"
+changed["settings_window"] = window
+precondition(rejects(changed), "Settings identity drift must stop")
+changed = current
+var rows = changed["checkboxes"] as! [[String: Any]]
+rows.removeLast()
+changed["checkboxes"] = rows
+precondition(rejects(changed), "checkbox keyset drift must stop")
+changed = current
+rows = changed["checkboxes"] as! [[String: Any]]
+rows[rows.count - 1]["value"] = 0
+changed["checkboxes"] = rows
+precondition(rejects(changed), "non-Sync drift must stop")
+changed = current
+var outputs = changed["outputs"] as! [[String: Any]]
+let offIndex = outputs.firstIndex { ($0["name"] as? String) == "B (Port 1)" }!
+outputs[offIndex]["value"] = 1
+changed["outputs"] = outputs
+rows = changed["checkboxes"] as! [[String: Any]]
+let offIdentity = outputs[offIndex]["identity"] as! String
+let checkboxIndex = rows.firstIndex { ($0["identity"] as? String) == offIdentity }!
+rows[checkboxIndex]["value"] = 1
+changed["checkboxes"] = rows
+precondition(rejects(changed), "originally-off Sync changing on must stop")
+changed = current
+changed["format"] = syncFormatV1
+changed.removeValue(forKey: "checkboxes")
+precondition(rejects(changed), "legacy v1 cannot authorize historical restore")
+var staleRejected = false
+do { try validateBaselineFreshness(Date().addingTimeInterval(-301)) }
+catch { staleRejected = true }
+precondition(staleRejected, "stale current inventory must stop")
+print("native historical policy passed; no AX executed")
+"""
+            )
+            result = subprocess.run(
+                ["/usr/bin/swift", str(harness), str(fixture)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no AX executed", result.stdout)
 
 
 if __name__ == "__main__":

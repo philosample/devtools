@@ -14,10 +14,14 @@ python3 -m codex_devtools ax live-midi-sync \
   --out /private/tmp/live-midi-sync-baseline.json
 ```
 
-The baseline records the exact PID and bundle, unique Settings window, complete
-snapshot bounds, observation time, and sorted row names and values. It is a
-point-in-time record and must be no older than five minutes for actions. A
-caller may use `--max-baseline-age-seconds` to choose a shorter interval.
+New baselines use v2 and record the exact PID, bundle and process launch time,
+the unique Settings window identity, complete snapshot bounds, observation time,
+sorted output Sync rows, and the complete ordered Settings checkbox inventory.
+They are point-in-time records and must be no older than five minutes for
+ordinary actions. Legacy v1 baselines remain valid for ordinary isolate/restore
+within the same age limit; they cannot authorize historical restore because
+they do not contain the complete checkbox state. A caller may use
+`--max-baseline-age-seconds` to choose a shorter interval.
 
 Actions require explicit `--execute`, the original caller-supplied baseline,
 the same independently supplied expected count, and a new receipt path:
@@ -64,6 +68,47 @@ frontmost/focused target. Any unexpected state or uncertain press stops further
 actions. Receipts are new files, never overwritten. A stopped receipt marked
 `manual_inspection_required` must be inspected before another action; there is
 no retry loop.
+
+For an expired original v2 baseline, first restore MIDI input Track, Sync and
+Remote Control settings while Output Sync remains isolated. The input baseline
+for this step must have been captured while Output Sync was already off. Capture
+a fresh complete input inventory and restore it against that original input
+baseline; then capture a new complete `live-midi-sync` inventory and use it
+only as the current-state evidence for restoring the original output baseline:
+
+```sh
+python3 -m codex_devtools ax live-midi-inputs \
+  --pid 58198 --expected-bundle-id com.ableton.live --expected-count 8 \
+  --out /private/tmp/live-midi-inputs-current.json
+
+python3 -m codex_devtools ax live-midi-inputs \
+  --pid 58198 --expected-bundle-id com.ableton.live --expected-count 8 \
+  --execute --action restore --baseline /private/tmp/live-midi-inputs-original.json \
+  --historical-current-inventory /private/tmp/live-midi-inputs-current.json \
+  --receipt /private/tmp/live-midi-inputs-restore.json
+
+python3 -m codex_devtools ax live-midi-sync \
+  --pid 58198 --expected-bundle-id com.ableton.live --expected-count 21 \
+  --out /private/tmp/live-midi-sync-current-v2.json
+
+python3 -m codex_devtools ax live-midi-sync \
+  --pid 58198 --expected-bundle-id com.ableton.live --expected-count 21 \
+  --execute --action restore --baseline /private/tmp/live-midi-sync-original-v2.json \
+  --historical-current-inventory /private/tmp/live-midi-sync-current-v2.json \
+  --receipt /private/tmp/live-midi-sync-restore.json
+```
+
+The original file is never edited or retimestamped. Historical restore accepts
+only v2 original and current inventories; current evidence must be no older
+than five minutes and must match the original PID, bundle, process launch time,
+Settings window identity, complete snapshot bounds, and ordered checkbox
+identity set. All non-output-Sync checkbox values must still equal their
+original values. An originally-on Output Sync checkbox may be either zero or
+one, allowing recovery after a partial isolation; an originally-off checkbox
+must remain zero. The same checks and current-inventory hash are repeated by the
+native helper immediately before each press. Historical evidence is restore
+only; ordinary isolate and restore keep their original five-minute baseline
+freshness rule.
 
 This proves only the point-in-time Accessibility state of these settings for
 one Live process. It does not observe MIDI packets, establish transport/play
