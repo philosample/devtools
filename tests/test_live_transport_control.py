@@ -437,6 +437,85 @@ precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.li
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_swift_focus_preflight_producer_matches_python_validator_and_success_status(
+        self,
+    ):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        start = source.index("func focusWindowPreflightReport(")
+        end = source.index("\nfunc focusWindowAction(", start)
+        production_contract = source[start:end]
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            set_path = Path(temporary) / "M1-SDKFree-TR-Window592.als"
+            set_path.write_bytes(b"selected Set fixture")
+            harness = f"""
+import Foundation
+import ApplicationServices
+{production_contract}
+let url = {json.dumps(set_path.as_uri())}
+let window: [String: Any] = [
+  "identity": "1668292321", "role": "AXWindow", "subrole": "AXStandardWindow",
+  "title": "M1-SDKFree-TR-Window592", "identifier": NSNull(), "document": url,
+  "geometry": ["x": 475.0, "y": 106.0, "width": 1920.0, "height": 1055.0],
+  "window_number": NSNull(), "cg_window_number": 31405,
+]
+let report = focusWindowPreflightReport(
+  observedAt: "2026-11-08T08:06:40.094Z",
+  snapshotObservedAt: "2026-11-08T08:06:39.869Z",
+  snapshotLaunchDate: "2026-11-08T06:16:59.511Z",
+  pid: 47314, bundleID: "com.ableton.live", generation: 1794118619511410,
+  setURL: url, setWindowIdentity: "1668292321", window: window
+)
+precondition((report["actions"] as? [String: Any])?.isEmpty == true)
+precondition(successfulHelperStatus(report["status"] as? String))
+precondition(successfulHelperStatus("observed"))
+precondition(successfulHelperStatus("complete"))
+precondition(!successfulHelperStatus("stopped"))
+let data = try! JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+print(String(data: data, encoding: .utf8)!)
+"""
+            main_swift = Path(temporary) / "main.swift"
+            binary = Path(temporary) / "focus-preflight-contract"
+            main_swift.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                [
+                    "/usr/bin/xcrun",
+                    "swiftc",
+                    "-framework",
+                    "ApplicationServices",
+                    str(main_swift),
+                    "-o",
+                    str(binary),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertTrue(
+            _valid_focus_report(
+                report,
+                execute=False,
+                pid=47314,
+                bundle_id="com.ableton.live",
+                set_path=set_path,
+                identity="1668292321",
+                generation=1794118619511410,
+                preflight_hash=None,
+                returncode=0,
+            )
+        )
+
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
     def test_swift_cg_window_match_disambiguates_duplicate_title_and_size_by_position(
         self,
     ):
