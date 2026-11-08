@@ -57,8 +57,9 @@ one snapshot from the target PID and copy its `observed_at_utc`, target
 The identity is the decimal CFHash value shown by the snapshot. Duplicate
 titles are allowed only when that exact identity and current desktop geometry
 select one window. The main Set window must also resolve uniquely by its exact
-AXDocument URL; a child editor may have no AXDocument, but a present document
-must name that same Set.
+AXDocument URL. A child editor may have no AXDocument; if present, it must be a
+valid local file URL, and its exact string is pinned and rechecked unchanged.
+This does not assert that the child document belongs to the selected Set.
 
     python3 -m codex_devtools ax live-transport \
       --pid 58198 --expected-bundle-id com.ableton.live --set /path/current.als \

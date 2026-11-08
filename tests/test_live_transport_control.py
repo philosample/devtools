@@ -395,6 +395,90 @@ class LiveTransportControlTests(unittest.TestCase):
             self.assertIn(digest, native_run.call_args_list[1].args[0])
 
     @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_swift_focus_accepts_and_pins_observed_embedded_max_document_url(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        lexical_start = source.index("func lexicalPath(")
+        lexical_end = source.index("\nfunc setURL(", lexical_start)
+        file_url_start = source.index("func fileURLPath(")
+        file_url_end = source.index("\nfunc sameSetURL(", file_url_start)
+        document_start = source.index("func validatedFocusWindowDocument(")
+        document_end = source.index("\nfunc selectedFocusWindow(", document_start)
+        receipt_start = source.index("func focusReceiptIsCurrent(")
+        receipt_end = source.index("\nfunc focusWindowPreflightReport(", receipt_start)
+        focus_record_start = source.index("func focusWindowRecord(")
+        focus_record_end = source.index(
+            "\nfunc validatedFocusWindowDocument(", focus_record_start
+        )
+        self.assertIn(
+            "validatedFocusWindowDocument(optionalString(window, kAXDocumentAttribute as String))",
+            source[focus_record_start:focus_record_end],
+        )
+        contract = "\n".join(
+            (
+                source[lexical_start:lexical_end],
+                source[file_url_start:file_url_end],
+                source[document_start:document_end],
+                source[receipt_start:receipt_end],
+            )
+        )
+        child_url = "file:///Users/philosample/workstation-docs/evidence/studio-control/2026-11-08-coordinator-playable/native592-tr-subwindow-opener/package/Markov%20Transition%20Editor.maxpat"
+        harness = f"""
+import Foundation
+import ApplicationServices
+struct TransportFailure: Error {{ let phase: String; let message: String }}
+var phase = "focus-window-preflight"
+func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {{
+    if try !condition() {{ throw TransportFailure(phase: phase, message: message) }}
+}}
+{contract}
+let childURL = {json.dumps(child_url)}
+let validated = try validatedFocusWindowDocument(childURL)
+precondition(validated == childURL)
+let absent = try validatedFocusWindowDocument(nil)
+precondition(absent == nil)
+let now = Date(timeIntervalSince1970: 1_800_000_000)
+let formatter = ISO8601DateFormatter()
+formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+let window: [String: Any] = ["identity":"1685072721", "role":"AXWindow", "subrole":"AXStandardWindow", "title":"Markov Transition Editor", "identifier":NSNull(), "document":validated!, "window_number":NSNull(), "cg_candidates":[["number":31731,"layer":0]], "geometry":["x":100.0,"y":97.0,"width":760.0,"height":198.0]]
+let receipt: [String: Any] = ["format":"codex-devtools-live-focus-window-preflight-v1", "status":"preflight_ready", "read_only":true, "observed_at_utc":formatter.string(from: now), "target":["pid":58198,"bundle_identifier":"com.ableton.live","process_generation":123456], "set_url":"file:///tmp/recall.als", "set_window_identity":"11111", "window":window]
+precondition(focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072721", currentWindow:window, now:now))
+var changed = window
+changed["document"] = "file:///Users/philosample/other.maxpat"
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072721", currentWindow:changed, now:now))
+for unsafe in ["https://example.test/patch.maxpat", childURL + "?query=1", childURL + "#fragment", "file:///tmp/../escape.maxpat"] {{
+    do {{ _ = try validatedFocusWindowDocument(unsafe); preconditionFailure("unsafe AXDocument was accepted: \\(unsafe)") }} catch {{}}
+}}
+"""
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            main_swift = Path(temporary) / "main.swift"
+            binary = Path(temporary) / "focus-document-policy"
+            main_swift.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                [
+                    "/usr/bin/xcrun",
+                    "swiftc",
+                    "-framework",
+                    "ApplicationServices",
+                    str(main_swift),
+                    "-o",
+                    str(binary),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
     def test_swift_focus_candidate_set_accepts_only_bounded_exact_geometry_rows(self):
         source = (
             Path(__file__).resolve().parents[1]
