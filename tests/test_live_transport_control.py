@@ -983,7 +983,8 @@ precondition(actions["position"]?["attempted"] as? Bool == true)
 precondition(actions["position"]?["outcome"] as? String == "unknown")
 precondition(manualInspectionRequired)
 var afterWindow = window
-afterWindow["geometry"] = ["x":1000.0,"y":350.0,"width":640.0,"height":197.0]
+afterWindow["geometry"] = ["x":1000.25,"y":350.0,"width":640.0,"height":197.0]
+precondition(positionReadbackMatches(afterWindow["geometry"] as! [String: Double], requested:requested, originalSize:CGSize(width:640,height:197)))
 let execution = positionWindowResultReport(
   pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:url,
   setWindowIdentity:"11111", preflightHash:receiptHash, before:window,
@@ -992,6 +993,26 @@ let execution = positionWindowResultReport(
 precondition(successfulHelperStatus(execution["status"] as? String))
 let executionData = try! JSONSerialization.data(withJSONObject:execution, options:[.sortedKeys])
 print(String(data:executionData, encoding:.utf8)!)
+var boundaryWindow = afterWindow
+boundaryWindow["geometry"] = ["x":1000.5,"y":350.0,"width":640.0,"height":197.0]
+precondition(!positionReadbackMatches(boundaryWindow["geometry"] as! [String: Double], requested:requested, originalSize:CGSize(width:640,height:197)))
+let boundary = positionWindowResultReport(
+  pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:url,
+  setWindowIdentity:"11111", preflightHash:receiptHash, before:window,
+  after:boundaryWindow, position:requested
+)
+let boundaryData = try! JSONSerialization.data(withJSONObject:boundary, options:[.sortedKeys])
+print(String(data:boundaryData, encoding:.utf8)!)
+var sizeChangedWindow = afterWindow
+sizeChangedWindow["geometry"] = ["x":1000.25,"y":350.0,"width":640.002,"height":197.0]
+precondition(!positionReadbackMatches(sizeChangedWindow["geometry"] as! [String: Double], requested:requested, originalSize:CGSize(width:640,height:197)))
+let sizeChanged = positionWindowResultReport(
+  pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:url,
+  setWindowIdentity:"11111", preflightHash:receiptHash, before:window,
+  after:sizeChangedWindow, position:requested
+)
+let sizeChangedData = try! JSONSerialization.data(withJSONObject:sizeChanged, options:[.sortedKeys])
+print(String(data:sizeChangedData, encoding:.utf8)!)
 """
             main_swift = Path(temporary) / "main.swift"
             binary = Path(temporary) / "position-window-policy"
@@ -1016,7 +1037,9 @@ print(String(data:executionData, encoding:.utf8)!)
                 [str(binary)], capture_output=True, text=True, check=False, timeout=5
             )
         self.assertEqual(result.returncode, 0, result.stderr)
-        report, execution = (json.loads(line) for line in result.stdout.splitlines())
+        report, execution, boundary, size_changed = (
+            json.loads(line) for line in result.stdout.splitlines()
+        )
         self.assertTrue(
             _valid_position_report(
                 report,
@@ -1046,6 +1069,21 @@ print(String(data:executionData, encoding:.utf8)!)
                 returncode=0,
             )
         )
+        for rejected in (boundary, size_changed):
+            self.assertFalse(
+                _valid_position_report(
+                    rejected,
+                    execute=True,
+                    pid=PID,
+                    bundle_id=BUNDLE,
+                    set_path=set_path,
+                    identity="98765",
+                    generation=123456,
+                    position=(1000.0, 350.0),
+                    preflight_hash=digest,
+                    returncode=0,
+                )
+            )
 
     @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
     def test_swift_cg_window_match_disambiguates_duplicate_title_and_size_by_position(

@@ -490,22 +490,12 @@ def _valid_position_report(
             type(value) in (int, float) and math.isfinite(value)
             for value in after_geometry.values()
         )
-        and math.isclose(
-            after_geometry.get("x", math.inf), requested["x"], abs_tol=0.001
-        )
-        and math.isclose(
-            after_geometry.get("y", math.inf), requested["y"], abs_tol=0.001
-        )
-        and math.isclose(
-            after_geometry.get("width", math.inf),
-            before_geometry["width"],
-            abs_tol=0.001,
-        )
-        and math.isclose(
-            after_geometry.get("height", math.inf),
-            before_geometry["height"],
-            abs_tol=0.001,
-        )
+        and abs(after_geometry.get("x", math.inf) - requested["x"]) < 0.5
+        and abs(after_geometry.get("y", math.inf) - requested["y"]) < 0.5
+        and abs(after_geometry.get("width", math.inf) - before_geometry["width"])
+        < 0.001
+        and abs(after_geometry.get("height", math.inf) - before_geometry["height"])
+        < 0.001
     )
 
 

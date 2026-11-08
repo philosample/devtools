@@ -1108,10 +1108,7 @@ func positionWindowAction(_ app: AXUIElement, process: NSRunningApplication, url
     guard let afterGeometry = after["geometry"] as? [String: Double] else {
         throw TransportFailure(phase: phase, message: "positioned window geometry is unavailable")
     }
-    try require(abs((afterGeometry["x"] ?? .infinity) - requestedX) < 0.5 &&
-                abs((afterGeometry["y"] ?? .infinity) - requestedY) < 0.5 &&
-                abs((afterGeometry["width"] ?? .infinity) - size.width) < 0.001 &&
-                abs((afterGeometry["height"] ?? .infinity) - size.height) < 0.001,
+    try require(positionReadbackMatches(afterGeometry, requested: requested, originalSize: size),
                 "window position or size did not match the requested readback")
     try require(after["role"] as? String == record["role"] as? String &&
                 after["subrole"] as? String == record["subrole"] as? String &&
@@ -1191,6 +1188,18 @@ func positionWindowResultReport(pid: pid_t, bundleID: String, generation: Int64,
         "requested_position": position, "position_settable": true,
         "actions": ["position": "known"], "manual_inspection_required": false,
     ]
+}
+
+func positionReadbackMatches(_ actual: [String: Double], requested: [String: Double],
+                             originalSize: CGSize) -> Bool {
+    guard let x = actual["x"], let y = actual["y"],
+          let width = actual["width"], let height = actual["height"],
+          let targetX = requested["x"], let targetY = requested["y"],
+          [x, y, width, height, targetX, targetY,
+           originalSize.width, originalSize.height].allSatisfy(\.isFinite) else { return false }
+    return abs(x - targetX) < 0.5 && abs(y - targetY) < 0.5 &&
+        abs(width - originalSize.width) < 0.001 &&
+        abs(height - originalSize.height) < 0.001
 }
 
 func positionFitsDisplay(_ position: CGPoint, size: CGSize, displays: [CGRect]) -> Bool {
