@@ -14,6 +14,7 @@ from codex_devtools.live_transport_control import (
     FORMAT,
     _native_command,
     _valid_focus_report,
+    _valid_position_report,
     _valid_report,
     run_live_transport,
 )
@@ -140,6 +141,227 @@ def transport_report(path, action, *, seconds=None, status="complete"):
 
 
 class LiveTransportControlTests(unittest.TestCase):
+    def test_position_window_cli_routes_read_only_preflight_and_coordinates(self):
+        output = io.StringIO()
+        with (
+            patch(
+                "codex_devtools.live_transport_control.run_live_transport",
+                return_value={"status": "preflight_ready", "read_only": True},
+            ) as run,
+            redirect_stdout(output),
+        ):
+            code = main(
+                [
+                    "ax",
+                    "live-transport",
+                    "--pid",
+                    str(PID),
+                    "--expected-bundle-id",
+                    BUNDLE,
+                    "--set",
+                    "/private/tmp/recall.als",
+                    "--action",
+                    "position-window",
+                    "--expected-generation",
+                    "123456",
+                    "--snapshot-observed-at-utc",
+                    "2026-11-08T12:00:00.000Z",
+                    "--snapshot-launch-date",
+                    "2026-11-08T11:00:00.000Z",
+                    "--window-identity",
+                    "1685072721",
+                    "--position-x",
+                    "1000",
+                    "--position-y",
+                    "350",
+                    "--receipt",
+                    "/private/tmp/position.json",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["status"], "preflight_ready")
+        self.assertEqual(run.call_args.kwargs["action"], "position-window")
+        self.assertEqual(run.call_args.kwargs["position_x"], 1000.0)
+        self.assertEqual(run.call_args.kwargs["position_y"], 350.0)
+        self.assertFalse(run.call_args.kwargs["execute"])
+
+    def test_position_window_native_command_pins_destination_only_in_preflight(self):
+        preflight = _native_command(
+            Path("/tmp/helper"),
+            pid=PID,
+            bundle_id=BUNDLE,
+            set_path=Path("/private/tmp/recall.als"),
+            action="position-window",
+            play_for_seconds=None,
+            expected_count=None,
+            baseline_path=None,
+            baseline_hash=None,
+            window_identity="98765",
+            expected_generation=123456,
+            snapshot_observed_at_utc="2026-11-08T12:00:00.000Z",
+            snapshot_launch_date="2026-11-08T11:00:00.000Z",
+            position=(1000.0, 350.0),
+        )
+        self.assertNotIn("--execute", preflight)
+        position_index = preflight.index("--position-x")
+        self.assertEqual(preflight[position_index + 1], "1000.0")
+        self.assertIn("--position-y", preflight)
+        execute = _native_command(
+            Path("/tmp/helper"),
+            pid=PID,
+            bundle_id=BUNDLE,
+            set_path=Path("/private/tmp/recall.als"),
+            action="position-window",
+            play_for_seconds=None,
+            expected_count=None,
+            baseline_path=None,
+            baseline_hash=None,
+            expected_generation=123456,
+            preflight_path=Path("/private/tmp/preflight.json"),
+            preflight_hash="a" * 64,
+        )
+        self.assertIn("--execute", execute)
+        self.assertNotIn("--position-x", execute)
+        self.assertNotIn("--window-identity", execute)
+
+    def test_position_window_preflight_and_execution_validate_native_receipts(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            preflight_path = root / "preflight.json"
+            result_path = root / "result.json"
+            window = {
+                "identity": "98765",
+                "role": "AXWindow",
+                "subrole": "AXStandardWindow",
+                "title": "Markov Transition Editor",
+                "identifier": None,
+                "document": "file:///tmp/Markov.maxpat",
+                "window_number": 31,
+                "cg_candidates": [{"number": 31, "layer": 0}],
+                "geometry": {"x": 25.0, "y": 44.0, "width": 640.0, "height": 197.0},
+            }
+            requested = {"x": 1000.0, "y": 350.0}
+            common = {
+                "target": {
+                    "pid": PID,
+                    "bundle_identifier": BUNDLE,
+                    "process_generation": 123456,
+                },
+                "set_url": set_path.as_uri(),
+                "set_window_identity": "11111",
+                "window": window,
+                "requested_position": requested,
+                "position_settable": True,
+                "manual_inspection_required": False,
+            }
+            preflight = {
+                **common,
+                "format": "codex-devtools-live-position-window-preflight-v1",
+                "status": "preflight_ready",
+                "read_only": True,
+                "observed_at_utc": "2026-11-08T12:00:00.000Z",
+                "snapshot_observed_at_utc": "2026-11-08T12:00:00.000Z",
+                "snapshot_launch_date": "2026-11-08T11:00:00.000Z",
+                "actions": {},
+            }
+            after = {
+                **window,
+                "geometry": {**window["geometry"], "x": 1000.0, "y": 350.0},
+            }
+            result = {
+                **common,
+                "format": "codex-devtools-live-position-window-result-v1",
+                "status": "complete",
+                "read_only": False,
+                "preflight_sha256": "PENDING",
+                "window_after": after,
+                "actions": {"position": "known"},
+            }
+            native_calls = []
+
+            def native_run(command, **_kwargs):
+                native_calls.append(command)
+                if "--execute" in command:
+                    result["preflight_sha256"] = hashlib.sha256(
+                        preflight_path.read_bytes()
+                    ).hexdigest()
+                    report = result
+                else:
+                    report = preflight
+                return subprocess.CompletedProcess(command, 0, json.dumps(report), "")
+
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    side_effect=native_run,
+                ),
+            ):
+                first = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="position-window",
+                    window_identity="98765",
+                    expected_generation=123456,
+                    snapshot_observed_at_utc="2026-11-08T12:00:00.000Z",
+                    snapshot_launch_date="2026-11-08T11:00:00.000Z",
+                    position_x=1000,
+                    position_y=350,
+                    receipt_path=preflight_path,
+                )
+                digest = hashlib.sha256(preflight_path.read_bytes()).hexdigest()
+                second = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="position-window",
+                    expected_generation=123456,
+                    preflight_receipt_path=preflight_path,
+                    preflight_sha256=digest,
+                    receipt_path=result_path,
+                    execute=True,
+                )
+                with self.assertRaisesRegex(ValueError, "SHA-256"):
+                    run_live_transport(
+                        PID,
+                        expected_bundle_id=BUNDLE,
+                        set_path=set_path,
+                        action="position-window",
+                        expected_generation=123456,
+                        preflight_receipt_path=preflight_path,
+                        preflight_sha256="0" * 64,
+                        receipt_path=root / "tampered-result.json",
+                        execute=True,
+                    )
+            self.assertEqual(first["status"], "preflight_ready")
+            self.assertEqual(second["status"], "complete")
+            self.assertEqual(len(native_calls), 2)
+            self.assertTrue(
+                _valid_position_report(
+                    second,
+                    execute=True,
+                    pid=PID,
+                    bundle_id=BUNDLE,
+                    set_path=set_path,
+                    identity="98765",
+                    generation=123456,
+                    position=(1000.0, 350.0),
+                    preflight_hash=digest,
+                    returncode=0,
+                )
+            )
+            self.assertNotIn("--position-x", native_calls[1])
+
     def test_focus_window_cli_preflight_and_execute_arguments_are_explicit(self):
         parser = build_parser()
         base = [
@@ -665,6 +887,162 @@ print(String(data: data, encoding: .utf8)!)
                 identity="1668292321",
                 generation=1794118619511410,
                 preflight_hash=None,
+                returncode=0,
+            )
+        )
+
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_swift_position_report_and_policy_match_python_caller_contract(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        start = source.index("func positionWindowIsCurrent(")
+        report_start = source.index("func positionWindowReport(", start)
+        display_start = source.index("func positionFitsDisplay(", report_start)
+        display_end = source.index(
+            "\nfunc currentActiveDisplayContains(", display_start
+        )
+        settable_start = source.index("func positionSettableResult(", display_end)
+        settable_end = source.index("\nfunc controlsState(", settable_start)
+        success_start = source.index("func successfulHelperStatus(")
+        success_end = source.index("\nfunc focusWindowAction(", success_start)
+        action_start = source.index("func positionWindowAction(")
+        action_end = source.index("\nfunc positionWindowIsCurrent(", action_start)
+        action = source[action_start:action_end]
+        self.assertEqual(action.count("AXUIElementSetAttributeValue("), 1)
+        self.assertNotIn("AXUIElementPerformAction(", action)
+        set_action_start = source.index("func setAction(")
+        set_action_end = source.index("\nfunc press(", set_action_start)
+        production = (
+            source[start:report_start]
+            + source[report_start:display_start]
+            + source[display_start:display_end]
+            + source[settable_start:settable_end]
+            + source[success_start:success_end]
+            + source[set_action_start:set_action_end]
+        )
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            set_path = Path(temporary) / "M1-SDKFree-TR-Window592.als"
+            set_path.write_bytes(b"selected Set fixture")
+            harness = f"""
+import Foundation
+import ApplicationServices
+import CryptoKit
+struct TransportFailure: Error {{ let phase: String; let message: String }}
+var phase = "position-window-preflight"
+var actions: [String: [String: Any]] = [:]
+var manualInspectionRequired = false
+func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {{
+    if try !condition() {{ throw TransportFailure(phase: phase, message: message) }}
+}}
+{production}
+let now = Date(timeIntervalSince1970: 1_800_000_000)
+let formatter = ISO8601DateFormatter()
+formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+let url = {json.dumps(set_path.as_uri())}
+let window: [String: Any] = [
+  "identity":"98765", "role":"AXWindow", "subrole":"AXStandardWindow",
+  "title":"Markov Transition Editor", "identifier":NSNull(), "document":"file:///tmp/Markov.maxpat",
+  "window_number":31, "cg_candidates":[["number":31,"layer":0]],
+  "geometry":["x":25.0,"y":44.0,"width":640.0,"height":197.0],
+]
+let requested = ["x":1000.0,"y":350.0]
+let report = positionWindowReport(
+  observedAt:formatter.string(from:now), snapshotObservedAt:formatter.string(from:now),
+  snapshotLaunchDate:"2026-11-08T11:00:00.000Z", pid:58198, bundleID:"com.ableton.live",
+  generation:123456, setURL:url, setWindowIdentity:"11111", window:window, position:requested
+)
+let valid = positionWindowIsCurrent(
+  report, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:url,
+  setWindowIdentity:"11111", identity:"98765", currentWindow:window, position:requested, now:now
+)
+precondition(valid)
+precondition(!positionWindowIsCurrent(report, pid:58198, bundleID:"com.ableton.live", generation:123457, setURL:url, setWindowIdentity:"11111", identity:"98765", currentWindow:window, position:requested, now:now))
+precondition(!positionWindowIsCurrent(report, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/other.als", setWindowIdentity:"11111", identity:"98765", currentWindow:window, position:requested, now:now))
+precondition(!positionWindowIsCurrent(report, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:url, setWindowIdentity:"22222", identity:"98765", currentWindow:window, position:requested, now:now))
+var changed = window
+changed["geometry"] = ["x":26.0,"y":44.0,"width":640.0,"height":197.0]
+precondition(!positionWindowIsCurrent(report, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:url, setWindowIdentity:"11111", identity:"98765", currentWindow:changed, position:requested, now:now))
+precondition(!positionWindowIsCurrent(report, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:url, setWindowIdentity:"11111", identity:"98765", currentWindow:window, position:requested, now:now.addingTimeInterval(31)))
+precondition(positionFitsDisplay(CGPoint(x:1000,y:350), size:CGSize(width:640,height:197), displays:[CGRect(x:0,y:0,width:2000,height:1200)]))
+precondition(!positionFitsDisplay(CGPoint(x:1900,y:1100), size:CGSize(width:640,height:197), displays:[CGRect(x:0,y:0,width:2000,height:1200)]))
+do {{ _ = try positionSettableResult(error:.success, settable:false); preconditionFailure("unsupported AXPosition was accepted") }} catch {{}}
+precondition(successfulHelperStatus(report["status"] as? String))
+let data = try! JSONSerialization.data(withJSONObject:report, options:[.sortedKeys])
+print(String(data:data, encoding:.utf8)!)
+let receiptBytes = Data("reviewed receipt".utf8)
+let receiptHash = SHA256.hash(data:receiptBytes).map {{ String(format:"%02x", $0) }}.joined()
+precondition(positionReceiptHashMatches(receiptBytes, expected:receiptHash))
+precondition(!positionReceiptHashMatches(receiptBytes, expected:String(repeating:"0", count:64)))
+actions = ["position":["attempted":false,"outcome":"not_attempted"]]
+manualInspectionRequired = false
+setAction("position", outcome:"unknown")
+precondition(actions["position"]?["attempted"] as? Bool == true)
+precondition(actions["position"]?["outcome"] as? String == "unknown")
+precondition(manualInspectionRequired)
+var afterWindow = window
+afterWindow["geometry"] = ["x":1000.0,"y":350.0,"width":640.0,"height":197.0]
+let execution = positionWindowResultReport(
+  pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:url,
+  setWindowIdentity:"11111", preflightHash:receiptHash, before:window,
+  after:afterWindow, position:requested
+)
+precondition(successfulHelperStatus(execution["status"] as? String))
+let executionData = try! JSONSerialization.data(withJSONObject:execution, options:[.sortedKeys])
+print(String(data:executionData, encoding:.utf8)!)
+"""
+            main_swift = Path(temporary) / "main.swift"
+            binary = Path(temporary) / "position-window-policy"
+            main_swift.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                [
+                    "/usr/bin/xcrun",
+                    "swiftc",
+                    "-framework",
+                    "ApplicationServices",
+                    str(main_swift),
+                    "-o",
+                    str(binary),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report, execution = (json.loads(line) for line in result.stdout.splitlines())
+        self.assertTrue(
+            _valid_position_report(
+                report,
+                execute=False,
+                pid=PID,
+                bundle_id=BUNDLE,
+                set_path=set_path,
+                identity="98765",
+                generation=123456,
+                position=(1000.0, 350.0),
+                preflight_hash=None,
+                returncode=0,
+            )
+        )
+        digest = execution["preflight_sha256"]
+        self.assertTrue(
+            _valid_position_report(
+                execution,
+                execute=True,
+                pid=PID,
+                bundle_id=BUNDLE,
+                set_path=set_path,
+                identity="98765",
+                generation=123456,
+                position=(1000.0, 350.0),
+                preflight_hash=digest,
                 returncode=0,
             )
         )
