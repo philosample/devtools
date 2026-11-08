@@ -564,6 +564,47 @@ func waitUntil(_ predicate: () -> Bool, seconds: TimeInterval) -> Bool {
     return predicate()
 }
 
+struct PositionReadbackPending: Error {}
+
+func positionReadbackIsTransientCGMiss(_ error: Error) -> Bool {
+    guard let failure = error as? TransportFailure else { return false }
+    return failure.phase == "position-window-readback" &&
+        failure.message == "no current-desktop CG window matches the selected AX window"
+}
+
+func settlePositionWindowReadback(
+    seconds: TimeInterval = 2,
+    now: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+    pump: (UInt64) -> Void = { pumpRunLoopTurn(until: $0) },
+    read: () throws -> [String: Any]
+) throws -> [String: Any] {
+    let deadline = now() + UInt64(seconds * 1_000_000_000)
+    while now() < deadline {
+        do {
+            let observation = try read()
+            guard now() <= deadline else { break }
+            return observation
+        } catch let pending as PositionReadbackPending {
+            _ = pending
+        } catch {
+            guard positionReadbackIsTransientCGMiss(error) else { throw error }
+        }
+        pump(deadline)
+    }
+    throw TransportFailure(phase: "position-window-readback", message: "AX/CG position readback did not settle within the bounded deadline")
+}
+
+func positionWindowWriteAndSettle(
+    seconds: TimeInterval = 2,
+    now: () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+    pump: (UInt64) -> Void = { pumpRunLoopTurn(until: $0) },
+    write: () throws -> Void,
+    read: () throws -> [String: Any]
+) throws -> [String: Any] {
+    try write()
+    return try settlePositionWindowReadback(seconds: seconds, now: now, pump: pump, read: read)
+}
+
 func waitForValueUntilDeadline(
     _ expected: Int,
     deadline: UInt64,
@@ -1094,28 +1135,39 @@ func positionWindowAction(_ app: AXUIElement, process: NSRunningApplication, url
     }
     setAction("position", outcome: "unknown")
     AXUIElementSetMessagingTimeout(window, 2.0)
-    let writeResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
-    guard writeResult == .success else {
-        throw TransportFailure(phase: phase, message: "AXPosition setter outcome is uncertain (\(writeResult.rawValue)); inspect manually")
-    }
-
     phase = "position-window-readback"
-    try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && processGeneration(process) == generation,
-                "Live process changed during window positioning")
-    try require(CFHash(try exactFocusSetWindow(app, url: url)) == CFHash(setWindow), "exact current Set window changed during positioning")
-    let afterWindow = try selectedFocusWindow(app, identity: identity)
-    let after = try focusWindowRecord(afterWindow, app: app, pid: options.pid, generation: generation)
+    let after = try positionWindowWriteAndSettle(write: {
+        let writeResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+        guard writeResult == .success else {
+            throw TransportFailure(phase: "position-window-write", message: "AXPosition setter outcome is uncertain (\(writeResult.rawValue)); inspect manually")
+        }
+    }, read: {
+        try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && processGeneration(process) == generation,
+                    "Live process changed during window positioning")
+        try require(CFHash(try exactFocusSetWindow(app, url: url)) == CFHash(setWindow), "exact current Set window changed during positioning")
+        let afterWindow = try selectedFocusWindow(app, identity: identity)
+        let observation = try focusWindowRecord(afterWindow, app: app, pid: options.pid, generation: generation)
+        try require(record["role"] as? String == observation["role"] as? String &&
+                    record["subrole"] as? String == observation["subrole"] as? String &&
+                    record["title"] as? String == observation["title"] as? String &&
+                    record["identifier"] as? String == observation["identifier"] as? String &&
+                    record["document"] as? String == observation["document"] as? String,
+                    "selected window identity or metadata changed during positioning")
+        guard let observedGeometry = observation["geometry"] as? [String: Double] else {
+            throw TransportFailure(phase: phase, message: "positioned window geometry is unavailable")
+        }
+        try require(positionReadbackSizeMatches(observedGeometry, originalSize: size),
+                    "window size changed during position readback")
+        guard positionReadbackMatches(observedGeometry, requested: requested, originalSize: size) else {
+            throw PositionReadbackPending()
+        }
+        return observation
+    })
     guard let afterGeometry = after["geometry"] as? [String: Double] else {
         throw TransportFailure(phase: phase, message: "positioned window geometry is unavailable")
     }
     try require(positionReadbackMatches(afterGeometry, requested: requested, originalSize: size),
                 "window position or size did not match the requested readback")
-    try require(after["role"] as? String == record["role"] as? String &&
-                after["subrole"] as? String == record["subrole"] as? String &&
-                after["title"] as? String == record["title"] as? String &&
-                after["identifier"] as? String == record["identifier"] as? String &&
-                after["document"] as? String == record["document"] as? String,
-                "selected window identity or metadata changed during positioning")
     let finalPosition = CGPoint(x: afterGeometry["x"] ?? .nan, y: afterGeometry["y"] ?? .nan)
     let finalSize = CGSize(width: afterGeometry["width"] ?? .nan, height: afterGeometry["height"] ?? .nan)
     try require(try currentActiveDisplayContains(finalPosition, size: finalSize), "positioned window is outside current displays")
@@ -1198,7 +1250,13 @@ func positionReadbackMatches(_ actual: [String: Double], requested: [String: Dou
           [x, y, width, height, targetX, targetY,
            originalSize.width, originalSize.height].allSatisfy(\.isFinite) else { return false }
     return abs(x - targetX) < 0.5 && abs(y - targetY) < 0.5 &&
-        abs(width - originalSize.width) < 0.001 &&
+        positionReadbackSizeMatches(actual, originalSize: originalSize)
+}
+
+func positionReadbackSizeMatches(_ actual: [String: Double], originalSize: CGSize) -> Bool {
+    guard let width = actual["width"], let height = actual["height"],
+          [width, height, originalSize.width, originalSize.height].allSatisfy(\.isFinite) else { return false }
+    return abs(width - originalSize.width) < 0.001 &&
         abs(height - originalSize.height) < 0.001
 }
 

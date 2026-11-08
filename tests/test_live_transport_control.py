@@ -915,6 +915,8 @@ print(String(data: data, encoding: .utf8)!)
         self.assertNotIn("AXUIElementPerformAction(", action)
         set_action_start = source.index("func setAction(")
         set_action_end = source.index("\nfunc press(", set_action_start)
+        settle_start = source.index("struct PositionReadbackPending")
+        settle_end = source.index("\nfunc waitForValueUntilDeadline(", settle_start)
         production = (
             source[start:report_start]
             + source[report_start:display_start]
@@ -922,6 +924,7 @@ print(String(data: data, encoding: .utf8)!)
             + source[settable_start:settable_end]
             + source[success_start:success_end]
             + source[set_action_start:set_action_end]
+            + source[settle_start:settle_end]
         )
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             set_path = Path(temporary) / "M1-SDKFree-TR-Window592.als"
@@ -937,6 +940,7 @@ var manualInspectionRequired = false
 func require(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {{
     if try !condition() {{ throw TransportFailure(phase: phase, message: message) }}
 }}
+func pumpRunLoopTurn(until deadline: UInt64) {{}}
 {production}
 let now = Date(timeIntervalSince1970: 1_800_000_000)
 let formatter = ISO8601DateFormatter()
@@ -1013,6 +1017,54 @@ let sizeChanged = positionWindowResultReport(
 )
 let sizeChangedData = try! JSONSerialization.data(withJSONObject:sizeChanged, options:[.sortedKeys])
 print(String(data:sizeChangedData, encoding:.utf8)!)
+let settledWindow: [String: Any] = ["geometry":["x":1000.25,"y":350.0,"width":640.0,"height":197.0]]
+let cgMiss = TransportFailure(phase:"position-window-readback", message:"no current-desktop CG window matches the selected AX window")
+var fakeNow: UInt64 = 0
+var setterCalls = 0
+var readCalls = 0
+let settled = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow += 1_000_000 }}, write:{{ setterCalls += 1 }}, read:{{
+  readCalls += 1
+  if readCalls == 1 {{ throw cgMiss }}
+  return settledWindow
+}})
+precondition(setterCalls == 1 && readCalls == 2)
+precondition(positionReadbackMatches(settled["geometry"] as! [String: Double], requested:requested, originalSize:CGSize(width:640,height:197)))
+fakeNow = 0
+setterCalls = 0
+readCalls = 0
+do {{
+  _ = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow = 2_000_000_000 }}, write:{{ setterCalls += 1 }}, read:{{ readCalls += 1; throw cgMiss }})
+  preconditionFailure("persistent CG miss was accepted")
+}} catch let failure as TransportFailure {{
+  precondition(failure.phase == "position-window-readback")
+  precondition(failure.message.contains("did not settle"))
+}}
+precondition(setterCalls == 1 && readCalls == 1)
+fakeNow = 0
+setterCalls = 0
+readCalls = 0
+do {{
+  _ = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow += 1_000_000 }}, write:{{ setterCalls += 1 }}, read:{{
+    readCalls += 1
+    fakeNow = 2_000_000_001
+    return settledWindow
+  }})
+  preconditionFailure("late readback was accepted after the deadline")
+}} catch let failure as TransportFailure {{ precondition(failure.message.contains("did not settle")) }}
+precondition(setterCalls == 1 && readCalls == 1)
+for driftMessage in ["Live process changed during window positioning", "exact current Set window changed during positioning", "selected window identity or metadata changed during positioning"] {{
+  fakeNow = 0
+  setterCalls = 0
+  readCalls = 0
+  do {{
+    _ = try positionWindowWriteAndSettle(seconds:2, now:{{ fakeNow }}, pump:{{ _ in fakeNow += 1_000_000 }}, write:{{ setterCalls += 1 }}, read:{{
+      readCalls += 1
+      throw TransportFailure(phase:"position-window-readback", message:driftMessage)
+    }})
+    preconditionFailure("drift was accepted")
+  }} catch let failure as TransportFailure {{ precondition(failure.message == driftMessage) }}
+  precondition(setterCalls == 1 && readCalls == 1)
+}}
 """
             main_swift = Path(temporary) / "main.swift"
             binary = Path(temporary) / "position-window-policy"
