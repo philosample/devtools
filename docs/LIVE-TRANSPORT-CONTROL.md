@@ -88,6 +88,43 @@ sheets are refused. The known Window Sharing overlay retains the existing
 exact-signature allowlist. This helper has source and mocked-policy checks;
 those do not establish a native AX focus result.
 
+## Position one exact Live-owned window
+
+`position-window` moves one AX window to a requested top-left X/Y while
+preserving its size. First use a fresh `ax snapshot` for the exact PID and
+copy its observation time, launch date, and selected window CFHash identity.
+The read-only preflight also verifies the exact current Set, the local child
+document when present, current desktop visibility, and that AXPosition is
+settable. The entire requested rectangle must fit on one currently active
+display. The preflight records the requested destination and original geometry.
+
+    python3 -m codex_devtools ax live-transport \
+      --pid 58198 --expected-bundle-id com.ableton.live --set /path/current.als \
+      --action position-window --expected-generation 1794118619511410 \
+      --snapshot-observed-at-utc '2026-11-08T06:20:00.000Z' \
+      --snapshot-launch-date '2026-11-08T06:16:59.511Z' \
+      --window-identity 1685072705 --position-x 1000 --position-y 350 \
+      --receipt /private/tmp/position-preflight.json
+
+Review that receipt and its SHA-256. Execute within 30 seconds using the same
+PID, bundle, Set, and inspected process generation:
+
+    python3 -m codex_devtools ax live-transport \
+      --pid 58198 --expected-bundle-id com.ableton.live --set /path/current.als \
+      --action position-window --execute --expected-generation 1794118619511410 \
+      --preflight-receipt /private/tmp/position-preflight.json \
+      --preflight-sha256 '<reviewed SHA-256>' \
+      --receipt /private/tmp/position-result.json
+
+Execution pins the destination from the hashed preflight, rechecks process,
+Set, window identity, document, geometry, setter availability, and display
+bounds, then issues exactly one AXPosition setter. It verifies the same window
+at the requested X/Y with unchanged size and current-desktop visibility. It
+does not activate Live or use clicks, keys, transport, preferences, devices, or
+SDK calls. Any uncertain or partial result requires manual inspection before
+another action; the helper never retries the position write. CLI, Swift policy,
+and mocked caller checks do not establish a native positioning result.
+
 ## Recorded native findings
 
 On 2026-11-02, a read-only inspection of the exact R71 Set in Live PID 58198

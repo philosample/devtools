@@ -379,13 +379,15 @@ def build_parser() -> argparse.ArgumentParser:
     midi_inputs.add_argument("--max-baseline-age-seconds", type=float, default=300.0)
     live_transport = ax_sub.add_parser(
         "live-transport",
-        help="inspect or explicitly play briefly or stop one exact Live Set",
+        help="inspect or explicitly control one exact Live Set or window",
     )
     live_transport.add_argument("--pid", required=True, type=int)
     live_transport.add_argument("--expected-bundle-id", required=True)
     live_transport.add_argument("--set", dest="set_path", required=True, type=Path)
     live_transport.add_argument(
-        "--action", dest="operation", choices=("play", "stop", "focus-window")
+        "--action",
+        dest="operation",
+        choices=("play", "stop", "focus-window", "position-window"),
     )
     live_transport.add_argument("--play-for-seconds", type=int)
     live_transport.add_argument("--expected-output-count", type=int)
@@ -398,6 +400,8 @@ def build_parser() -> argparse.ArgumentParser:
     live_transport.add_argument("--snapshot-launch-date")
     live_transport.add_argument("--preflight-receipt", type=Path)
     live_transport.add_argument("--preflight-sha256")
+    live_transport.add_argument("--position-x", type=float)
+    live_transport.add_argument("--position-y", type=float)
     live_transport.add_argument(
         "--execute",
         action="store_true",
@@ -812,7 +816,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.group == "ax" and args.action == "live-transport":
             from .live_transport_control import run_live_transport
 
-            if not args.execute and args.operation not in (None, "focus-window"):
+            if not args.execute and args.operation not in (
+                None,
+                "focus-window",
+                "position-window",
+            ):
                 raise ValueError("--action requires --execute")
             result = run_live_transport(
                 args.pid,
@@ -829,6 +837,8 @@ def main(argv: list[str] | None = None) -> int:
                 snapshot_launch_date=args.snapshot_launch_date,
                 preflight_receipt_path=args.preflight_receipt,
                 preflight_sha256=args.preflight_sha256,
+                position_x=args.position_x,
+                position_y=args.position_y,
             )
             _json_out(result)
             return 1 if result["status"] == "stopped" else 0

@@ -28,6 +28,8 @@ struct Options {
     var snapshotLaunchDate = ""
     var preflightReceipt = ""
     var preflightHash = ""
+    var positionX: Double?
+    var positionY: Double?
 }
 
 struct TransportFailure: Error {
@@ -89,7 +91,7 @@ func parseOptions() throws -> Options {
     while index < args.count {
         let key = args[index]
         if key == "--help" {
-            print("Usage: live_transport.swift --pid PID --bundle-id ID --set /path/Set.als [--action focus-window --window-identity CFHASH --expected-generation GENERATION [--receipt FILE] | --execute --action focus-window --expected-generation GENERATION --preflight-receipt FILE --preflight-sha256 SHA256 --receipt FILE | --execute --action play|stop]")
+            print("Usage: live_transport.swift --pid PID --bundle-id ID --set /path/Set.als [--action focus-window|position-window --window-identity CFHASH --expected-generation GENERATION [--receipt FILE] | --execute --action focus-window|position-window --expected-generation GENERATION --preflight-receipt FILE --preflight-sha256 SHA256 --receipt FILE | --execute --action play|stop]")
             exit(0)
         }
         if key == "--execute" {
@@ -130,22 +132,50 @@ func parseOptions() throws -> Options {
         case "--snapshot-launch-date": result.snapshotLaunchDate = value
         case "--preflight-receipt": result.preflightReceipt = value
         case "--preflight-sha256": result.preflightHash = value
+        case "--position-x":
+            guard let parsed = Double(value), parsed.isFinite else {
+                throw TransportFailure(phase: "arguments", message: "position X must be finite")
+            }
+            result.positionX = parsed
+        case "--position-y":
+            guard let parsed = Double(value), parsed.isFinite else {
+                throw TransportFailure(phase: "arguments", message: "position Y must be finite")
+            }
+            result.positionY = parsed
         default:
             throw TransportFailure(phase: "arguments", message: "unknown option: \(key)")
         }
         index += 2
     }
     guard result.pid > 0, !result.bundleID.isEmpty, !result.setPath.isEmpty,
-          ["inspect", "play", "stop", "focus-window"].contains(result.action) else {
+          ["inspect", "play", "stop", "focus-window", "position-window"].contains(result.action) else {
         throw TransportFailure(phase: "arguments", message: "PID, bundle ID, exact Set path and a supported action are required")
     }
-    if result.action == "focus-window" {
+    if result.action == "focus-window" || result.action == "position-window" {
         guard result.expectedGeneration != nil else { throw TransportFailure(phase: "arguments", message: "focus-window requires process generation") }
-        if result.execute {
-            guard !result.preflightReceipt.isEmpty, result.preflightHash.count == 64, result.windowIdentity.isEmpty else {
-                throw TransportFailure(phase: "arguments", message: "focus execution requires a hashed preflight receipt")
+        if result.action == "position-window" {
+            if result.execute {
+                guard !result.preflightReceipt.isEmpty, result.preflightHash.count == 64,
+                      result.windowIdentity.isEmpty, result.positionX == nil, result.positionY == nil else {
+                    throw TransportFailure(phase: "arguments", message: "position execution requires only a hashed preflight receipt")
+                }
+            } else {
+                guard !result.windowIdentity.isEmpty, result.windowIdentity.utf8.count <= 64,
+                      result.windowIdentity.allSatisfy({ $0.isNumber }),
+                      !result.snapshotObservedAtUTC.isEmpty, !result.snapshotLaunchDate.isEmpty,
+                      result.positionX != nil, result.positionY != nil,
+                      result.preflightReceipt.isEmpty, result.preflightHash.isEmpty else {
+                    throw TransportFailure(phase: "arguments", message: "position preflight requires identity, fresh snapshot metadata, and finite X/Y")
+                }
             }
-        } else {
+        }
+        if result.execute {
+            if result.action == "focus-window" {
+                guard !result.preflightReceipt.isEmpty, result.preflightHash.count == 64, result.windowIdentity.isEmpty else {
+                throw TransportFailure(phase: "arguments", message: "focus execution requires a hashed preflight receipt")
+                }
+            }
+        } else if result.action == "focus-window" {
             guard !result.windowIdentity.isEmpty, result.windowIdentity.utf8.count <= 64,
                   result.windowIdentity.allSatisfy({ $0.isNumber }),
                   !result.snapshotObservedAtUTC.isEmpty, !result.snapshotLaunchDate.isEmpty else {
@@ -156,6 +186,11 @@ func parseOptions() throws -> Options {
         guard !result.execute else { throw TransportFailure(phase: "arguments", message: "inspect is read-only") }
     } else {
         guard result.execute else { throw TransportFailure(phase: "arguments", message: "mutating actions require --execute") }
+    }
+    if result.action != "position-window" {
+        guard result.positionX == nil, result.positionY == nil else {
+            throw TransportFailure(phase: "arguments", message: "position coordinates are valid only for position-window preflight")
+        }
     }
     if result.action == "play" {
         guard (1...15).contains(result.playForSeconds), result.expectedCount > 0,
@@ -966,6 +1001,245 @@ func focusWindowAction(_ app: AXUIElement, process: NSRunningApplication, url: U
             "actions": ["activate": "known", "raise": "known"]]
 }
 
+func positionWindowAction(_ app: AXUIElement, process: NSRunningApplication, url: URL) throws -> [String: Any] {
+    phase = "position-window-preflight"
+    let generation = try processGeneration(process)
+    try require(options.expectedGeneration == generation, "Live process generation differs from the caller's inspection")
+    let setWindow = try exactFocusSetWindow(app, url: url)
+    let setWindowIdentity = String(CFHash(setWindow))
+    var prior: [String: Any]?
+    if options.execute {
+        let receiptURL = URL(fileURLWithPath: options.preflightReceipt)
+        var info = stat()
+        guard options.preflightReceipt.withCString({ lstat($0, &info) }) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              let data = try? Data(contentsOf: receiptURL),
+              positionReceiptHashMatches(data, expected: options.preflightHash),
+              let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let selected = (parsed["window"] as? [String: Any])?["identity"] as? String,
+              !selected.isEmpty, selected.allSatisfy({ $0.isNumber }),
+              let pinned = parsed["requested_position"] as? [String: NSNumber],
+              let x = pinned["x"], let y = pinned["y"], x.doubleValue.isFinite, y.doubleValue.isFinite else {
+            throw TransportFailure(phase: phase, message: "position preflight receipt is missing, changed, or invalid")
+        }
+        options.positionX = x.doubleValue
+        options.positionY = y.doubleValue
+        options.windowIdentity = selected
+        prior = parsed
+    }
+    guard let requestedX = options.positionX, let requestedY = options.positionY,
+          requestedX.isFinite, requestedY.isFinite else {
+        throw TransportFailure(phase: phase, message: "finite pinned destination X/Y are required")
+    }
+    let requested = ["x": requestedX, "y": requestedY]
+    let matches = try focusWindows(app).filter { String(CFHash($0)) == options.windowIdentity }
+    try require(matches.count == 1, "selected window identity is missing or ambiguous")
+    let window = matches[0]
+    let identity = String(CFHash(window))
+    let record = try focusWindowRecord(window, app: app, pid: options.pid, generation: generation)
+    _ = try positionIsSettable(window)
+    guard let currentGeometry = record["geometry"] as? [String: Double] else {
+        throw TransportFailure(phase: phase, message: "selected window geometry is invalid")
+    }
+    let destination = CGPoint(x: requestedX, y: requestedY)
+    let size = CGSize(width: currentGeometry["width"] ?? 0, height: currentGeometry["height"] ?? 0)
+    try require(try currentActiveDisplayContains(destination, size: size), "requested window rectangle is outside current displays")
+    let timestamp = ISO8601DateFormatter()
+    timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if !options.execute {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let snapshotDate = formatter.date(from: options.snapshotObservedAtUTC),
+              let snapshotLaunch = formatter.date(from: options.snapshotLaunchDate),
+              let processLaunch = process.launchDate else {
+            throw TransportFailure(phase: phase, message: "AX snapshot or Live launch date is invalid")
+        }
+        let snapshotAge = Date().timeIntervalSince(snapshotDate)
+        let snapshotGeneration = Int64((snapshotLaunch.timeIntervalSince1970 * 1_000).rounded(.towardZero))
+        let processGenerationAtSnapshotPrecision = Int64((processLaunch.timeIntervalSince1970 * 1_000).rounded(.towardZero))
+        try require(snapshotAge >= -2 && snapshotAge <= 30, "AX snapshot is stale or from the future")
+        try require(snapshotGeneration == processGenerationAtSnapshotPrecision && processGenerationAtSnapshotPrecision == generation / 1_000,
+                    "AX snapshot belongs to a different Live process generation")
+        return positionWindowReport(
+            observedAt: timestamp.string(from: Date()), snapshotObservedAt: options.snapshotObservedAtUTC,
+            snapshotLaunchDate: options.snapshotLaunchDate, pid: options.pid, bundleID: options.bundleID,
+            generation: generation, setURL: url.absoluteString, setWindowIdentity: setWindowIdentity,
+            window: record, position: requested
+        )
+    }
+    guard let prior,
+          positionWindowIsCurrent(prior, pid: options.pid, bundleID: options.bundleID,
+                                  generation: generation, setURL: url.absoluteString,
+                                  setWindowIdentity: setWindowIdentity, identity: identity,
+                                  currentWindow: record, position: requested, now: Date()) else {
+        throw TransportFailure(phase: phase, message: "position preflight is stale or Live, Set, window or geometry changed")
+    }
+    try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && processGeneration(process) == generation,
+                "Live process changed before window positioning")
+    try require(CFHash(try exactFocusSetWindow(app, url: url)) == CFHash(setWindow), "exact current Set window changed before positioning")
+    _ = try positionIsSettable(window)
+    try require(try currentActiveDisplayContains(destination, size: size), "requested window rectangle left current displays")
+    let latest = try focusWindowRecord(window, app: app, pid: options.pid, generation: generation)
+    try require(NSDictionary(dictionary: record).isEqual(to: latest), "selected window changed immediately before positioning")
+    try require(currentProcessMatches(options.pid, bundleID: options.bundleID) &&
+                processGeneration(process) == generation &&
+                CFHash(try exactFocusSetWindow(app, url: url)) == CFHash(setWindow),
+                "Live process or exact Set changed immediately before positioning")
+    _ = try positionIsSettable(window)
+
+    phase = "position-window-write"
+    var point = destination
+    guard let value = AXValueCreate(.cgPoint, &point) else {
+        throw TransportFailure(phase: phase, message: "AXPosition value could not be created")
+    }
+    setAction("position", outcome: "unknown")
+    AXUIElementSetMessagingTimeout(window, 2.0)
+    let writeResult = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value)
+    guard writeResult == .success else {
+        throw TransportFailure(phase: phase, message: "AXPosition setter outcome is uncertain (\(writeResult.rawValue)); inspect manually")
+    }
+
+    phase = "position-window-readback"
+    try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && processGeneration(process) == generation,
+                "Live process changed during window positioning")
+    try require(CFHash(try exactFocusSetWindow(app, url: url)) == CFHash(setWindow), "exact current Set window changed during positioning")
+    let afterWindow = try selectedFocusWindow(app, identity: identity)
+    let after = try focusWindowRecord(afterWindow, app: app, pid: options.pid, generation: generation)
+    guard let afterGeometry = after["geometry"] as? [String: Double] else {
+        throw TransportFailure(phase: phase, message: "positioned window geometry is unavailable")
+    }
+    try require(positionReadbackMatches(afterGeometry, requested: requested, originalSize: size),
+                "window position or size did not match the requested readback")
+    try require(after["role"] as? String == record["role"] as? String &&
+                after["subrole"] as? String == record["subrole"] as? String &&
+                after["title"] as? String == record["title"] as? String &&
+                after["identifier"] as? String == record["identifier"] as? String &&
+                after["document"] as? String == record["document"] as? String,
+                "selected window identity or metadata changed during positioning")
+    let finalPosition = CGPoint(x: afterGeometry["x"] ?? .nan, y: afterGeometry["y"] ?? .nan)
+    let finalSize = CGSize(width: afterGeometry["width"] ?? .nan, height: afterGeometry["height"] ?? .nan)
+    try require(try currentActiveDisplayContains(finalPosition, size: finalSize), "positioned window is outside current displays")
+    setAction("position", outcome: "known")
+    return positionWindowResultReport(
+        pid: options.pid, bundleID: options.bundleID, generation: generation,
+        setURL: url.absoluteString, setWindowIdentity: setWindowIdentity,
+        preflightHash: options.preflightHash, before: record, after: after, position: requested
+    )
+}
+
+func positionWindowIsCurrent(_ prior: [String: Any], pid: pid_t, bundleID: String,
+                             generation: Int64, setURL: String, setWindowIdentity: String,
+                             identity: String, currentWindow: [String: Any],
+                             position: [String: Double], now: Date) -> Bool {
+    guard prior["format"] as? String == "codex-devtools-live-position-window-preflight-v1",
+          prior["status"] as? String == "preflight_ready",
+          prior["read_only"] as? Bool == true,
+          prior["set_url"] as? String == setURL,
+          (prior["requested_position"] as? NSDictionary)?.isEqual(to: position) == true,
+          prior["position_settable"] as? Bool == true,
+          let target = prior["target"] as? [String: Any],
+          (target["pid"] as? NSNumber)?.intValue == Int(pid),
+          target["bundle_identifier"] as? String == bundleID,
+          (target["process_generation"] as? NSNumber)?.int64Value == generation,
+          prior["set_window_identity"] as? String == setWindowIdentity,
+          let priorWindow = prior["window"] as? [String: Any],
+          priorWindow["identity"] as? String == identity,
+          NSDictionary(dictionary: priorWindow).isEqual(to: currentWindow) else { return false }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let observed = formatter.date(from: prior["observed_at_utc"] as? String ?? "") else { return false }
+    let age = now.timeIntervalSince(observed)
+    return age >= -2 && age <= 30
+}
+
+func positionReceiptHashMatches(_ data: Data, expected: String) -> Bool {
+    guard expected.count == 64 else { return false }
+    return SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == expected
+}
+
+func positionWindowReport(observedAt: String, snapshotObservedAt: String,
+                          snapshotLaunchDate: String, pid: pid_t, bundleID: String,
+                          generation: Int64, setURL: String, setWindowIdentity: String,
+                          window: [String: Any], position: [String: Double]) -> [String: Any] {
+    [
+        "format": "codex-devtools-live-position-window-preflight-v1",
+        "status": "preflight_ready", "read_only": true,
+        "observed_at_utc": observedAt,
+        "snapshot_observed_at_utc": snapshotObservedAt,
+        "snapshot_launch_date": snapshotLaunchDate,
+        "target": ["pid": pid, "bundle_identifier": bundleID, "process_generation": generation],
+        "set_url": setURL, "set_window_identity": setWindowIdentity,
+        "window": window, "requested_position": position,
+        "position_settable": true, "actions": [:],
+        "manual_inspection_required": false,
+    ]
+}
+
+func positionWindowResultReport(pid: pid_t, bundleID: String, generation: Int64,
+                                setURL: String, setWindowIdentity: String,
+                                preflightHash: String, before: [String: Any],
+                                after: [String: Any], position: [String: Double]) -> [String: Any] {
+    [
+        "format": "codex-devtools-live-position-window-result-v1", "status": "complete",
+        "read_only": false,
+        "target": ["pid": pid, "bundle_identifier": bundleID, "process_generation": generation],
+        "set_url": setURL, "set_window_identity": setWindowIdentity,
+        "preflight_sha256": preflightHash, "window": before, "window_after": after,
+        "requested_position": position, "position_settable": true,
+        "actions": ["position": "known"], "manual_inspection_required": false,
+    ]
+}
+
+func positionReadbackMatches(_ actual: [String: Double], requested: [String: Double],
+                             originalSize: CGSize) -> Bool {
+    guard let x = actual["x"], let y = actual["y"],
+          let width = actual["width"], let height = actual["height"],
+          let targetX = requested["x"], let targetY = requested["y"],
+          [x, y, width, height, targetX, targetY,
+           originalSize.width, originalSize.height].allSatisfy(\.isFinite) else { return false }
+    return abs(x - targetX) < 0.5 && abs(y - targetY) < 0.5 &&
+        abs(width - originalSize.width) < 0.001 &&
+        abs(height - originalSize.height) < 0.001
+}
+
+func positionFitsDisplay(_ position: CGPoint, size: CGSize, displays: [CGRect]) -> Bool {
+    guard position.x.isFinite, position.y.isFinite,
+          size.width.isFinite, size.height.isFinite,
+          size.width > 0, size.height > 0,
+          !displays.isEmpty, displays.count <= 16 else { return false }
+    let target = CGRect(origin: position, size: size)
+    guard target.minX.isFinite, target.minY.isFinite, target.maxX.isFinite, target.maxY.isFinite else { return false }
+    return displays.contains { display in
+        display.minX.isFinite && display.minY.isFinite && display.maxX.isFinite && display.maxY.isFinite &&
+        display.width > 0 && display.height > 0 && display.contains(target)
+    }
+}
+
+func currentActiveDisplayContains(_ position: CGPoint, size: CGSize) throws -> Bool {
+    var count: UInt32 = 0
+    guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0, count <= 16 else {
+        throw TransportFailure(phase: phase, message: "active display inventory is unavailable or outside its bound")
+    }
+    var identifiers = [CGDirectDisplayID](repeating: 0, count: Int(count))
+    guard CGGetActiveDisplayList(count, &identifiers, &count) == .success, count > 0 else {
+        throw TransportFailure(phase: phase, message: "active display inventory changed or could not be read")
+    }
+    return positionFitsDisplay(position, size: size, displays: identifiers.prefix(Int(count)).map(CGDisplayBounds))
+}
+
+func positionIsSettable(_ window: AXUIElement) throws -> Bool {
+    var settable = DarwinBoolean(false)
+    AXUIElementSetMessagingTimeout(window, 2.0)
+    let error = AXUIElementIsAttributeSettable(window, kAXPositionAttribute as CFString, &settable)
+    return try positionSettableResult(error: error, settable: settable.boolValue)
+}
+
+func positionSettableResult(error: AXError, settable: Bool) throws -> Bool {
+    try require(error == .success, "AXPosition settable status is unavailable (\(error.rawValue))")
+    try require(settable, "selected window AXPosition is not settable")
+    return true
+}
+
 func controlsState(_ controls: [String: Control]) -> [String: Any] {
     [
         "play": controls["Play"]?.value as Any? ?? NSNull(),
@@ -1119,6 +1393,9 @@ func run() throws -> [String: Any] {
     let app = AXUIElementCreateApplication(options.pid)
     if options.action == "focus-window" {
         return try focusWindowAction(app, process: process, url: pathURL)
+    }
+    if options.action == "position-window" {
+        return try positionWindowAction(app, process: process, url: pathURL)
     }
     var setWindow = try exactSetWindow(app, url: pathURL)
     let setTitle = try stringAttribute(setWindow, kAXTitleAttribute as String)
@@ -1370,7 +1647,9 @@ func run() throws -> [String: Any] {
 do {
     options = try parseOptions()
     canonicalSetURL = URL(fileURLWithPath: options.setPath)
-    if options.execute {
+    if options.action == "position-window" && options.execute {
+        actions = ["position": ["attempted": false, "outcome": "not_attempted"]]
+    } else if options.execute {
         actions = [
             "settings_close": ["attempted": false, "outcome": "not_attempted"],
             "play": ["attempted": false, "outcome": "not_attempted"],

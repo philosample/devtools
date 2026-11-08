@@ -66,6 +66,8 @@ def _initial_receipt(
             "activate": {"attempted": False, "outcome": "not_attempted"},
             "raise": {"attempted": False, "outcome": "not_attempted"},
         }
+    elif action == "position-window":
+        actions = {"position": {"attempted": False, "outcome": "not_attempted"}}
     elif action == "inspect":
         actions = {}
     else:
@@ -339,6 +341,164 @@ def _valid_focus_report(
     )
 
 
+def _valid_position_report(
+    report: object,
+    *,
+    execute: bool,
+    pid: int,
+    bundle_id: str,
+    set_path: Path,
+    identity: str,
+    generation: int,
+    position: tuple[float, float] | None,
+    preflight_hash: str | None,
+    returncode: int,
+) -> bool:
+    if not isinstance(report, dict):
+        return False
+    expected_format = (
+        "codex-devtools-live-position-window-result-v1"
+        if execute
+        else "codex-devtools-live-position-window-preflight-v1"
+    )
+    expected_status = "complete" if execute else "preflight_ready"
+    target = report.get("target")
+    window = report.get("window")
+    geometry = window.get("geometry") if isinstance(window, dict) else None
+    requested = report.get("requested_position")
+    valid_geometry = (
+        isinstance(geometry, dict)
+        and set(geometry) == {"x", "y", "width", "height"}
+        and all(
+            type(value) in (int, float) and math.isfinite(value)
+            for value in geometry.values()
+        )
+        and geometry["width"] > 0
+        and geometry["height"] > 0
+    )
+    valid_position = (
+        isinstance(requested, dict)
+        and set(requested) == {"x", "y"}
+        and all(
+            type(value) in (int, float) and math.isfinite(value)
+            for value in requested.values()
+        )
+        and position is not None
+        and math.isclose(requested["x"], position[0], abs_tol=0.001)
+        and math.isclose(requested["y"], position[1], abs_tol=0.001)
+    )
+    candidates = window.get("cg_candidates") if isinstance(window, dict) else None
+    valid_candidates = (
+        isinstance(candidates, list)
+        and 0 < len(candidates) <= 64
+        and all(
+            isinstance(candidate, dict)
+            and set(candidate) == {"number", "layer"}
+            and type(candidate.get("number")) is int
+            and candidate["number"] >= 0
+            and type(candidate.get("layer")) is int
+            and candidate["layer"] in {0, 3}
+            for candidate in candidates
+        )
+        and len({candidate["number"] for candidate in candidates}) == len(candidates)
+        and candidates
+        == sorted(
+            candidates, key=lambda candidate: (candidate["number"], candidate["layer"])
+        )
+    )
+    base_valid = (
+        report.get("format") == expected_format
+        and report.get("status") == expected_status
+        and report.get("read_only") is (not execute)
+        and isinstance(target, dict)
+        and target.get("pid") == pid
+        and target.get("bundle_identifier") == bundle_id
+        and target.get("process_generation") == generation
+        and report.get("set_url") == set_path.as_uri()
+        and isinstance(report.get("set_window_identity"), str)
+        and bool(report["set_window_identity"])
+        and isinstance(window, dict)
+        and window.get("identity") == identity
+        and window.get("role") == "AXWindow"
+        and isinstance(window.get("subrole"), str)
+        and isinstance(window.get("title"), str)
+        and bool(window["title"])
+        and (
+            window.get("identifier") is None
+            or isinstance(window.get("identifier"), str)
+        )
+        and (window.get("document") is None or isinstance(window.get("document"), str))
+        and valid_geometry
+        and valid_candidates
+        and (
+            window.get("window_number") is None
+            or (
+                type(window.get("window_number")) is int
+                and any(
+                    candidate["number"] == window["window_number"]
+                    for candidate in candidates
+                )
+            )
+        )
+        and report.get("position_settable") is True
+        and valid_position
+        and report.get("actions") == ({"position": "known"} if execute else {})
+    )
+    if not base_valid:
+        return False
+    if not execute:
+        return returncode == 0 and report.get("manual_inspection_required") is False
+    after = report.get("window_after")
+    after_geometry = after.get("geometry") if isinstance(after, dict) else None
+    before_geometry = geometry
+    after_candidates = after.get("cg_candidates") if isinstance(after, dict) else None
+    valid_after_candidates = (
+        isinstance(after_candidates, list)
+        and 0 < len(after_candidates) <= 64
+        and all(
+            isinstance(candidate, dict)
+            and set(candidate) == {"number", "layer"}
+            and type(candidate.get("number")) is int
+            and candidate["number"] >= 0
+            and type(candidate.get("layer")) is int
+            and candidate["layer"] in {0, 3}
+            for candidate in after_candidates
+        )
+        and len({candidate["number"] for candidate in after_candidates})
+        == len(after_candidates)
+        and after_candidates
+        == sorted(
+            after_candidates,
+            key=lambda candidate: (candidate["number"], candidate["layer"]),
+        )
+    )
+    return (
+        returncode == 0
+        and report.get("preflight_sha256") == preflight_hash
+        and report.get("manual_inspection_required") is False
+        and isinstance(after, dict)
+        and after.get("identity") == identity
+        and after.get("role") == window.get("role")
+        and after.get("subrole") == window.get("subrole")
+        and after.get("title") == window.get("title")
+        and after.get("identifier") == window.get("identifier")
+        and after.get("document") == window.get("document")
+        and valid_after_candidates
+        and isinstance(after_geometry, dict)
+        and set(after_geometry) == {"x", "y", "width", "height"}
+        and all(
+            type(value) in (int, float) and math.isfinite(value)
+            for value in after_geometry.values()
+        )
+        and abs(after_geometry.get("x", math.inf) - requested["x"]) < 0.5
+        and abs(after_geometry.get("y", math.inf) - requested["y"]) < 0.5
+        and abs(after_geometry.get("width", math.inf) - before_geometry["width"])
+        < 0.001
+        and abs(after_geometry.get("height", math.inf) - before_geometry["height"])
+        < 0.001
+    )
+
+
 def _compile_helper(source: Path, binary: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -380,6 +540,7 @@ def _native_command(
     snapshot_launch_date: str | None = None,
     preflight_path: Path | None = None,
     preflight_hash: str | None = None,
+    position: tuple[float, float] | None = None,
 ) -> list[str]:
     command = [
         str(binary),
@@ -392,8 +553,10 @@ def _native_command(
         "--action",
         action,
     ]
-    if action in {"play", "stop"} or (
-        action == "focus-window" and preflight_path is not None
+    if (
+        action in {"play", "stop"}
+        or (action == "focus-window" and preflight_path is not None)
+        or (action == "position-window" and preflight_path is not None)
     ):
         command.append("--execute")
     if play_for_seconds is not None:
@@ -412,6 +575,10 @@ def _native_command(
         command.extend(("--snapshot-observed-at-utc", snapshot_observed_at_utc))
     if snapshot_launch_date is not None:
         command.extend(("--snapshot-launch-date", snapshot_launch_date))
+    if position is not None:
+        command.extend(
+            ("--position-x", repr(position[0]), "--position-y", repr(position[1]))
+        )
     if preflight_path is not None and preflight_hash is not None:
         command.extend(
             (
@@ -440,6 +607,8 @@ def run_live_transport(
     snapshot_launch_date: str | None = None,
     preflight_receipt_path: Path | None = None,
     preflight_sha256: str | None = None,
+    position_x: float | None = None,
+    position_y: float | None = None,
 ) -> dict:
     """Inspect by default; explicitly play briefly or stop one exact Set."""
     if platform.system() != "Darwin":
@@ -456,16 +625,36 @@ def run_live_transport(
         preflight_receipt_path,
         preflight_sha256,
     )
-    if action != "focus-window" and any(value is not None for value in focus_options):
-        raise ValueError("focus-window options require --action focus-window")
+    if action not in {"focus-window", "position-window"} and any(
+        value is not None for value in focus_options
+    ):
+        raise ValueError(
+            "window options require --action focus-window or position-window"
+        )
+    if action != "position-window" and (
+        position_x is not None or position_y is not None
+    ):
+        raise ValueError("position coordinates require --action position-window")
+    if (position_x is None) != (position_y is None):
+        raise ValueError("position-window requires both --position-x and --position-y")
+    if position_x is not None and (
+        type(position_x) not in (int, float)
+        or type(position_y) not in (int, float)
+        or not math.isfinite(position_x)
+        or not math.isfinite(position_y)
+    ):
+        raise ValueError("position coordinates must be finite numbers")
+    requested_position = (
+        (float(position_x), float(position_y)) if position_x is not None else None
+    )
     source_set = _set_file(set_path)
     if not execute:
-        if action == "focus-window":
+        if action in {"focus-window", "position-window"}:
             if play_for_seconds is not None or expected_count is not None:
-                raise ValueError("transport options are invalid for focus-window")
+                raise ValueError(f"transport options are invalid for {action}")
             if preflight_receipt_path is not None or preflight_sha256 is not None:
                 raise ValueError(
-                    "preflight receipt options are valid only for focus-window execution"
+                    f"preflight receipt options are valid only for {action} execution"
                 )
             selected_action = action
         elif (
@@ -478,28 +667,32 @@ def run_live_transport(
         else:
             selected_action = "inspect"
     else:
-        if action not in {"play", "stop", "focus-window"}:
-            raise ValueError("--execute requires --action play, stop, or focus-window")
+        if action not in {"play", "stop", "focus-window", "position-window"}:
+            raise ValueError(
+                "--execute requires --action play, stop, focus-window, or position-window"
+            )
         if receipt_path is None:
             raise ValueError("--execute requires a new --receipt path")
-        if action == "focus-window":
+        if action in {"focus-window", "position-window"}:
             if play_for_seconds is not None or expected_count is not None:
                 raise ValueError("transport options are invalid for focus-window")
             if type(expected_generation) is not int or expected_generation <= 0:
-                raise ValueError(
-                    "focus-window requires the inspected process generation"
-                )
+                raise ValueError(f"{action} requires the inspected process generation")
             if (
                 preflight_receipt_path is None
                 or not isinstance(preflight_sha256, str)
                 or len(preflight_sha256) != 64
             ):
                 raise ValueError(
-                    "focus-window execution requires a preflight receipt and its reviewed SHA-256"
+                    f"{action} execution requires a preflight receipt and its reviewed SHA-256"
                 )
             if window_identity is not None:
                 raise ValueError(
-                    "focus-window execution uses the identity pinned in its preflight receipt"
+                    f"{action} execution uses the identity pinned in its preflight receipt"
+                )
+            if requested_position is not None:
+                raise ValueError(
+                    "position coordinates are valid only during position-window preflight"
                 )
         elif action == "play":
             if (
@@ -525,31 +718,35 @@ def run_live_transport(
     initial = _initial_receipt(
         selected_action, pid, expected_bundle_id, source_set, play_for_seconds
     )
-    if selected_action == "focus-window" and not execute:
+    if selected_action in {"focus-window", "position-window"} and not execute:
         initial["read_only"] = True
         initial["actions"] = {}
         if not isinstance(window_identity, str) or not window_identity.isdecimal():
             raise ValueError(
-                "focus-window preflight requires a CFHash window identity from a fresh AX snapshot"
+                f"{selected_action} preflight requires a CFHash window identity from a fresh AX snapshot"
             )
         if type(expected_generation) is not int or expected_generation <= 0:
             raise ValueError(
-                "focus-window preflight requires the inspected process generation"
+                f"{selected_action} preflight requires the inspected process generation"
             )
         if (
             not isinstance(snapshot_observed_at_utc, str)
             or not snapshot_observed_at_utc
         ):
             raise ValueError(
-                "focus-window preflight requires the fresh AX snapshot observation time"
+                f"{selected_action} preflight requires the fresh AX snapshot observation time"
             )
         if not isinstance(snapshot_launch_date, str) or not snapshot_launch_date:
             raise ValueError(
-                "focus-window preflight requires the AX snapshot process launch date"
+                f"{selected_action} preflight requires the AX snapshot process launch date"
             )
         if receipt_path is None:
-            raise ValueError("focus-window preflight requires a new receipt path")
-    if selected_action == "focus-window" and execute:
+            raise ValueError(f"{selected_action} preflight requires a new receipt path")
+        if selected_action == "position-window" and requested_position is None:
+            raise ValueError(
+                "position-window preflight requires finite --position-x and --position-y"
+            )
+    if selected_action in {"focus-window", "position-window"} and execute:
         preflight_path = preflight_receipt_path
         if (
             preflight_path is None
@@ -557,15 +754,36 @@ def run_live_transport(
             or preflight_path.is_symlink()
         ):
             raise ValueError(
-                "focus-window preflight receipt must be an existing regular file"
+                f"{selected_action} preflight receipt must be an existing regular file"
             )
         actual_hash = hashlib.sha256(preflight_path.read_bytes()).hexdigest()
         if actual_hash != preflight_sha256:
             raise ValueError(
-                "focus-window preflight receipt hash does not match the reviewed SHA-256"
+                f"{selected_action} preflight receipt hash does not match the reviewed SHA-256"
             )
+        if selected_action == "position-window":
+            try:
+                pinned = json.loads(preflight_path.read_text(encoding="utf-8"))
+                pinned_position = pinned["requested_position"]
+                requested_position = (
+                    float(pinned_position["x"]),
+                    float(pinned_position["y"]),
+                )
+                if not all(math.isfinite(value) for value in requested_position):
+                    raise ValueError
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+            ) as error:
+                raise ValueError(
+                    "position-window preflight has no valid pinned destination"
+                ) from error
     identity = None
-    if execute or selected_action == "focus-window":
+    if execute or selected_action in {"focus-window", "position-window"}:
         receipt_path = _safe_new_path(receipt_path, "receipt")
         identity = _write_new_json(receipt_path, initial)
 
@@ -591,7 +809,7 @@ def run_live_transport(
                 initial["error"] = f"native helper compile failed: {error}"
                 return (
                     save(initial)
-                    if execute or selected_action == "focus-window"
+                    if execute or selected_action in {"focus-window", "position-window"}
                     else initial
                 )
             if compilation.returncode:
@@ -602,7 +820,7 @@ def run_live_transport(
                 )
                 return (
                     save(initial)
-                    if execute or selected_action == "focus-window"
+                    if execute or selected_action in {"focus-window", "position-window"}
                     else initial
                 )
 
@@ -657,6 +875,9 @@ def run_live_transport(
                 snapshot_launch_date=snapshot_launch_date,
                 preflight_path=preflight_receipt_path,
                 preflight_hash=preflight_sha256,
+                position=requested_position
+                if selected_action == "position-window" and not execute
+                else None,
             )
             try:
                 result = subprocess.run(
@@ -682,15 +903,20 @@ def run_live_transport(
                     uncertain["error"] = (
                         "native inspection timed out; transport observation is unavailable"
                     )
-                elif selected_action == "focus-window":
+                elif selected_action in {"focus-window", "position-window"}:
                     if execute:
-                        for name in ("activate", "raise"):
+                        names = (
+                            ("position",)
+                            if selected_action == "position-window"
+                            else ("activate", "raise")
+                        )
+                        for name in names:
                             uncertain["actions"][name] = {
                                 "attempted": True,
                                 "outcome": "unknown",
                             }
                         uncertain["error"] = (
-                            "focus helper timed out; inspect the Live window before retry"
+                            f"{selected_action} helper timed out; inspect the Live window before retry"
                         )
                         uncertain["manual_inspection_required"] = True
                     else:
@@ -710,20 +936,20 @@ def run_live_transport(
                         "attempted": True,
                         "outcome": "unknown",
                     }
-                if selected_action != "focus-window":
+                if selected_action not in {"focus-window", "position-window"}:
                     uncertain["manual_inspection_required"] = (
                         selected_action != "inspect"
                     )
                 return (
                     save(uncertain)
-                    if execute or selected_action == "focus-window"
+                    if execute or selected_action in {"focus-window", "position-window"}
                     else uncertain
                 )
             try:
                 report = json.loads(result.stdout)
             except json.JSONDecodeError:
                 report = None
-            if selected_action == "focus-window":
+            if selected_action in {"focus-window", "position-window"}:
                 focus_identity = window_identity
                 if execute:
                     try:
@@ -739,18 +965,33 @@ def run_live_transport(
                         TypeError,
                     ) as error:
                         raise ValueError(
-                            "focus-window preflight receipt has no valid selected identity"
+                            f"{selected_action} preflight receipt has no valid selected identity"
                         ) from error
-                valid = _valid_focus_report(
-                    report,
-                    execute=execute,
-                    pid=pid,
-                    bundle_id=expected_bundle_id,
-                    set_path=source_set,
-                    identity=focus_identity or "",
-                    generation=expected_generation or 0,
-                    preflight_hash=preflight_sha256,
-                    returncode=result.returncode,
+                valid = (
+                    _valid_position_report(
+                        report,
+                        execute=execute,
+                        pid=pid,
+                        bundle_id=expected_bundle_id,
+                        set_path=source_set,
+                        identity=focus_identity or "",
+                        generation=expected_generation or 0,
+                        position=requested_position,
+                        preflight_hash=preflight_sha256,
+                        returncode=result.returncode,
+                    )
+                    if selected_action == "position-window"
+                    else _valid_focus_report(
+                        report,
+                        execute=execute,
+                        pid=pid,
+                        bundle_id=expected_bundle_id,
+                        set_path=source_set,
+                        identity=focus_identity or "",
+                        generation=expected_generation or 0,
+                        preflight_hash=preflight_sha256,
+                        returncode=result.returncode,
+                    )
                 )
             else:
                 valid = _valid_report(
@@ -785,9 +1026,14 @@ def run_live_transport(
                         "attempted": True,
                         "outcome": "unknown",
                     }
-                if selected_action == "focus-window":
+                if selected_action in {"focus-window", "position-window"}:
                     if execute:
-                        for name in ("activate", "raise"):
+                        names = (
+                            ("position",)
+                            if selected_action == "position-window"
+                            else ("activate", "raise")
+                        )
+                        for name in names:
                             uncertain["actions"][name] = {
                                 "attempted": True,
                                 "outcome": "unknown",
@@ -813,15 +1059,19 @@ def run_live_transport(
                     return uncertain
                 return (
                     save(uncertain)
-                    if execute or selected_action == "focus-window"
+                    if execute or selected_action in {"focus-window", "position-window"}
                     else uncertain
                 )
             return (
-                save(report) if execute or selected_action == "focus-window" else report
+                save(report)
+                if execute or selected_action in {"focus-window", "position-window"}
+                else report
             )
     except OSError as error:
         initial["phase"] = "native-helper-launch"
         initial["error"] = f"native helper launch failed: {error}"
         return (
-            save(initial) if execute or selected_action == "focus-window" else initial
+            save(initial)
+            if execute or selected_action in {"focus-window", "position-window"}
+            else initial
         )
