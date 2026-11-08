@@ -722,6 +722,30 @@ func focusReceiptIsCurrent(_ prior: [String: Any], pid: pid_t, bundleID: String,
     return age >= -2 && age <= 30
 }
 
+func focusWindowPreflightReport(observedAt: String, snapshotObservedAt: String,
+                                snapshotLaunchDate: String, pid: pid_t,
+                                bundleID: String, generation: Int64, setURL: String,
+                                setWindowIdentity: String,
+                                window: [String: Any]) -> [String: Any] {
+    [
+        "format": "codex-devtools-live-focus-window-preflight-v1",
+        "status": "preflight_ready",
+        "read_only": true,
+        "observed_at_utc": observedAt,
+        "snapshot_observed_at_utc": snapshotObservedAt,
+        "snapshot_launch_date": snapshotLaunchDate,
+        "target": ["pid": pid, "bundle_identifier": bundleID, "process_generation": generation],
+        "set_url": setURL,
+        "set_window_identity": setWindowIdentity,
+        "window": window,
+        "actions": [:],
+    ]
+}
+
+func successfulHelperStatus(_ status: String?) -> Bool {
+    ["complete", "observed", "preflight_ready"].contains(status ?? "")
+}
+
 func focusWindowAction(_ app: AXUIElement, process: NSRunningApplication, url: URL) throws -> [String: Any] {
     phase = "focus-window-preflight"
     let gen = try processGeneration(process)
@@ -768,12 +792,17 @@ func focusWindowAction(_ app: AXUIElement, process: NSRunningApplication, url: U
         try require(snapshotAge >= -2 && snapshotAge <= 30, "AX snapshot is stale or from the future")
         try require(snapshotGeneration == processGenerationAtSnapshotPrecision && processGenerationAtSnapshotPrecision == gen / 1_000,
                     "AX snapshot belongs to a different Live process generation")
-        return ["format": "codex-devtools-live-focus-window-preflight-v1", "status": "preflight_ready",
-                "read_only": true, "observed_at_utc": timestamp.string(from: Date()),
-                "snapshot_observed_at_utc": options.snapshotObservedAtUTC,
-                "snapshot_launch_date": options.snapshotLaunchDate,
-                "target": ["pid": options.pid, "bundle_identifier": options.bundleID, "process_generation": gen],
-                "set_url": url.absoluteString, "set_window_identity": setWindowIdentity, "window": record]
+        return focusWindowPreflightReport(
+            observedAt: timestamp.string(from: Date()),
+            snapshotObservedAt: options.snapshotObservedAtUTC,
+            snapshotLaunchDate: options.snapshotLaunchDate,
+            pid: options.pid,
+            bundleID: options.bundleID,
+            generation: gen,
+            setURL: url.absoluteString,
+            setWindowIdentity: setWindowIdentity,
+            window: record
+        )
     }
     guard let prior,
           focusReceiptIsCurrent(prior, pid: options.pid, bundleID: options.bundleID,
@@ -1212,7 +1241,7 @@ do {
         ]
     }
     let result = try run()
-    let success = result["status"] as? String == "complete" || result["status"] as? String == "observed"
+    let success = successfulHelperStatus(result["status"] as? String)
     emit(result, code: success ? 0 : 1)
 } catch {
     let attempted = actions.values.contains { ($0["outcome"] as? String) != "not_attempted" && ($0["outcome"] as? String) != "verified_noop" }
