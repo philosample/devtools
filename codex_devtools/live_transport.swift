@@ -22,6 +22,12 @@ struct Options {
     var expectedCount = 0
     var baselinePath = ""
     var baselineHash = ""
+    var windowIdentity = ""
+    var expectedGeneration: Int64?
+    var snapshotObservedAtUTC = ""
+    var snapshotLaunchDate = ""
+    var preflightReceipt = ""
+    var preflightHash = ""
 }
 
 struct TransportFailure: Error {
@@ -83,7 +89,7 @@ func parseOptions() throws -> Options {
     while index < args.count {
         let key = args[index]
         if key == "--help" {
-            print("Usage: live_transport.swift --pid PID --bundle-id ID --set /path/Set.als [--execute --action play --play-for-seconds 1..15 --expected-count N --baseline FILE --baseline-sha256 SHA256 | --execute --action stop]")
+            print("Usage: live_transport.swift --pid PID --bundle-id ID --set /path/Set.als [--action focus-window --window-identity CFHASH --expected-generation GENERATION [--receipt FILE] | --execute --action focus-window --expected-generation GENERATION --preflight-receipt FILE --preflight-sha256 SHA256 --receipt FILE | --execute --action play|stop]")
             exit(0)
         }
         if key == "--execute" {
@@ -116,16 +122,37 @@ func parseOptions() throws -> Options {
             result.expectedCount = parsed
         case "--baseline": result.baselinePath = value
         case "--baseline-sha256": result.baselineHash = value
+        case "--window-identity": result.windowIdentity = value
+        case "--expected-generation":
+            guard let parsed = Int64(value), parsed > 0 else { throw TransportFailure(phase: "arguments", message: "expected generation must be positive") }
+            result.expectedGeneration = parsed
+        case "--snapshot-observed-at-utc": result.snapshotObservedAtUTC = value
+        case "--snapshot-launch-date": result.snapshotLaunchDate = value
+        case "--preflight-receipt": result.preflightReceipt = value
+        case "--preflight-sha256": result.preflightHash = value
         default:
             throw TransportFailure(phase: "arguments", message: "unknown option: \(key)")
         }
         index += 2
     }
     guard result.pid > 0, !result.bundleID.isEmpty, !result.setPath.isEmpty,
-          ["inspect", "play", "stop"].contains(result.action) else {
+          ["inspect", "play", "stop", "focus-window"].contains(result.action) else {
         throw TransportFailure(phase: "arguments", message: "PID, bundle ID, exact Set path and a supported action are required")
     }
-    if result.action == "inspect" {
+    if result.action == "focus-window" {
+        guard result.expectedGeneration != nil else { throw TransportFailure(phase: "arguments", message: "focus-window requires process generation") }
+        if result.execute {
+            guard !result.preflightReceipt.isEmpty, result.preflightHash.count == 64, result.windowIdentity.isEmpty else {
+                throw TransportFailure(phase: "arguments", message: "focus execution requires a hashed preflight receipt")
+            }
+        } else {
+            guard !result.windowIdentity.isEmpty, result.windowIdentity.utf8.count <= 64,
+                  result.windowIdentity.allSatisfy({ $0.isNumber }),
+                  !result.snapshotObservedAtUTC.isEmpty, !result.snapshotLaunchDate.isEmpty else {
+                throw TransportFailure(phase: "arguments", message: "focus preflight requires a CFHash identity and fresh AX snapshot metadata")
+            }
+        }
+    } else if result.action == "inspect" {
         guard !result.execute else { throw TransportFailure(phase: "arguments", message: "inspect is read-only") }
     } else {
         guard result.execute else { throw TransportFailure(phase: "arguments", message: "mutating actions require --execute") }
@@ -302,10 +329,7 @@ func validateControlIdentity(_ element: AXUIElement, name: String) throws {
 }
 
 func appWindows(_ app: AXUIElement) throws -> [AXUIElement] {
-    guard let raw = try axValue(app, kAXWindowsAttribute as String),
-          let windows = raw as? [AXUIElement], !windows.isEmpty, windows.count <= maxWindows else {
-        throw TransportFailure(phase: phase, message: "target AX window inventory is unavailable or out of bounds")
-    }
+    let windows = try rawAppWindows(app)
     for window in windows {
         let kind = try role(window)
         let subrole = optionalString(window, kAXSubroleAttribute as String) ?? ""
@@ -319,6 +343,39 @@ func appWindows(_ app: AXUIElement) throws -> [AXUIElement] {
         }
     }
     return windows
+}
+
+func rawAppWindows(_ app: AXUIElement) throws -> [AXUIElement] {
+    guard let raw = try axValue(app, kAXWindowsAttribute as String),
+          let windows = raw as? [AXUIElement], !windows.isEmpty, windows.count <= maxWindows else {
+        throw TransportFailure(phase: phase, message: "target AX window inventory is unavailable or out of bounds")
+    }
+    return windows
+}
+
+func focusWindows(_ app: AXUIElement) throws -> [AXUIElement] {
+    let windows = try rawAppWindows(app)
+    for window in windows {
+        let kind = try role(window)
+        let subrole = optionalString(window, kAXSubroleAttribute as String) ?? ""
+        let blocking = kind == "AXDialog" || kind == "AXSheet" || kind == "AXPopover" ||
+            ["AXDialog", "AXSystemDialog"].contains(subrole)
+        if blocking {
+            let allowed = try isObservedWindowSharingOverlay(window, windowRole: kind, subrole: subrole)
+            try require(allowed, "focus-window refuses while an unrecognized dialog, sheet or popover is open")
+        }
+    }
+    return windows
+}
+
+func exactFocusSetWindow(_ app: AXUIElement, url: URL) throws -> AXUIElement {
+    var matches: [AXUIElement] = []
+    for window in try focusWindows(app) where try role(window) == (kAXWindowRole as String) {
+        guard let document = optionalString(window, kAXDocumentAttribute as String) else { continue }
+        if try sameSetURL(document, expected: url) { matches.append(window) }
+    }
+    try require(matches.count == 1, "exact current Set URL must identify one AX window")
+    return matches[0]
 }
 
 func isObservedWindowSharingOverlay(_ window: AXUIElement, windowRole: String, subrole: String) throws -> Bool {
@@ -440,6 +497,13 @@ func currentProcessMatches(_ pid: pid_t, bundleID: String) -> Bool {
     return current.bundleIdentifier == bundleID && !current.isTerminated
 }
 
+func processGeneration(_ process: NSRunningApplication) throws -> Int64 {
+    guard let launchDate = process.launchDate else { throw TransportFailure(phase: phase, message: "Live process generation is unavailable") }
+    let value = launchDate.timeIntervalSince1970 * 1_000_000
+    guard value.isFinite, value > 0, value < Double(Int64.max) else { throw TransportFailure(phase: phase, message: "Live process generation is invalid") }
+    return Int64(value.rounded(.towardZero))
+}
+
 func pumpRunLoopTurn(until deadline: UInt64) {
     let now = DispatchTime.now().uptimeNanoseconds
     guard now < deadline else { return }
@@ -518,7 +582,7 @@ func acknowledgementDeadline(maxSeconds: Double, cappedBy deadline: UInt64) -> U
     return min(deadline, overflow ? UInt64.max : uncapped)
 }
 
-func onscreenWindow(pid: pid_t, title: String) throws -> Bool {
+func onscreenWindow(pid: pid_t, title: String, number: Int? = nil) throws -> Bool {
     let flags: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
     guard let entries = CGWindowListCopyWindowInfo(flags, kCGNullWindowID) as? [[String: Any]] else {
         throw TransportFailure(phase: phase, message: "current-desktop on-screen window inventory is unavailable")
@@ -527,6 +591,7 @@ func onscreenWindow(pid: pid_t, title: String) throws -> Bool {
         guard (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
               (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
               entry[kCGWindowName as String] as? String == title,
+              number == nil || (entry[kCGWindowNumber as String] as? NSNumber)?.intValue == number,
               let bounds = entry[kCGWindowBounds as String] as? [String: NSNumber],
               (bounds["Width"]?.doubleValue ?? 0) > 0,
               (bounds["Height"]?.doubleValue ?? 0) > 0 else { return false }
@@ -535,13 +600,13 @@ func onscreenWindow(pid: pid_t, title: String) throws -> Bool {
     return matches.count == 1
 }
 
-func raiseAndFocus(_ app: AXUIElement, pid: pid_t, process: NSRunningApplication, window: AXUIElement, title: String) throws {
-    try require(onscreenWindow(pid: pid, title: title), "exact target window is not proven on the current desktop")
+func raiseAndFocus(_ app: AXUIElement, pid: pid_t, process: NSRunningApplication, window: AXUIElement, title: String, number: Int? = nil) throws {
+    try require(onscreenWindow(pid: pid, title: title, number: number), "exact target window is not proven on the current desktop")
     if !frontmost(pid) {
         try require(process.activate(), "exact Live process activation failed")
     }
     try require(waitUntil({ frontmost(pid) }, seconds: 5), "exact Live PID did not become frontmost")
-    try require(onscreenWindow(pid: pid, title: title), "exact target window left the current desktop during activation")
+    try require(onscreenWindow(pid: pid, title: title, number: number), "exact target window left the current desktop during activation")
     if !focusedWindowIs(app, window) {
         let supported = try actionNames(window)
         try require(supported.contains(kAXRaiseAction as String), "exact target window does not support AXRaise")
@@ -549,8 +614,190 @@ func raiseAndFocus(_ app: AXUIElement, pid: pid_t, process: NSRunningApplication
         try require(error == .success, "raising the exact target window failed (\(error.rawValue))")
     }
     try require(waitUntil({
-        frontmost(pid) && focusedWindowIs(app, window) && ((try? onscreenWindow(pid: pid, title: title)) == true)
+        frontmost(pid) && focusedWindowIs(app, window) && ((try? onscreenWindow(pid: pid, title: title, number: number)) == true)
     }, seconds: 5), "exact target window did not become focused on the current desktop")
+}
+
+func windowNumber(_ window: AXUIElement) -> Int? {
+    guard let raw = try? axValue(window, "AXWindowNumber"), let number = raw as? NSNumber,
+          number.doubleValue.isFinite, number.doubleValue >= 0,
+          number.doubleValue.rounded(.towardZero) == number.doubleValue else { return nil }
+    return number.intValue
+}
+
+func windowGeometry(_ window: AXUIElement) throws -> [String: Double] {
+    guard let positionRaw = try axValue(window, kAXPositionAttribute as String),
+          CFGetTypeID(positionRaw) == AXValueGetTypeID(),
+          let sizeRaw = try axValue(window, kAXSizeAttribute as String),
+          CFGetTypeID(sizeRaw) == AXValueGetTypeID() else {
+        throw TransportFailure(phase: phase, message: "target window geometry is unavailable")
+    }
+    let position = positionRaw as! AXValue
+    let size = sizeRaw as! AXValue
+    try require(AXValueGetType(position) == .cgPoint && AXValueGetType(size) == .cgSize,
+                "target window geometry has an unexpected type")
+    var point = CGPoint.zero
+    var dimensions = CGSize.zero
+    guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &dimensions),
+          point.x.isFinite, point.y.isFinite, dimensions.width.isFinite, dimensions.height.isFinite,
+          dimensions.width > 0, dimensions.height > 0 else {
+        throw TransportFailure(phase: phase, message: "target window geometry is invalid or minimized")
+    }
+    return ["x": point.x, "y": point.y, "width": dimensions.width, "height": dimensions.height]
+}
+
+func focusWindowRecord(_ window: AXUIElement, app: AXUIElement, pid: pid_t, url: URL, generation: Int64) throws -> [String: Any] {
+    try require(try role(window) == (kAXWindowRole as String), "selected AX element is not a window")
+    let subrole = optionalString(window, kAXSubroleAttribute as String) ?? ""
+    try require(!["AXDialog", "AXSheet", "AXPopover", "AXSystemDialog"].contains(subrole), "dialogs and sheets cannot be focused")
+    if let document = optionalString(window, kAXDocumentAttribute as String) {
+        try require(try sameSetURL(document, expected: url), "target window belongs to a different Set")
+    }
+    guard let minimized = try axValue(window, "AXMinimized") as? NSNumber else {
+        throw TransportFailure(phase: phase, message: "target window minimized state is unavailable")
+    }
+    try require(!minimized.boolValue, "minimized windows cannot be focused")
+    let title = try stringAttribute(window, kAXTitleAttribute as String)
+    let identifier = optionalString(window, "AXIdentifier")
+    let geometry = try windowGeometry(window)
+    let number = windowNumber(window)
+    let cg = try currentDesktopWindow(pid: pid, title: title, number: number, geometry: geometry)
+    return [
+        "identity": String(CFHash(window)), "role": try role(window), "subrole": subrole,
+        "title": title, "identifier": identifier as Any? ?? NSNull(),
+        "document": optionalString(window, kAXDocumentAttribute as String) as Any? ?? NSNull(),
+        "geometry": geometry, "window_number": number as Any? ?? NSNull(),
+        "cg_window_number": cg,
+    ]
+}
+
+func currentDesktopWindow(pid: pid_t, title: String, number: Int?, geometry: [String: Double]) throws -> Int {
+    let flags: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+    guard let entries = CGWindowListCopyWindowInfo(flags, kCGNullWindowID) as? [[String: Any]] else {
+        throw TransportFailure(phase: phase, message: "current desktop window inventory is unavailable")
+    }
+    let matches = entries.filter { entry in
+        guard (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+              (entry[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+              entry[kCGWindowName as String] as? String == title,
+              let candidate = entry[kCGWindowNumber as String] as? NSNumber,
+              number == nil || candidate.intValue == number,
+              let bounds = entry[kCGWindowBounds as String] as? [String: NSNumber],
+              (bounds["Width"]?.doubleValue ?? 0) > 0, (bounds["Height"]?.doubleValue ?? 0) > 0 else { return false }
+        return cgBoundsMatch(bounds, geometry: geometry)
+    }
+    try require(matches.count == 1, "target window is missing, ambiguous, minimized or off the current desktop")
+    return (matches[0][kCGWindowNumber as String] as! NSNumber).intValue
+}
+
+func cgBoundsMatch(_ bounds: [String: NSNumber], geometry: [String: Double]) -> Bool {
+    let pairs = [("X", "x"), ("Y", "y"), ("Width", "width"), ("Height", "height")]
+    for (cgKey, axKey) in pairs {
+        guard let actual = bounds[cgKey]?.doubleValue, actual.isFinite,
+              let expected = geometry[axKey], expected.isFinite,
+              abs(actual - expected) < 2 else { return false }
+    }
+    return (bounds["Width"]?.doubleValue ?? 0) > 0 && (bounds["Height"]?.doubleValue ?? 0) > 0
+}
+
+func focusReceiptIsCurrent(_ prior: [String: Any], pid: pid_t, bundleID: String,
+                           generation: Int64, setURL: String, setWindowIdentity: String, identity: String,
+                           currentWindow: [String: Any], now: Date) -> Bool {
+    guard prior["format"] as? String == "codex-devtools-live-focus-window-preflight-v1",
+          prior["status"] as? String == "preflight_ready",
+          prior["read_only"] as? Bool == true,
+          prior["set_url"] as? String == setURL,
+          let target = prior["target"] as? [String: Any],
+          (target["pid"] as? NSNumber)?.intValue == Int(pid),
+          target["bundle_identifier"] as? String == bundleID,
+          (target["process_generation"] as? NSNumber)?.int64Value == generation,
+          prior["set_window_identity"] as? String == setWindowIdentity,
+          let priorWindow = prior["window"] as? [String: Any],
+          priorWindow["identity"] as? String == identity,
+          NSDictionary(dictionary: priorWindow).isEqual(to: currentWindow) else { return false }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let observed = formatter.date(from: prior["observed_at_utc"] as? String ?? "") else { return false }
+    let age = now.timeIntervalSince(observed)
+    return age >= -2 && age <= 30
+}
+
+func focusWindowAction(_ app: AXUIElement, process: NSRunningApplication, url: URL) throws -> [String: Any] {
+    phase = "focus-window-preflight"
+    let gen = try processGeneration(process)
+    try require(options.expectedGeneration == gen, "Live process generation differs from the caller's inspection")
+    let setWindow = try exactFocusSetWindow(app, url: url)
+    let setWindowIdentity = String(CFHash(setWindow))
+    var prior: [String: Any]?
+    if options.execute {
+        let receiptURL = URL(fileURLWithPath: options.preflightReceipt)
+        var info = stat()
+        guard options.preflightReceipt.withCString({ lstat($0, &info) }) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              let data = try? Data(contentsOf: receiptURL),
+              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == options.preflightHash,
+              let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw TransportFailure(phase: phase, message: "preflight receipt is missing, changed, or not valid JSON")
+        }
+        prior = parsed
+        guard let selected = (parsed["window"] as? [String: Any])?["identity"] as? String,
+              selected.allSatisfy({ $0.isNumber }) else {
+            throw TransportFailure(phase: phase, message: "preflight receipt has no valid selected AX identity")
+        }
+        options.windowIdentity = selected
+    }
+    let matches = try focusWindows(app).filter { String(CFHash($0)) == options.windowIdentity }
+    try require(matches.count == 1, "selected window identity is missing or ambiguous")
+    let window = matches[0]
+    let record = try focusWindowRecord(window, app: app, pid: options.pid, url: url, generation: gen)
+    let timestamp = ISO8601DateFormatter()
+    timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if !options.execute {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let snapshotDate = formatter.date(from: options.snapshotObservedAtUTC),
+              let snapshotLaunch = formatter.date(from: options.snapshotLaunchDate) else {
+            throw TransportFailure(phase: phase, message: "AX snapshot observation or launch date is invalid")
+        }
+        let snapshotAge = Date().timeIntervalSince(snapshotDate)
+        let snapshotGeneration = Int64((snapshotLaunch.timeIntervalSince1970 * 1_000).rounded(.towardZero))
+        guard let processLaunch = process.launchDate else {
+            throw TransportFailure(phase: phase, message: "Live launch date is unavailable")
+        }
+        let processGenerationAtSnapshotPrecision = Int64((processLaunch.timeIntervalSince1970 * 1_000).rounded(.towardZero))
+        try require(snapshotAge >= -2 && snapshotAge <= 30, "AX snapshot is stale or from the future")
+        try require(snapshotGeneration == processGenerationAtSnapshotPrecision && processGenerationAtSnapshotPrecision == gen / 1_000,
+                    "AX snapshot belongs to a different Live process generation")
+        return ["format": "codex-devtools-live-focus-window-preflight-v1", "status": "preflight_ready",
+                "read_only": true, "observed_at_utc": timestamp.string(from: Date()),
+                "snapshot_observed_at_utc": options.snapshotObservedAtUTC,
+                "snapshot_launch_date": options.snapshotLaunchDate,
+                "target": ["pid": options.pid, "bundle_identifier": options.bundleID, "process_generation": gen],
+                "set_url": url.absoluteString, "set_window_identity": setWindowIdentity, "window": record]
+    }
+    guard let prior,
+          focusReceiptIsCurrent(prior, pid: options.pid, bundleID: options.bundleID,
+                                generation: gen, setURL: url.absoluteString,
+                                setWindowIdentity: setWindowIdentity,
+                                identity: options.windowIdentity, currentWindow: record, now: Date()) else {
+        throw TransportFailure(phase: phase, message: "preflight is stale or target window identity, bounds or metadata changed")
+    }
+    try require(currentProcessMatches(options.pid, bundleID: options.bundleID), "Live process changed before focus")
+    try require(processGeneration(process) == gen, "Live process generation changed before focus")
+    try raiseAndFocus(app, pid: options.pid, process: process, window: window,
+                      title: record["title"] as! String, number: record["cg_window_number"] as? Int)
+    try require(currentProcessMatches(options.pid, bundleID: options.bundleID) && processGeneration(process) == gen,
+                "Live process changed during focus")
+    let freshSetWindow = try exactFocusSetWindow(app, url: url)
+    try require(CFHash(freshSetWindow) == CFHash(setWindow), "exact current Set window identity changed during focus")
+    let after = try focusWindowRecord(window, app: app, pid: options.pid, url: url, generation: gen)
+    try require(NSDictionary(dictionary: record).isEqual(to: after) && frontmost(options.pid) && focusedWindowIs(app, window),
+                "exact target window changed or did not remain focused")
+    return ["format": "codex-devtools-live-focus-window-result-v1", "status": "complete",
+            "read_only": false, "target": ["pid": options.pid, "bundle_identifier": options.bundleID, "process_generation": gen], "set_url": url.absoluteString,
+            "set_window_identity": setWindowIdentity,
+            "preflight_sha256": options.preflightHash, "window": after,
+            "actions": ["activate": "known", "raise": "known"]]
 }
 
 func controlsState(_ controls: [String: Control]) -> [String: Any] {
@@ -704,6 +951,9 @@ func run() throws -> [String: Any] {
         throw TransportFailure(phase: phase, message: "exact Live PID or bundle identity is unavailable")
     }
     let app = AXUIElementCreateApplication(options.pid)
+    if options.action == "focus-window" {
+        return try focusWindowAction(app, process: process, url: pathURL)
+    }
     var setWindow = try exactSetWindow(app, url: pathURL)
     let setTitle = try stringAttribute(setWindow, kAXTitleAttribute as String)
     var controls = try exactControls(setWindow)

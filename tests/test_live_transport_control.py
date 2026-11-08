@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import subprocess
@@ -11,6 +12,8 @@ from unittest.mock import patch
 from codex_devtools.cli import build_parser, main
 from codex_devtools.live_transport_control import (
     FORMAT,
+    _native_command,
+    _valid_focus_report,
     _valid_report,
     run_live_transport,
 )
@@ -137,6 +140,341 @@ def transport_report(path, action, *, seconds=None, status="complete"):
 
 
 class LiveTransportControlTests(unittest.TestCase):
+    def test_focus_window_cli_preflight_and_execute_arguments_are_explicit(self):
+        parser = build_parser()
+        base = [
+            "ax",
+            "live-transport",
+            "--pid",
+            str(PID),
+            "--expected-bundle-id",
+            BUNDLE,
+            "--set",
+            "/private/tmp/recall.als",
+            "--action",
+            "focus-window",
+            "--expected-generation",
+            "123456",
+            "--snapshot-observed-at-utc",
+            "2026-11-08T12:00:00.000Z",
+            "--snapshot-launch-date",
+            "2026-11-08T11:00:00.000Z",
+        ]
+        preflight = parser.parse_args(
+            base
+            + ["--window-identity", "98765", "--receipt", "/private/tmp/preflight.json"]
+        )
+        self.assertFalse(preflight.execute)
+        self.assertEqual(preflight.operation, "focus-window")
+        self.assertEqual(preflight.window_identity, "98765")
+        native = _native_command(
+            Path("/tmp/helper"),
+            pid=PID,
+            bundle_id=BUNDLE,
+            set_path=Path("/private/tmp/recall.als"),
+            action="focus-window",
+            play_for_seconds=None,
+            expected_count=None,
+            baseline_path=None,
+            baseline_hash=None,
+            window_identity="98765",
+            expected_generation=123456,
+            snapshot_observed_at_utc="2026-11-08T12:00:00.000Z",
+            snapshot_launch_date="2026-11-08T11:00:00.000Z",
+        )
+        self.assertNotIn("--execute", native)
+        self.assertIn("--window-identity", native)
+        execute = _native_command(
+            Path("/tmp/helper"),
+            pid=PID,
+            bundle_id=BUNDLE,
+            set_path=Path("/private/tmp/recall.als"),
+            action="focus-window",
+            play_for_seconds=None,
+            expected_count=None,
+            baseline_path=None,
+            baseline_hash=None,
+            expected_generation=123456,
+            preflight_path=Path("/private/tmp/preflight.json"),
+            preflight_hash="a" * 64,
+        )
+        self.assertIn("--execute", execute)
+        self.assertIn("--preflight-sha256", execute)
+        self.assertNotIn("--window-identity", execute)
+
+    def test_focus_window_report_is_bound_to_identity_generation_and_set(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            set_path = Path(temporary) / "recall.als"
+            set_path.write_bytes(b"test Set")
+            report = {
+                "format": "codex-devtools-live-focus-window-preflight-v1",
+                "status": "preflight_ready",
+                "read_only": True,
+                "actions": {},
+                "target": {
+                    "pid": PID,
+                    "bundle_identifier": BUNDLE,
+                    "process_generation": 123456,
+                },
+                "set_url": set_path.as_uri(),
+                "set_window_identity": "11111",
+                "snapshot_observed_at_utc": "2026-11-08T12:00:00.000Z",
+                "snapshot_launch_date": "2026-11-08T11:00:00.000Z",
+                "window": {
+                    "identity": "1685072705",
+                    "role": "AXWindow",
+                    "subrole": "AXStandardWindow",
+                    "title": "TR-1000 Ctrl",
+                    "identifier": None,
+                    "document": None,
+                    "window_number": None,
+                    "cg_window_number": 555,
+                    "geometry": {"x": 1, "y": 2, "width": 300, "height": 200},
+                },
+            }
+            fields = {
+                "execute": False,
+                "pid": PID,
+                "bundle_id": BUNDLE,
+                "set_path": set_path,
+                "identity": "1685072705",
+                "generation": 123456,
+                "preflight_hash": None,
+                "returncode": 0,
+            }
+            self.assertTrue(_valid_focus_report(report, **fields))
+            report["target"]["process_generation"] += 1
+            self.assertFalse(_valid_focus_report(report, **fields))
+            report["target"]["process_generation"] = 123456
+            report["window"]["identity"] = "1685072657"
+            self.assertFalse(_valid_focus_report(report, **fields))
+
+    def test_focus_window_execution_refuses_changed_preflight_hash_before_native_compile(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            preflight = root / "preflight.json"
+            preflight.write_text("{}", encoding="utf-8")
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper"
+                ) as compile_helper,
+                self.assertRaisesRegex(ValueError, "hash does not match"),
+            ):
+                run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="focus-window",
+                    expected_generation=123456,
+                    preflight_receipt_path=preflight,
+                    preflight_sha256="0" * 64,
+                    receipt_path=root / "result.json",
+                    execute=True,
+                )
+            compile_helper.assert_not_called()
+
+    def test_focus_window_python_caller_runs_hash_pinned_two_stage_contract(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            preflight_path = root / "preflight.json"
+            result_path = root / "result.json"
+            target = {
+                "pid": PID,
+                "bundle_identifier": BUNDLE,
+                "process_generation": 123456,
+            }
+            window = {
+                "identity": "1685072705",
+                "role": "AXWindow",
+                "subrole": "AXStandardWindow",
+                "title": "TR-1000 Ctrl",
+                "identifier": None,
+                "document": None,
+                "window_number": None,
+                "cg_window_number": 555,
+                "geometry": {"x": 1, "y": 2, "width": 300, "height": 200},
+            }
+            preflight = {
+                "format": "codex-devtools-live-focus-window-preflight-v1",
+                "status": "preflight_ready",
+                "read_only": True,
+                "actions": {},
+                "target": target,
+                "set_url": set_path.as_uri(),
+                "set_window_identity": "11111",
+                "snapshot_observed_at_utc": "2026-11-08T12:00:00.000Z",
+                "snapshot_launch_date": "2026-11-08T11:00:00.000Z",
+                "window": window,
+            }
+            complete = {
+                "format": "codex-devtools-live-focus-window-result-v1",
+                "status": "complete",
+                "read_only": False,
+                "actions": {"activate": "known", "raise": "known"},
+                "target": target,
+                "set_url": set_path.as_uri(),
+                "preflight_sha256": "",
+                "set_window_identity": "11111",
+                "window": window,
+            }
+            results = [
+                subprocess.CompletedProcess(["native"], 0, json.dumps(preflight), ""),
+                subprocess.CompletedProcess(["native"], 0, json.dumps(complete), ""),
+            ]
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    side_effect=results,
+                ) as native_run,
+            ):
+                first = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="focus-window",
+                    window_identity="1685072705",
+                    expected_generation=123456,
+                    snapshot_observed_at_utc="2026-11-08T12:00:00.000Z",
+                    snapshot_launch_date="2026-11-08T11:00:00.000Z",
+                    receipt_path=preflight_path,
+                    execute=False,
+                )
+                digest = hashlib.sha256(preflight_path.read_bytes()).hexdigest()
+                complete["preflight_sha256"] = digest
+                results[1] = subprocess.CompletedProcess(
+                    ["native"], 0, json.dumps(complete), ""
+                )
+                second = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="focus-window",
+                    expected_generation=123456,
+                    preflight_receipt_path=preflight_path,
+                    preflight_sha256=digest,
+                    receipt_path=result_path,
+                    execute=True,
+                )
+            self.assertEqual(first["status"], "preflight_ready")
+            self.assertEqual(second["status"], "complete", second)
+            self.assertEqual(
+                json.loads(result_path.read_text(encoding="utf-8")), second
+            )
+            self.assertNotIn("--execute", native_run.call_args_list[0].args[0])
+            self.assertIn("--execute", native_run.call_args_list[1].args[0])
+            self.assertIn(digest, native_run.call_args_list[1].args[0])
+
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_swift_focus_receipt_policy_accepts_only_fresh_exact_target(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        start = source.index("func focusReceiptIsCurrent(")
+        end = source.index("\nfunc focusWindowAction(", start)
+        function = source[start:end]
+        harness = f"""
+import Foundation
+import ApplicationServices
+{function}
+let now = Date(timeIntervalSince1970: 1_800_000_000)
+let formatter = ISO8601DateFormatter()
+formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+let window: [String: Any] = ["identity":"1685072705", "role":"AXWindow", "subrole":"AXStandardWindow", "title":"TR-1000 Ctrl", "identifier":NSNull(), "document":NSNull(), "window_number":NSNull(), "cg_window_number":555, "geometry":["x":1.0,"y":2.0,"width":300.0,"height":200.0]]
+let receipt: [String: Any] = ["format":"codex-devtools-live-focus-window-preflight-v1", "status":"preflight_ready", "read_only":true, "observed_at_utc":formatter.string(from: now), "target":["pid":58198,"bundle_identifier":"com.ableton.live","process_generation":123456], "set_url":"file:///tmp/recall.als", "set_window_identity":"11111", "window":window]
+precondition(focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:window, now:now.addingTimeInterval(30)))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:window, now:now.addingTimeInterval(31)))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123457, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:window, now:now))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/other.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:window, now:now))
+var changed = window
+changed["title"] = "Other"
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"11111", identity:"1685072705", currentWindow:changed, now:now))
+precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.live", generation:123456, setURL:"file:///tmp/recall.als", setWindowIdentity:"22222", identity:"1685072705", currentWindow:window, now:now))
+"""
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            main_swift = root / "main.swift"
+            binary = root / "focus-policy"
+            main_swift.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                [
+                    "/usr/bin/xcrun",
+                    "swiftc",
+                    "-framework",
+                    "ApplicationServices",
+                    str(main_swift),
+                    "-o",
+                    str(binary),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_swift_cg_window_match_disambiguates_duplicate_title_and_size_by_position(
+        self,
+    ):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        start = source.index("func cgBoundsMatch(")
+        end = source.index("\nfunc focusReceiptIsCurrent(", start)
+        function = source[start:end]
+        main_swift = f"""
+import Foundation
+{function}
+let selected = ["x": 400.0, "y": 200.0, "width": 800.0, "height": 600.0]
+let first = ["X": NSNumber(value: 400), "Y": NSNumber(value: 200), "Width": NSNumber(value: 800), "Height": NSNumber(value: 600)]
+let duplicateTitleSameSizeElsewhere = ["X": NSNumber(value: 1400), "Y": NSNumber(value: 200), "Width": NSNumber(value: 800), "Height": NSNumber(value: 600)]
+precondition(cgBoundsMatch(first, geometry:selected))
+precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
+"""
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            source_path = root / "main.swift"
+            binary = root / "geometry-policy"
+            source_path.write_text(main_swift, encoding="utf-8")
+            compiled = subprocess.run(
+                ["/usr/bin/xcrun", "swiftc", str(source_path), "-o", str(binary)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_parser_keeps_command_and_operation_separate_and_defaults_to_inspect(self):
         parser = build_parser()
         args = parser.parse_args(
