@@ -631,12 +631,20 @@ class LiveTransportControlTests(unittest.TestCase):
         document_end = source.index("\nfunc selectedFocusWindow(", document_start)
         receipt_start = source.index("func focusReceiptIsCurrent(")
         receipt_end = source.index("\nfunc focusWindowPreflightReport(", receipt_start)
+        focus_ax_record_start = source.index("func focusWindowAXRecord(")
+        focus_cg_record_start = source.index(
+            "\nfunc focusWindowRecordWithCG(", focus_ax_record_start
+        )
         focus_record_start = source.index("func focusWindowRecord(")
         focus_record_end = source.index(
             "\nfunc validatedFocusWindowDocument(", focus_record_start
         )
         self.assertIn(
             "validatedFocusWindowDocument(optionalString(window, kAXDocumentAttribute as String))",
+            source[focus_ax_record_start:focus_cg_record_start],
+        )
+        self.assertIn(
+            "focusWindowRecordWithCG(focusWindowAXRecord(window), pid: pid)",
             source[focus_record_start:focus_record_end],
         )
         contract = "\n".join(
