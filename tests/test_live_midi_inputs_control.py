@@ -189,6 +189,35 @@ class InventoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 reconcile(baseline, seal(current), expected)
 
+    def test_unrelated_app_window_count_drift_preserves_complete_settings_restore(self):
+        baseline = matrix()
+        current = copy.deepcopy(baseline)
+        current["bounds"]["windows_observed"] = 3
+        current["checkboxes"][2]["value"] = 0
+        current = seal(current)
+        validate(current)
+
+        expected = historical_restore_expected(baseline, current)
+        self.assertEqual(expected["12"], 0)
+        self.assertEqual(
+            [row["identity"] for row in transition_plan(baseline, current, "restore")],
+            ["12"],
+        )
+
+        for mutation in (
+            lambda value: value["bounds"].update(elements_observed=41),
+            lambda value: value["bounds"].update(max_windows=63),
+            lambda value: value["bounds"].update(truncated=True),
+            lambda value: value["bounds"].update(windows_observed=65),
+            lambda value: value["bounds"].update(windows_observed=True),
+        ):
+            with self.subTest(mutation=mutation):
+                changed = copy.deepcopy(current)
+                mutation(changed)
+                changed = seal(changed)
+                with self.assertRaisesRegex(ValueError, "inventory changed: bounds"):
+                    historical_restore_expected(baseline, changed)
+
     def test_historical_restore_allows_only_originally_on_input_flags_off(self):
         baseline = matrix()
         current = copy.deepcopy(baseline)
@@ -642,13 +671,47 @@ precondition(inputFlags == Set(["Track", "Sync", "Remote Control"]))
 precondition(!inputFlags.contains("Remote"), "unobserved short alias must fail")
 let (_, baseline) = try inputJSON(CommandLine.arguments[1])
 try compareInputs(baseline, baseline)
+var rejected = false
+var windowDrift = baseline
+var driftBounds = windowDrift["bounds"] as! [String: Any]
+driftBounds["windows_observed"] = 3
+windowDrift["bounds"] = driftBounds
+var driftRows = try inputRows(windowDrift)
+driftRows[0]["value"] = 0
+windowDrift["checkboxes"] = driftRows
+let windowRestoreValues = try historicalRestoreValues(baseline, windowDrift)
+precondition(windowRestoreValues["10"] == 0, "unrelated app window count drift must allow input restore")
+for (key, value) in [("elements_observed", 41), ("max_windows", 63)] {
+    var invalid = windowDrift
+    var bounds = invalid["bounds"] as! [String: Any]
+    bounds[key] = value
+    invalid["bounds"] = bounds
+    rejected = false
+    do { try compareInputs(baseline, invalid) } catch { rejected = true }
+    precondition(rejected, "selected Settings bound \(key) must remain exact")
+}
+for invalidCount: Any in [65, true] {
+    var invalid = windowDrift
+    var bounds = invalid["bounds"] as! [String: Any]
+    bounds["windows_observed"] = invalidCount
+    invalid["bounds"] = bounds
+    rejected = false
+    do { try compareInputs(baseline, invalid) } catch { rejected = true }
+    precondition(rejected, "invalid app window count must fail closed")
+}
+var invalidTruncation = windowDrift
+var truncationBounds = invalidTruncation["bounds"] as! [String: Any]
+truncationBounds["truncated"] = true
+invalidTruncation["bounds"] = truncationBounds
+rejected = false
+do { try compareInputs(baseline, invalidTruncation) } catch { rejected = true }
+precondition(rejected, "selected Settings truncation state must remain exact")
 precondition(pressDeadlineIsValid(180, nowUnixSeconds: 0))
 precondition(!pressDeadlineIsValid(181, nowUnixSeconds: 0))
 precondition(!pressDeadlineIsValid(180, nowUnixSeconds: 180))
 precondition(actionDeadlineAllowsPress(180, nowUnixSeconds: 179.999))
 precondition(!actionDeadlineAllowsPress(180, nowUnixSeconds: 180))
 precondition(!actionDeadlineAllowsPress(180, nowUnixSeconds: 181))
-var rejected = false
 var historical = baseline
 var historicalRows = try inputRows(historical)
 historicalRows[0]["value"] = 0

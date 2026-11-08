@@ -157,17 +157,31 @@ def _fresh(baseline: dict, max_age: float) -> None:
         raise ValueError("baseline is stale or from the future")
 
 
+def _same_settings_bounds(original: object, current: object) -> bool:
+    """Compare selected Settings-tree bounds, ignoring total app window count."""
+    if not isinstance(original, dict) or not isinstance(current, dict):
+        return False
+    for bounds in (original, current):
+        count = bounds.get("windows_observed")
+        if type(count) is not int or not 1 <= count <= 64:
+            return False
+    return {
+        key: value for key, value in original.items() if key != "windows_observed"
+    } == {key: value for key, value in current.items() if key != "windows_observed"}
+
+
 def reconcile(baseline: dict, current: dict, expected: dict[str, int]) -> None:
     """Require the complete original inventory with only known value changes."""
     for key in (
         "target",
         "settings_window",
-        "bounds",
         "input_order",
         "expected_input_count",
     ):
         if baseline[key] != current[key]:
             raise ValueError(f"inventory changed: {key}")
+    if not _same_settings_bounds(baseline.get("bounds"), current.get("bounds")):
+        raise ValueError("inventory changed: bounds")
     if len(baseline["checkboxes"]) != len(current["checkboxes"]):
         raise ValueError("checkbox inventory changed")
     for original, fresh in zip(
