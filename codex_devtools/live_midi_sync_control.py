@@ -502,9 +502,22 @@ def _validate_checkbox_inventory(value: dict) -> dict[str, dict]:
 def historical_restore_expected(original: dict, current: dict) -> dict[str, int]:
     if original.get("format") != FORMAT or current.get("format") != FORMAT:
         raise ValueError("historical restore requires complete v2 Sync inventories")
-    for key in ("target", "settings_window", "bounds", "expected_output_count"):
+    for key in ("target", "bounds", "expected_output_count"):
         if original[key] != current[key]:
             raise ValueError(f"historical current inventory changed: {key}")
+    original_window = original.get("settings_window")
+    current_window = current.get("settings_window")
+    if (
+        not isinstance(original_window, dict)
+        or not isinstance(current_window, dict)
+        or type(original_window.get("index")) is not int
+        or type(current_window.get("index")) is not int
+        or not 0 <= original_window["index"] < original["bounds"]["window_count"]
+        or not 0 <= current_window["index"] < current["bounds"]["window_count"]
+        or {key: value for key, value in original_window.items() if key != "index"}
+        != {key: value for key, value in current_window.items() if key != "index"}
+    ):
+        raise ValueError("historical current inventory changed: settings_window")
     original_time = _utc_timestamp(
         original.get("observed_at_utc"), "original observation time"
     )

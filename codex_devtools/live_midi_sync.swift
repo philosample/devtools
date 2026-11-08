@@ -340,13 +340,51 @@ func requirePinnedSHA256(_ data: Data, expected: String, label: String) throws -
     return actual
 }
 
+func syncSettingsWindowMatches(
+    _ original: Any?, _ current: Any?,
+    originalBounds: Any?, currentBounds: Any?
+) -> Bool {
+    guard var originalWindow = original as? [String: Any],
+          var currentWindow = current as? [String: Any],
+          let originalIndex = originalWindow["index"] as? NSNumber,
+          let currentIndex = currentWindow["index"] as? NSNumber,
+          originalWindow["title"] as? String == "Settings",
+          currentWindow["title"] as? String == "Settings",
+          let originalIdentity = originalWindow["identity"] as? String,
+          !originalIdentity.isEmpty,
+          let currentIdentity = currentWindow["identity"] as? String,
+          !currentIdentity.isEmpty,
+          originalIdentity == currentIdentity,
+          CFGetTypeID(originalIndex) != CFBooleanGetTypeID(),
+          CFGetTypeID(currentIndex) != CFBooleanGetTypeID(),
+          originalIndex.doubleValue == Double(originalIndex.intValue),
+          currentIndex.doubleValue == Double(currentIndex.intValue),
+          let originalBoundValues = originalBounds as? [String: Any],
+          let currentBoundValues = currentBounds as? [String: Any],
+          let originalCount = originalBoundValues["window_count"] as? Int,
+          let currentCount = currentBoundValues["window_count"] as? Int,
+          originalCount > 0, originalCount <= maximumWindows,
+          currentCount > 0, currentCount <= maximumWindows,
+          originalIndex.intValue >= 0, originalIndex.intValue < originalCount,
+          currentIndex.intValue >= 0, currentIndex.intValue < currentCount else { return false }
+    originalWindow.removeValue(forKey: "index")
+    currentWindow.removeValue(forKey: "index")
+    return inputEqual(originalWindow, currentWindow)
+}
+
 func historicalSyncRestoreValues(_ original: [String: Any], _ current: [String: Any]) throws -> [String: Int] {
     let before = try syncCheckboxRows(original, expectedCount: options.expectedCount)
     let after = try syncCheckboxRows(current, expectedCount: options.expectedCount)
-    for key in ["target", "settings_window", "bounds", "expected_output_count"] {
+    for key in ["target", "bounds", "expected_output_count"] {
         guard inputEqual(original[key], current[key]) else {
             throw SyncFailure(message: "historical current Sync inventory changed: \(key)")
         }
+    }
+    guard syncSettingsWindowMatches(
+        original["settings_window"], current["settings_window"],
+        originalBounds: original["bounds"], currentBounds: current["bounds"]
+    ) else {
+        throw SyncFailure(message: "historical current Sync inventory changed: settings_window")
     }
     guard before.count == after.count else {
         throw SyncFailure(message: "historical current checkbox inventory changed")
@@ -416,10 +454,8 @@ func compareSyncInventoryValues(
     _ live: [String: Any],
     values: [String: Int]
 ) throws -> [String] {
-    for key in ["target", "settings_window"] {
-        guard inputEqual(reference[key], live[key]) else {
-            throw SyncFailure(message: "complete Sync inventory changed: \(key)")
-        }
+    guard inputEqual(reference["target"], live["target"]) else {
+        throw SyncFailure(message: "complete Sync inventory changed: target")
     }
     guard let originalBounds = reference["bounds"] as? [String: Any],
           let liveBounds = live["bounds"] as? [String: Any] else {
@@ -427,6 +463,12 @@ func compareSyncInventoryValues(
     }
     guard inputEqual(originalBounds, liveBounds) else {
         throw SyncFailure(message: "complete Sync inventory bounds changed")
+    }
+    guard syncSettingsWindowMatches(
+        reference["settings_window"], live["settings_window"],
+        originalBounds: originalBounds, currentBounds: liveBounds
+    ) else {
+        throw SyncFailure(message: "complete Sync inventory changed: settings_window")
     }
     guard liveBounds["truncated"] as? Bool == false,
           let expected = reference["checkboxes"] as? [[String: Any]],
