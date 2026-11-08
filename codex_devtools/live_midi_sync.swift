@@ -1187,6 +1187,22 @@ func inputEqual(_ first: Any?, _ second: Any?) -> Bool {
     return NSDictionary(dictionary: ["v": first]).isEqual(to: ["v": second])
 }
 
+func inputBoundsMatch(_ original: Any?, _ current: Any?) -> Bool {
+    guard var originalBounds = original as? [String: Any],
+          var currentBounds = current as? [String: Any],
+          let originalWindows = originalBounds["windows_observed"] as? NSNumber,
+          let currentWindows = currentBounds["windows_observed"] as? NSNumber,
+          CFGetTypeID(originalWindows) != CFBooleanGetTypeID(),
+          CFGetTypeID(currentWindows) != CFBooleanGetTypeID(),
+          originalWindows.doubleValue == Double(originalWindows.intValue),
+          currentWindows.doubleValue == Double(currentWindows.intValue),
+          (1...maximumWindows).contains(originalWindows.intValue),
+          (1...maximumWindows).contains(currentWindows.intValue) else { return false }
+    originalBounds.removeValue(forKey: "windows_observed")
+    currentBounds.removeValue(forKey: "windows_observed")
+    return inputEqual(originalBounds, currentBounds)
+}
+
 func actionDeadlineAllowsPress(
     _ deadlineUnixSeconds: TimeInterval,
     nowUnixSeconds: TimeInterval = Date().timeIntervalSince1970
@@ -1195,10 +1211,13 @@ func actionDeadlineAllowsPress(
 }
 
 func compareInputs(_ original: [String: Any], _ current: [String: Any], values: [String: Int]? = nil) throws {
-    for key in ["target", "settings_window", "bounds", "input_order", "expected_input_count"] {
+    for key in ["target", "settings_window", "input_order", "expected_input_count"] {
         guard inputEqual(original[key], current[key]) else {
             throw SyncFailure(message: "complete input inventory changed: \(key)")
         }
+    }
+    guard inputBoundsMatch(original["bounds"], current["bounds"]) else {
+        throw SyncFailure(message: "complete input inventory changed: bounds")
     }
     let before = try inputRows(original)
     let after = try inputRows(current)
