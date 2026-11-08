@@ -49,6 +49,44 @@ on. Stop is a verified no-op if Play is already off. Receipts are new
 files and report each action as not attempted, known, or unknown. A receipt
 requiring manual inspection must be inspected before another action.
 
+## Focus one exact Live-owned window
+
+`focus-window` first reads a fresh `ax snapshot` and exact-set inspection. Use
+one snapshot from the target PID and copy its `observed_at_utc`, target
+`launch_date`, and the selected window's `identity` into the preflight call.
+The identity is the decimal CFHash value shown by the snapshot. Duplicate
+titles are allowed only when that exact identity and current desktop geometry
+select one window. The main Set window must also resolve uniquely by its exact
+AXDocument URL; a child editor may have no AXDocument, but a present document
+must name that same Set.
+
+    python3 -m codex_devtools ax live-transport \
+      --pid 58198 --expected-bundle-id com.ableton.live --set /path/current.als \
+      --action focus-window --expected-generation 1794118619511410 \
+      --snapshot-observed-at-utc '2026-11-08T06:20:00.000Z' \
+      --snapshot-launch-date '2026-11-08T06:16:59.511Z' \
+      --window-identity 1685072705 --receipt /private/tmp/focus-preflight.json
+
+Review the preflight receipt and compute its SHA-256 before execution. The
+receipt expires after 30 seconds; execution pins its hash and rechecks Live
+generation, exact Set-window identity, selected AX identity, geometry, desktop
+window number and focus before and after activation:
+
+    python3 -m codex_devtools ax live-transport \
+      --pid 58198 --expected-bundle-id com.ableton.live --set /path/current.als \
+      --action focus-window --execute --expected-generation 1794118619511410 \
+      --preflight-receipt /private/tmp/focus-preflight.json \
+      --preflight-sha256 '<reviewed SHA-256>' \
+      --receipt /private/tmp/focus-result.json
+
+The operation only activates Live and calls AXRaise on the pinned window. It
+does not open, close, click, press keys, change preferences, inspect transport
+controls, or launch an app. Missing or stale snapshots, process or Set changes,
+ambiguous geometry, minimized/off-desktop targets and unrecognized dialogs or
+sheets are refused. The known Window Sharing overlay retains the existing
+exact-signature allowlist. This helper has source and mocked-policy checks;
+those do not establish a native AX focus result.
+
 ## Recorded native findings
 
 On 2026-11-02, a read-only inspection of the exact R71 Set in Live PID 58198

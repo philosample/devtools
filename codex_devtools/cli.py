@@ -384,10 +384,20 @@ def build_parser() -> argparse.ArgumentParser:
     live_transport.add_argument("--pid", required=True, type=int)
     live_transport.add_argument("--expected-bundle-id", required=True)
     live_transport.add_argument("--set", dest="set_path", required=True, type=Path)
-    live_transport.add_argument("--action", dest="operation", choices=("play", "stop"))
+    live_transport.add_argument(
+        "--action", dest="operation", choices=("play", "stop", "focus-window")
+    )
     live_transport.add_argument("--play-for-seconds", type=int)
     live_transport.add_argument("--expected-output-count", type=int)
     live_transport.add_argument("--receipt", type=Path)
+    live_transport.add_argument(
+        "--window-identity", help="exact CFHash identity from a fresh AX snapshot"
+    )
+    live_transport.add_argument("--expected-generation", type=int)
+    live_transport.add_argument("--snapshot-observed-at-utc")
+    live_transport.add_argument("--snapshot-launch-date")
+    live_transport.add_argument("--preflight-receipt", type=Path)
+    live_transport.add_argument("--preflight-sha256")
     live_transport.add_argument(
         "--execute",
         action="store_true",
@@ -802,7 +812,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.group == "ax" and args.action == "live-transport":
             from .live_transport_control import run_live_transport
 
-            if not args.execute and args.operation is not None:
+            if not args.execute and args.operation not in (None, "focus-window"):
                 raise ValueError("--action requires --execute")
             result = run_live_transport(
                 args.pid,
@@ -813,6 +823,12 @@ def main(argv: list[str] | None = None) -> int:
                 expected_count=args.expected_output_count,
                 receipt_path=args.receipt,
                 execute=args.execute,
+                window_identity=args.window_identity,
+                expected_generation=args.expected_generation,
+                snapshot_observed_at_utc=args.snapshot_observed_at_utc,
+                snapshot_launch_date=args.snapshot_launch_date,
+                preflight_receipt_path=args.preflight_receipt,
+                preflight_sha256=args.preflight_sha256,
             )
             _json_out(result)
             return 1 if result["status"] == "stopped" else 0
