@@ -13,13 +13,15 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-FORMAT = "codex-devtools-live-midi-sync-baseline-v1"
+FORMAT_V1 = "codex-devtools-live-midi-sync-baseline-v1"
+FORMAT = "codex-devtools-live-midi-sync-baseline-v2"
 RECEIPT_FORMAT = "codex-devtools-live-midi-sync-receipt-v1"
 OUTPUT_SUFFIX = ": MIDI Output: Sync"
 MAX_ELEMENTS = 1500
 MAX_DEPTH = 12
 MAX_WINDOWS = 64
 MAX_BASELINE_AGE_SECONDS = 300.0
+MAX_CHECKBOXES = 512
 NATIVE_TIMEOUT_SECONDS = 180
 FOCUS_DIAGNOSTICS_FORMAT = "codex-devtools-live-midi-sync-focus-diagnostics-v1"
 
@@ -156,13 +158,76 @@ def baseline_from_snapshot(
     observed = _utc_timestamp(
         snapshot.get("observed_at_utc"), "snapshot observed_at_utc"
     )
+    launch_date = target.get("launch_date")
+    _utc_timestamp(launch_date, "target launch_date")
+    settings_window_identity = next(
+        window.get("identity")
+        for window in snapshot["windows"]
+        if window["title"] == "Settings"
+    )
+    if (
+        not isinstance(launch_date, str)
+        or not launch_date
+        or not isinstance(settings_window_identity, str)
+        or not settings_window_identity
+    ):
+        raise ValueError("snapshot lacks exact process generation or Settings identity")
     outputs = {}
+    checkboxes = []
+    checkbox_identities = set()
+    checkbox_descriptions = set()
     for element in elements:
         role = element.get("role")
-        description = element.get("description")
         errors = element.get("attribute_errors", {})
-        if not isinstance(errors, dict):
-            raise ValueError("native AX element has malformed attribute errors")  # noqa: TRY004 -- malformed AX JSON uses the CLI ValueError contract
+        if (
+            not isinstance(errors, dict)
+            or errors.get("role") is not None
+            or not isinstance(role, str)
+        ):
+            raise ValueError(
+                "an AX element role is unreadable; checkbox inventory is uncertain"
+            )
+        if role == "AXCheckBox":
+            description = element.get("description")
+            identity = element.get("identity")
+            index = element.get("index")
+            enabled = element.get("enabled")
+            value = element.get("value")
+            if isinstance(value, bool):
+                value = int(value)
+            if (
+                errors.get("description") is not None
+                or errors.get("enabled") is not None
+                or errors.get("value") is not None
+                or not isinstance(description, str)
+                or not description
+                or not isinstance(identity, str)
+                or not identity
+                or identity in checkbox_identities
+                or description in checkbox_descriptions
+                or type(index) is not int
+                or type(enabled) is not bool
+                or type(value) is not int
+                or value not in (0, 1)
+            ):
+                raise ValueError(
+                    "a Settings checkbox is unreadable, duplicated or malformed"
+                )
+            if len(checkboxes) >= MAX_CHECKBOXES:
+                raise ValueError("Settings checkbox inventory exceeds its bound")
+            checkbox_identities.add(identity)
+            checkbox_descriptions.add(description)
+            checkboxes.append(
+                {
+                    "index": index,
+                    "identity": identity,
+                    "description": description,
+                    "role": role,
+                    "enabled": enabled,
+                    "value": value,
+                }
+            )
+        description = element.get("description")
         description_error = errors.get("description")
         if role == "AXCheckBox" and description_error is not None:
             raise ValueError(
@@ -193,7 +258,11 @@ def baseline_from_snapshot(
             "role": role,
             "enabled": True,
             "value": value,
+            "index": element["index"],
+            "identity": element["identity"],
         }
+    if not checkboxes:
+        raise ValueError("complete Settings checkbox inventory is missing")
     if len(outputs) != expected_count:
         raise ValueError(
             f"output Sync row count {len(outputs)} differs from expected {expected_count}"
@@ -207,11 +276,17 @@ def baseline_from_snapshot(
             "pid": target["pid"],
             "process_name": target["process_name"],
             "bundle_identifier": target["bundle_identifier"],
+            "launch_date": launch_date,
         },
-        "settings_window": {"title": "Settings", "index": settings_index(snapshot)},
+        "settings_window": {
+            "title": "Settings",
+            "index": settings_index(snapshot),
+            "identity": settings_window_identity,
+        },
         "expected_output_count": expected_count,
         "bounds": dict(bounds),
         "outputs": [outputs[name] for name in sorted(outputs)],
+        "checkboxes": checkboxes,
     }
 
 
@@ -231,8 +306,13 @@ def validate_baseline(
     expected_count: int,
     max_age_seconds: float = 300.0,
     now: datetime | None = None,
+    allow_stale: bool = False,
 ) -> dict:
-    if not isinstance(value, dict) or value.get("format") != FORMAT:
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("format"), str)
+        or value.get("format") not in (FORMAT_V1, FORMAT)
+    ):
         raise ValueError("baseline format is unsupported")
     if value.get("status") != "observed" or value.get("read_only") is not True:
         raise ValueError("baseline is not a read-only observation")
@@ -249,6 +329,7 @@ def validate_baseline(
         )
     if value.get("expected_output_count") != expected_count:
         raise ValueError("baseline expected count differs from caller's count")
+    version_two = value.get("format") == FORMAT
     timestamp = _utc_timestamp(value.get("observed_at_utc"), "baseline observed_at_utc")
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None or current.utcoffset() != timedelta(0):
@@ -264,7 +345,7 @@ def validate_baseline(
         raise ValueError(
             "maximum baseline age must be positive and at most 300 seconds"
         )
-    if age < -5 or age > max_age_seconds:
+    if age < -5 or (not allow_stale and age > max_age_seconds):
         raise ValueError("baseline is outside the allowed freshness window")
     window = value.get("settings_window")
     if (
@@ -336,7 +417,158 @@ def validate_baseline(
         result[name] = current_value
     if len(result) != expected_count:
         raise ValueError("baseline output identity count is inconsistent")
+    if version_two:
+        checkboxes = _validate_checkbox_inventory(value)
+        output_rows = {row["description"]: row for row in outputs}
+        checkbox_outputs = {
+            row["description"]: row
+            for row in checkboxes.values()
+            if row["description"].endswith(OUTPUT_SUFFIX)
+        }
+        if set(output_rows) != set(checkbox_outputs):
+            raise ValueError(
+                "output rows do not cover the complete Sync checkbox inventory"
+            )
+        for row in outputs:
+            checkbox = checkboxes.get(row.get("identity"))
+            if (
+                checkbox is None
+                or type(row.get("index")) is not int
+                or row["index"] != checkbox["index"]
+                or checkbox["description"] != row["description"]
+                or checkbox["value"] != row["value"]
+            ):
+                raise ValueError("output rows differ from complete checkbox inventory")
     return value
+
+
+def _validate_checkbox_inventory(value: dict) -> dict[str, dict]:
+    target = value.get("target")
+    window = value.get("settings_window")
+    if (
+        not isinstance(target, dict)
+        or not isinstance(target.get("launch_date"), str)
+        or not target["launch_date"]
+        or not isinstance(window, dict)
+        or not isinstance(window.get("identity"), str)
+        or not window["identity"]
+    ):
+        raise ValueError(
+            "complete process generation and Settings identity are required"
+        )
+    _utc_timestamp(target["launch_date"], "target launch_date")
+    rows = value.get("checkboxes")
+    bounds = value.get("bounds")
+    if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_CHECKBOXES:
+        raise ValueError(
+            "complete Settings checkbox inventory is missing or over bound"
+        )
+    if not isinstance(bounds, dict):
+        raise ValueError("Settings checkbox inventory bounds are missing")  # noqa: TRY004 -- malformed JSON uses the CLI ValueError contract
+    previous_index = -1
+    identities = set()
+    descriptions = set()
+    indexed = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Settings checkbox inventory contains an invalid row")  # noqa: TRY004 -- malformed JSON uses the CLI ValueError contract
+        identity = row.get("identity")
+        index = row.get("index")
+        description = row.get("description")
+        state = row.get("value")
+        if (
+            not isinstance(identity, str)
+            or not identity
+            or identity in identities
+            or type(index) is not int
+            or index <= previous_index
+            or index >= bounds["elements_observed"]
+            or not isinstance(description, str)
+            or not description
+            or description in descriptions
+            or row.get("role") != "AXCheckBox"
+            or type(row.get("enabled")) is not bool
+            or type(state) is not int
+            or state not in (0, 1)
+        ):
+            raise ValueError("Settings checkbox identity, order or state is invalid")
+        identities.add(identity)
+        descriptions.add(description)
+        previous_index = index
+        indexed[identity] = row
+    return indexed
+
+
+def historical_restore_expected(original: dict, current: dict) -> dict[str, int]:
+    if original.get("format") != FORMAT or current.get("format") != FORMAT:
+        raise ValueError("historical restore requires complete v2 Sync inventories")
+    for key in ("target", "settings_window", "bounds", "expected_output_count"):
+        if original[key] != current[key]:
+            raise ValueError(f"historical current inventory changed: {key}")
+    original_time = _utc_timestamp(
+        original.get("observed_at_utc"), "original observation time"
+    )
+    current_time = _utc_timestamp(
+        current.get("observed_at_utc"), "current observation time"
+    )
+    if current_time < original_time - timedelta(seconds=5):
+        raise ValueError(
+            "historical current observation predates the original baseline"
+        )
+    before = _validate_checkbox_inventory(original)
+    after = _validate_checkbox_inventory(current)
+    if [row["identity"] for row in original["checkboxes"]] != [
+        row["identity"] for row in current["checkboxes"]
+    ]:
+        raise ValueError("historical current checkbox identity/order changed")
+    original_outputs = {row["description"]: row["value"] for row in original["outputs"]}
+    current_outputs = {row["description"]: row for row in current["outputs"]}
+    expected = {}
+    for identity, row in before.items():
+        fresh = after[identity]
+        for key in ("index", "identity", "description", "role", "enabled"):
+            if row[key] != fresh[key]:
+                raise ValueError("historical current checkbox identity/order changed")
+        old_value = row["value"]
+        new_value = fresh["value"]
+        original_output = original_outputs.get(row["description"])
+        if original_output is None:
+            if new_value != old_value:
+                raise ValueError(
+                    "historical current inventory differs outside output Sync"
+                )
+        elif old_value == 1:
+            if new_value not in (0, 1):
+                raise ValueError("originally-on output Sync value is invalid")
+        elif new_value != 0:
+            raise ValueError("originally-off output Sync changed")
+        expected[identity] = new_value
+    output_rows = {row["description"]: row for row in original["outputs"]}
+    if set(current_outputs) != set(output_rows):
+        raise ValueError("historical current output Sync identities changed")
+    for description, row in current_outputs.items():
+        original_row = output_rows.get(description)
+        if original_row is None or row["name"] != original_row["name"]:
+            raise ValueError("historical current output Sync identities changed")
+        allowed = (0, 1) if original_row["value"] == 1 else (0,)
+        if row["value"] not in allowed:
+            raise ValueError(
+                "historical current output Sync value is outside restore states"
+            )
+        identity = row_identity_by_description(current, description)
+        if after[identity]["value"] != row["value"]:
+            raise ValueError(
+                "historical current output Sync rows disagree with checkbox inventory"
+            )
+    return expected
+
+
+def row_identity_by_description(inventory: dict, description: str) -> str:
+    return next(
+        row["identity"]
+        for row in inventory["checkboxes"]
+        if row["description"] == description
+    )
 
 
 def transition_plan(
@@ -449,6 +681,8 @@ def _baseline_from_file(path: Path, **kwargs) -> tuple[dict, str]:
         mode = path.lstat().st_mode
         if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
             raise ValueError("baseline must be a regular file, not a symlink")
+        if path.stat().st_size > 1_000_000:
+            raise ValueError("baseline exceeds the 1 MB safety bound")
         raw = path.read_bytes()
         value = json.loads(raw)
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
@@ -635,6 +869,7 @@ def _native_receipt_valid(
     baseline: dict,
     baseline_hash: str,
     returncode: int,
+    current_hash: str | None = None,
 ) -> bool:
     if not isinstance(report, dict):
         return False
@@ -649,6 +884,13 @@ def _native_receipt_valid(
         or target.get("bundle_identifier") != baseline["target"]["bundle_identifier"]
         or target.get("process_name") != baseline["target"]["process_name"]
         or report.get("baseline_sha256") != baseline_hash
+        or (
+            current_hash is not None
+            and report.get("current_observation_sha256") != current_hash
+        )
+        or (current_hash is None and "current_observation_sha256" in report)
+        or (current_hash is not None and report.get("scope") != "historical-restore")
+        or (current_hash is None and "scope" in report)
         or report.get("expected_output_count") != baseline["expected_output_count"]
         or status not in {"complete", "stopped"}
         or not isinstance(actions, list)
@@ -761,6 +1003,7 @@ def run_live_midi_sync(
     output_path: Path | None = None,
     execute: bool = False,
     max_baseline_age_seconds: float = 300.0,
+    historical_current_path: Path | None = None,
 ) -> dict:
     if platform.system() != "Darwin":
         raise ValueError("native Live MIDI Sync controls require macOS")
@@ -771,8 +1014,14 @@ def run_live_midi_sync(
     if type(expected_count) is not int or not 1 <= expected_count <= 128:
         raise ValueError("expected output count must be between 1 and 128")
     if not execute:
-        if action is not None or baseline_path is not None:
-            raise ValueError("--action and --baseline require explicit --execute")
+        if (
+            action is not None
+            or baseline_path is not None
+            or historical_current_path is not None
+        ):
+            raise ValueError(
+                "--action, --baseline and --historical-current-inventory require explicit --execute"
+            )
         if output_path is not None:
             _safe_new_path(output_path, "baseline output")
         from .ax_snapshot import snapshot
@@ -799,6 +1048,8 @@ def run_live_midi_sync(
         raise ValueError(
             "explicit --execute requires --baseline and a new --receipt path"
         )
+    if historical_current_path is not None and action != "restore":
+        raise ValueError("--historical-current-inventory is valid only for restore")
     if (
         isinstance(max_baseline_age_seconds, bool)
         or not isinstance(max_baseline_age_seconds, (int, float))
@@ -829,12 +1080,38 @@ def run_live_midi_sync(
             expected_bundle_id=expected_bundle_id,
             expected_count=expected_count,
             max_age_seconds=max_baseline_age_seconds,
+            allow_stale=historical_current_path is not None,
         )
     except ValueError as error:
         preliminary["error"] = str(error)
         _replace_owned_json(output_path, identity, preliminary)
         return preliminary
+    historical_current = None
+    historical_hash = None
+    if historical_current_path is not None:
+        try:
+            historical_current, historical_hash = _baseline_from_file(
+                historical_current_path,
+                expected_pid=pid,
+                expected_bundle_id=expected_bundle_id,
+                expected_count=expected_count,
+                max_age_seconds=max_baseline_age_seconds,
+            )
+            if historical_current["format"] != FORMAT:
+                raise ValueError(
+                    "historical restore requires a complete v2 current inventory"
+                )
+            historical_restore_expected(baseline, historical_current)
+        except ValueError as error:
+            preliminary["error"] = str(error)
+            _replace_owned_json(output_path, identity, preliminary)
+            return preliminary
     pending = _initial_receipt(action, baseline, baseline_hash)
+    if historical_hash is not None:
+        pending.update(
+            scope="historical-restore",
+            current_observation_sha256=historical_hash,
+        )
     identity = _replace_owned_json(output_path, identity, pending)
     helper = Path(__file__).with_name("live_midi_sync.swift")
     command = [
@@ -855,6 +1132,56 @@ def run_live_midi_sync(
         "--max-baseline-age-seconds",
         str(max_baseline_age_seconds),
     ]
+    if historical_current_path is not None and historical_hash is not None:
+        command.extend(
+            (
+                "--historical-current-inventory",
+                str(historical_current_path),
+                "--historical-current-sha256",
+                historical_hash,
+            )
+        )
+        try:
+            _, final_baseline_hash = _baseline_from_file(
+                baseline_path,
+                expected_pid=pid,
+                expected_bundle_id=expected_bundle_id,
+                expected_count=expected_count,
+                max_age_seconds=max_baseline_age_seconds,
+                allow_stale=True,
+            )
+            final_current, final_current_hash = _baseline_from_file(
+                historical_current_path,
+                expected_pid=pid,
+                expected_bundle_id=expected_bundle_id,
+                expected_count=expected_count,
+                max_age_seconds=max_baseline_age_seconds,
+            )
+            if final_baseline_hash != baseline_hash:
+                raise ValueError("original baseline changed after wrapper validation")
+            if final_current_hash != historical_hash:
+                raise ValueError(
+                    "historical current inventory changed after wrapper validation"
+                )
+            historical_restore_expected(baseline, final_current)
+        except ValueError as error:
+            pending.update(
+                status="stopped",
+                phase="historical-current-revalidation",
+                actions=[
+                    row
+                    | {
+                        "attempted": False,
+                        "outcome": "not_attempted",
+                        "actual_value": None,
+                    }
+                    for row in pending["actions"]
+                ],
+                manual_inspection_required=False,
+                error=str(error),
+            )
+            _replace_owned_json(output_path, identity, pending)
+            return pending
     try:
         result = subprocess.run(
             command,
@@ -900,6 +1227,7 @@ def run_live_midi_sync(
         baseline=baseline,
         baseline_hash=baseline_hash,
         returncode=result.returncode,
+        current_hash=historical_hash,
     ):
         pending["status"] = "stopped"
         pending["phase"] = "native-helper-invalid-receipt"

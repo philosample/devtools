@@ -8,6 +8,8 @@ let maximumWindows = 64
 let maximumElements = 1500
 let maximumDepth = 12
 let outputSuffix = ": MIDI Output: Sync"
+let syncFormatV1 = "codex-devtools-live-midi-sync-baseline-v1"
+let syncFormatV2 = "codex-devtools-live-midi-sync-baseline-v2"
 let receiptFormat = "codex-devtools-live-midi-sync-receipt-v1"
 
 struct Options {
@@ -122,6 +124,13 @@ func parseOptions() throws -> Options {
           !result.baselinePath.isEmpty, result.baselineHash.count == 64,
           result.maximumBaselineAgeSeconds > 0 else {
         throw SyncFailure(message: "incomplete native MIDI Sync arguments")
+    }
+    if !result.historicalCurrentPath.isEmpty {
+        guard result.operation == "restore", result.historicalCurrentHash.count == 64 else {
+            throw SyncFailure(message: "historical current inventory is valid only for restore")
+        }
+    } else if !result.historicalCurrentHash.isEmpty {
+        throw SyncFailure(message: "historical current inventory hash has no file")
     }
     return result
 }
@@ -239,6 +248,209 @@ func validateBaselineFreshness(_ date: Date, now: Date = Date()) throws {
     }
 }
 
+func syncCheckboxRows(_ value: [String: Any], expectedCount: Int) throws -> [[String: Any]] {
+    guard value["format"] as? String == syncFormatV2,
+          value["status"] as? String == "observed", value["read_only"] as? Bool == true,
+          value["expected_output_count"] as? Int == expectedCount,
+          let target = value["target"] as? [String: Any],
+          let launch = target["launch_date"] as? String, !launch.isEmpty,
+          let window = value["settings_window"] as? [String: Any],
+          window["title"] as? String == "Settings",
+          let windowIdentity = window["identity"] as? String, !windowIdentity.isEmpty,
+          let bounds = value["bounds"] as? [String: Any],
+          bounds["max_elements"] as? Int == maximumElements,
+          bounds["max_depth"] as? Int == maximumDepth,
+          bounds["max_windows"] as? Int == maximumWindows,
+          bounds["window_title_filter"] as? String == "Settings",
+          bounds["truncated"] as? Bool == false,
+          bounds["windows_truncated"] as? Bool == false,
+          let observedCount = bounds["window_count"] as? Int,
+          bounds["windows_observed"] as? Int == observedCount,
+          observedCount > 0, observedCount <= maximumWindows,
+          let elements = bounds["elements_observed"] as? Int,
+          elements > 0, elements <= maximumElements,
+          let rows = value["checkboxes"] as? [[String: Any]],
+          !rows.isEmpty, rows.count <= 512 else {
+        throw SyncFailure(message: "complete v2 Sync checkbox inventory is invalid")
+    }
+    var previous = -1
+    var identities = Set<String>()
+    var descriptions = Set<String>()
+    var outputDescriptions = Set<String>()
+    for row in rows {
+        guard let identity = row["identity"] as? String, !identity.isEmpty,
+              identities.insert(identity).inserted,
+              let index = row["index"] as? Int, index > previous, index < elements,
+              let description = row["description"] as? String, !description.isEmpty,
+              descriptions.insert(description).inserted,
+              row["role"] as? String == (kAXCheckBoxRole as String),
+              let enabledValue = row["enabled"] as? NSNumber,
+              CFGetTypeID(enabledValue) == CFBooleanGetTypeID(),
+              let number = row["value"] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.intValue == 0 || number.intValue == 1,
+              number.doubleValue == Double(number.intValue) else {
+            throw SyncFailure(message: "v2 Sync checkbox identity, order or value is invalid")
+        }
+        if description.hasSuffix(outputSuffix) {
+            outputDescriptions.insert(description)
+        }
+        previous = index
+    }
+    let outputRows = value["outputs"] as? [[String: Any]] ?? []
+    guard outputRows.count == expectedCount else {
+        throw SyncFailure(message: "v2 Sync output rows are incomplete")
+    }
+    var outputNames = Set<String>()
+    var recordedOutputDescriptions = Set<String>()
+    for output in outputRows {
+        guard let name = output["name"] as? String, !name.isEmpty,
+              outputNames.insert(name).inserted,
+              output["role"] as? String == (kAXCheckBoxRole as String),
+              let outputEnabled = output["enabled"] as? NSNumber,
+              CFGetTypeID(outputEnabled) == CFBooleanGetTypeID(), outputEnabled.boolValue,
+              let outputValue = output["value"] as? NSNumber,
+              CFGetTypeID(outputValue) != CFBooleanGetTypeID(),
+              (outputValue.intValue == 0 || outputValue.intValue == 1),
+              outputValue.doubleValue == Double(outputValue.intValue),
+              let identity = output["identity"] as? String,
+              let index = output["index"] as? Int,
+              let description = output["description"] as? String,
+              description == "\(name)\(outputSuffix)",
+              let checkbox = rows.first(where: { $0["identity"] as? String == identity }),
+              checkbox["enabled"] as? Bool == true,
+              checkbox["index"] as? Int == index,
+              checkbox["description"] as? String == description,
+              checkbox["value"] as? Int == outputValue.intValue else {
+            throw SyncFailure(message: "v2 Sync output row differs from complete checkbox inventory")
+        }
+        recordedOutputDescriptions.insert(description)
+    }
+    guard outputDescriptions == recordedOutputDescriptions else {
+        throw SyncFailure(message: "v2 Sync output rows omit or add a checkbox")
+    }
+    return rows
+}
+
+func requirePinnedSHA256(_ data: Data, expected: String, label: String) throws -> String {
+    let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    guard expected.count == 64, actual == expected else {
+        throw SyncFailure(message: "\(label) changed after wrapper validation")
+    }
+    return actual
+}
+
+func historicalSyncRestoreValues(_ original: [String: Any], _ current: [String: Any]) throws -> [String: Int] {
+    let before = try syncCheckboxRows(original, expectedCount: options.expectedCount)
+    let after = try syncCheckboxRows(current, expectedCount: options.expectedCount)
+    for key in ["target", "settings_window", "bounds", "expected_output_count"] {
+        guard inputEqual(original[key], current[key]) else {
+            throw SyncFailure(message: "historical current Sync inventory changed: \(key)")
+        }
+    }
+    guard before.count == after.count else {
+        throw SyncFailure(message: "historical current checkbox inventory changed")
+    }
+    let originalOutputs = Dictionary(uniqueKeysWithValues: (original["outputs"] as! [[String: Any]]).map {
+        ($0["description"] as! String, $0)
+    })
+    let currentOutputs = Dictionary(uniqueKeysWithValues: (current["outputs"] as! [[String: Any]]).map {
+        ($0["description"] as! String, $0)
+    })
+    guard Set(originalOutputs.keys) == Set(currentOutputs.keys) else {
+        throw SyncFailure(message: "historical current output Sync identities changed")
+    }
+    var values: [String: Int] = [:]
+    for (a, b) in zip(before, after) {
+        for key in ["identity", "index", "description", "role", "enabled"] {
+            guard inputEqual(a[key], b[key]) else {
+                throw SyncFailure(message: "historical current checkbox identity/order changed")
+            }
+        }
+        guard let identity = a["identity"] as? String,
+              let description = a["description"] as? String,
+              let originalValue = a["value"] as? Int,
+              let currentValue = b["value"] as? Int else {
+            throw SyncFailure(message: "historical current checkbox is malformed")
+        }
+        if description.hasSuffix(outputSuffix) {
+            guard let output = originalOutputs[description],
+                  let currentOutput = currentOutputs[description],
+                  output["identity"] as? String == identity,
+                  currentOutput["identity"] as? String == identity,
+                  output["value"] as? Int == originalValue,
+                  currentOutput["value"] as? Int == currentValue else {
+                throw SyncFailure(message: "historical current output row differs from checkbox inventory")
+            }
+            let allowed = originalValue == 1 ? [0, 1] : [0]
+            guard allowed.contains(currentValue) else {
+                throw SyncFailure(message: "historical current output Sync is outside restore states")
+            }
+        } else if currentValue != originalValue {
+            throw SyncFailure(message: "historical current inventory differs outside output Sync")
+        }
+        values[identity] = currentValue
+    }
+    return values
+}
+
+func compareSyncLiveInventory(
+    _ reference: [String: Any],
+    _ live: [String: Any],
+    liveControls: [String: AXUIElement],
+    values: [String: Int]
+) throws -> [String: AXUIElement] {
+    let identities = try compareSyncInventoryValues(reference, live, values: values)
+    var elements: [String: AXUIElement] = [:]
+    for identity in identities {
+        guard let element = liveControls[identity] else {
+            throw SyncFailure(message: "complete Sync checkbox AX element is unavailable")
+        }
+        elements[identity] = element
+    }
+    return elements
+}
+
+func compareSyncInventoryValues(
+    _ reference: [String: Any],
+    _ live: [String: Any],
+    values: [String: Int]
+) throws -> [String] {
+    for key in ["target", "settings_window"] {
+        guard inputEqual(reference[key], live[key]) else {
+            throw SyncFailure(message: "complete Sync inventory changed: \(key)")
+        }
+    }
+    guard let originalBounds = reference["bounds"] as? [String: Any],
+          let liveBounds = live["bounds"] as? [String: Any] else {
+        throw SyncFailure(message: "complete Sync inventory bounds are unavailable")
+    }
+    guard inputEqual(originalBounds, liveBounds) else {
+        throw SyncFailure(message: "complete Sync inventory bounds changed")
+    }
+    guard liveBounds["truncated"] as? Bool == false,
+          let expected = reference["checkboxes"] as? [[String: Any]],
+          let observed = live["checkboxes"] as? [[String: Any]],
+          expected.count == observed.count else {
+        throw SyncFailure(message: "complete Sync checkbox inventory changed")
+    }
+    var identities: [String] = []
+    for (a, b) in zip(expected, observed) {
+        for key in ["identity", "index", "description", "role", "enabled"] {
+            guard inputEqual(a[key], b[key]) else {
+                throw SyncFailure(message: "complete Sync checkbox identity/order changed")
+            }
+        }
+        guard let identity = a["identity"] as? String,
+              let value = values[identity],
+              b["value"] as? Int == value else {
+            throw SyncFailure(message: "complete Sync checkbox value changed")
+        }
+        identities.append(identity)
+    }
+    return identities
+}
+
 func readBaseline() throws -> (Data, [String: Any], [String: Int], [String: String], Date) {
     phase = "baseline-read"
     let url = URL(fileURLWithPath: options.baselinePath)
@@ -250,7 +462,7 @@ func readBaseline() throws -> (Data, [String: Any], [String: Int], [String: Stri
     let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     guard hash == options.baselineHash else { throw SyncFailure(message: "baseline changed after wrapper validation") }
     guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-          root["format"] as? String == "codex-devtools-live-midi-sync-baseline-v1",
+          [syncFormatV1, syncFormatV2].contains(root["format"] as? String ?? ""),
           root["status"] as? String == "observed",
           root["read_only"] as? Bool == true,
           root["expected_output_count"] as? Int == options.expectedCount,
@@ -283,7 +495,14 @@ func readBaseline() throws -> (Data, [String: Any], [String: Int], [String: Stri
     guard let date = timestampParser.date(from: observedAt) else {
         throw SyncFailure(message: "baseline observation timestamp is invalid")
     }
-    try validateBaselineFreshness(date)
+    let historicalRestore = !options.historicalCurrentPath.isEmpty
+    if historicalRestore {
+        guard Date().timeIntervalSince(date) >= -5 else {
+            throw SyncFailure(message: "original baseline is from the future")
+        }
+    } else {
+        try validateBaselineFreshness(date)
+    }
     var original: [String: Int] = [:]
     var descriptions: [String: String] = [:]
     for row in rows {
@@ -300,6 +519,27 @@ func readBaseline() throws -> (Data, [String: Any], [String: Int], [String: Stri
         descriptions[name] = description
     }
     guard original.count == options.expectedCount else { throw SyncFailure(message: "baseline output count is inconsistent") }
+    if root["format"] as? String == syncFormatV2 {
+        let complete = try syncCheckboxRows(root, expectedCount: options.expectedCount)
+        guard let target = root["target"] as? [String: Any],
+              target["launch_date"] as? String != nil,
+              let window = root["settings_window"] as? [String: Any],
+              window["identity"] as? String != nil else {
+            throw SyncFailure(message: "v2 Sync baseline process/window identity is incomplete")
+        }
+        for row in rows {
+            guard let identity = row["identity"] as? String,
+                  let index = row["index"] as? Int,
+                  let description = row["description"] as? String,
+                  let checkbox = complete.first(where: { $0["identity"] as? String == identity }),
+                  checkbox["index"] as? Int == index,
+                  checkbox["description"] as? String == description else {
+                throw SyncFailure(message: "v2 Sync output identity is absent from checkbox inventory")
+            }
+        }
+    } else if historicalRestore {
+        throw SyncFailure(message: "historical restore requires a complete v2 original baseline")
+    }
     return (data, root, original, descriptions, date)
 }
 
@@ -471,6 +711,10 @@ func run() throws -> [String: Any] {
     let baselineTarget = baseline["target"] as! [String: Any]
     let processName = baselineTarget["process_name"] as! String
     let baselineHash = options.baselineHash
+    let historicalRestore = !options.historicalCurrentPath.isEmpty
+    var historicalCurrent: [String: Any]?
+    var historicalDate: Date?
+    var currentCheckboxValues: [String: Int] = [:]
     let baseRows = (baseline["outputs"] as! [[String: Any]]).sorted { ($0["name"] as! String) < ($1["name"] as! String) }
     var actionRows: [[String: Any]] = baseRows.map { row in
         let name = row["name"] as! String
@@ -498,14 +742,75 @@ func run() throws -> [String: Any] {
         "manual_inspection_required": false,
         "error": NSNull(),
     ]
+    if historicalRestore {
+        receipt?["scope"] = "historical-restore"
+        receipt?["current_observation_sha256"] = options.historicalCurrentHash
+    }
+    if historicalRestore {
+        guard baseline["format"] as? String == syncFormatV2 else {
+            throw SyncFailure(message: "historical restore requires a complete v2 original baseline")
+        }
+        let (currentData, currentValue) = try inputJSON(options.historicalCurrentPath)
+        _ = try requirePinnedSHA256(
+            currentData,
+            expected: options.historicalCurrentHash,
+            label: "historical current inventory"
+        )
+        _ = try syncCheckboxRows(currentValue, expectedCount: options.expectedCount)
+        let stamp = currentValue["observed_at_utc"] as? String ?? ""
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let currentDate = formatter.date(from: stamp) else {
+            throw SyncFailure(message: "historical current observation time is invalid")
+        }
+        try validateBaselineFreshness(currentDate)
+        guard currentDate.timeIntervalSince(baselineDate) >= -5 else {
+            throw SyncFailure(message: "historical current observation predates the original baseline")
+        }
+        currentCheckboxValues = try historicalSyncRestoreValues(baseline, currentValue)
+        historicalCurrent = currentValue
+        historicalDate = currentDate
+    }
     phase = "identity"
     let process = try targetCheck(options.pid, bundleID: options.bundleID)
     guard process.localizedName == processName else { throw SyncFailure(message: "target process name changed from the baseline") }
+    if baseline["format"] as? String == syncFormatV2 {
+        guard let expectedLaunch = baselineTarget["launch_date"] as? String,
+              let launch = process.launchDate else {
+            throw SyncFailure(message: "target process generation is unavailable")
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let expectedDate = formatter.date(from: expectedLaunch),
+              abs(expectedDate.timeIntervalSince(launch)) < 0.001 else {
+            throw SyncFailure(message: "target process generation differs from baseline")
+        }
+    }
     guard AXIsProcessTrusted() else { throw SyncFailure(message: "Accessibility is not trusted; no prompt was requested") }
     phase = "preflight"
     guard process.isTerminated == false else { throw SyncFailure(message: "target process already exited") }
     let app = AXUIElementCreateApplication(options.pid)
-    let (settings, controls, observedElements, observedWindows) = try matchingOutputs(app)
+    let settings: AXUIElement
+    let controls: [String: OutputControl]
+    let observedElements: Int
+    let observedWindows: Int
+    if historicalRestore, let historicalCurrent {
+        let (inventory, currentSettings, checkboxControls) = try inputInventory(app, validateInputGroups: false, completeSyncInventory: true)
+        let fullControls = try compareSyncLiveInventory(
+            historicalCurrent, inventory, liveControls: checkboxControls, values: currentCheckboxValues
+        )
+        settings = currentSettings
+        controls = try syncControlsFromInventory(historicalCurrent, checkboxControls: fullControls)
+        let bounds = inventory["bounds"] as! [String: Any]
+        observedElements = bounds["elements_observed"] as! Int
+        observedWindows = bounds["windows_observed"] as! Int
+    } else {
+        let observed = try matchingOutputs(app)
+        settings = observed.0
+        controls = observed.1
+        observedElements = observed.2
+        observedWindows = observed.3
+    }
     guard controls.count == options.expectedCount else {
         throw SyncFailure(message: "native output Sync count \(controls.count) differs from expected \(options.expectedCount)")
     }
@@ -555,6 +860,18 @@ func run() throws -> [String: Any] {
     for name in candidates {
         phase = "actions"
         let currentProcess = try targetCheck(options.pid, bundleID: options.bundleID)
+        if baseline["format"] as? String == syncFormatV2 {
+            guard let expectedLaunch = baselineTarget["launch_date"] as? String,
+                  let launch = currentProcess.launchDate else {
+                throw SyncFailure(message: "target process generation is unavailable before \(name)")
+            }
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            guard let expectedDate = formatter.date(from: expectedLaunch),
+                  abs(expectedDate.timeIntervalSince(launch)) < 0.001 else {
+                throw SyncFailure(message: "target process generation changed before \(name)")
+            }
+        }
         let active = currentProcess.isActive
         let foregroundMatches = active
             && NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid
@@ -567,7 +884,27 @@ func run() throws -> [String: Any] {
             recordFocusRefusal(app: app, settings: settings, pid: options.pid, bundleID: options.bundleID)
             throw SyncFailure(message: "target focus or process identity changed before \(name)")
         }
-        let (freshSettings, freshControls, freshElementCount, freshWindowCount) = try matchingOutputs(app)
+        let freshSettings: AXUIElement
+        let freshControls: [String: OutputControl]
+        let freshElementCount: Int
+        let freshWindowCount: Int
+        if historicalRestore, let historicalCurrent {
+            let (inventory, currentSettings, checkboxControls) = try inputInventory(app, validateInputGroups: false, completeSyncInventory: true)
+            let fullControls = try compareSyncLiveInventory(
+                historicalCurrent, inventory, liveControls: checkboxControls, values: currentCheckboxValues
+            )
+            freshSettings = currentSettings
+            freshControls = try syncControlsFromInventory(historicalCurrent, checkboxControls: fullControls)
+            let bounds = inventory["bounds"] as! [String: Any]
+            freshElementCount = bounds["elements_observed"] as! Int
+            freshWindowCount = bounds["windows_observed"] as! Int
+        } else {
+            let observed = try matchingOutputs(app)
+            freshSettings = observed.0
+            freshControls = observed.1
+            freshElementCount = observed.2
+            freshWindowCount = observed.3
+        }
         guard CFEqual(freshSettings, settings),
               freshControls.count == options.expectedCount,
               freshElementCount == observedElements,
@@ -606,7 +943,7 @@ func run() throws -> [String: Any] {
             recordFocusRefusal(app: app, settings: freshSettings, pid: options.pid, bundleID: options.bundleID)
             throw SyncFailure(message: "target focus or process identity changed before pressing \(name)")
         }
-        try validateBaselineFreshness(baselineDate)
+        try validateBaselineFreshness(historicalDate ?? baselineDate)
         guard try checkboxValue(freshControl.element) == current[name] else {
             throw SyncFailure(message: "output Sync value changed before press: \(name)")
         }
@@ -638,9 +975,29 @@ func run() throws -> [String: Any] {
             throw SyncFailure(message: "AXPress completed but readback did not reach desired value for \(name)")
         }
         current[name] = actual
+        if let identity = baseRows.first(where: { ($0["name"] as? String) == name })?["identity"] as? String {
+            currentCheckboxValues[identity] = actual
+        }
     }
     phase = "final-readback"
-    let (_, finalControls, finalElementCount, finalWindowCount) = try matchingOutputs(app)
+    let finalControls: [String: OutputControl]
+    let finalElementCount: Int
+    let finalWindowCount: Int
+    if historicalRestore, let historicalCurrent {
+        let (inventory, _, checkboxControls) = try inputInventory(app, validateInputGroups: false, completeSyncInventory: true)
+        let fullControls = try compareSyncLiveInventory(
+            historicalCurrent, inventory, liveControls: checkboxControls, values: currentCheckboxValues
+        )
+        finalControls = try syncControlsFromInventory(historicalCurrent, checkboxControls: fullControls)
+        let bounds = inventory["bounds"] as! [String: Any]
+        finalElementCount = bounds["elements_observed"] as! Int
+        finalWindowCount = bounds["windows_observed"] as! Int
+    } else {
+        let observed = try matchingOutputs(app)
+        finalControls = observed.1
+        finalElementCount = observed.2
+        finalWindowCount = observed.3
+    }
     guard finalControls.count == options.expectedCount, Set(finalControls.keys) == Set(original.keys) else {
         throw SyncFailure(message: "final output Sync inventory differs from baseline")
     }
@@ -671,7 +1028,11 @@ func run() throws -> [String: Any] {
 let inputFormat = "codex-devtools-live-midi-inputs-baseline-v1"
 let inputFlags = Set(["Track", "Sync", "Remote Control"])
 
-func inputInventory(_ app: AXUIElement) throws -> ([String: Any], AXUIElement, [String: AXUIElement]) {
+func inputInventory(
+    _ app: AXUIElement,
+    validateInputGroups: Bool = true,
+    completeSyncInventory: Bool = false
+) throws -> ([String: Any], AXUIElement, [String: AXUIElement]) {
     let process = try targetCheck(options.pid, bundleID: options.bundleID)
     guard let launch = process.launchDate, let name = process.localizedName, !name.isEmpty else {
         throw SyncFailure(message: "input target launch identity is unavailable")
@@ -680,9 +1041,11 @@ func inputInventory(_ app: AXUIElement) throws -> ([String: Any], AXUIElement, [
           !windows.isEmpty, windows.count <= maximumWindows else {
         throw SyncFailure(message: "complete input Settings window inventory unavailable")
     }
-    let settings = try windows.filter { try requiredString($0, kAXTitleAttribute as String) == "Settings" }
+    let settings = try windows.enumerated().filter { try requiredString($0.element, kAXTitleAttribute as String) == "Settings" }
     guard settings.count == 1 else { throw SyncFailure(message: "unique Settings window required") }
-    var queue: [(AXUIElement, Int)] = [(settings[0], 0)]
+    let settingsIndex = settings[0].offset
+    let settingsElement = settings[0].element
+    var queue: [(AXUIElement, Int)] = [(settingsElement, 0)]
     var seen = Set<CFHashCode>()
     var controls: [String: AXUIElement] = [:]
     var checks: [[String: Any]] = []
@@ -735,25 +1098,64 @@ func inputInventory(_ app: AXUIElement) throws -> ([String: Any], AXUIElement, [
         }
         queue.append(contentsOf: children.map { ($0, depth + 1) })
     }
-    guard groups.count == options.expectedCount,
-          groups.values.allSatisfy({ $0 == inputFlags }) else {
+    guard groups.values.allSatisfy({ $0 == inputFlags }),
+          (!validateInputGroups || groups.count == options.expectedCount) else {
         throw SyncFailure(message: "input groups are missing, partial or differ from caller count")
     }
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    var settingsWindow: [String: Any] = ["title": "Settings", "identity": String(CFHash(settingsElement))]
+    var bounds: [String: Any] = [
+        "max_elements": maximumElements, "max_depth": maximumDepth,
+        "max_windows": maximumWindows, "elements_observed": visited,
+        "windows_observed": windows.count, "truncated": false,
+    ]
+    if completeSyncInventory {
+        settingsWindow["index"] = settingsIndex
+        bounds["window_count"] = windows.count
+        bounds["windows_truncated"] = false
+        bounds["window_title_filter"] = "Settings"
+    }
     let result: [String: Any] = [
         "format": inputFormat, "status": "observed", "read_only": true,
         "observed_at_utc": formatter.string(from: Date()),
         "target": ["pid": Int(options.pid), "bundle_identifier": options.bundleID,
                    "process_name": name, "launch_date": formatter.string(from: launch)],
-        "settings_window": ["title": "Settings", "identity": String(CFHash(settings[0]))],
+        "settings_window": settingsWindow,
         "expected_input_count": options.expectedCount, "input_order": order,
-        "bounds": ["max_elements": maximumElements, "max_depth": maximumDepth,
-                   "max_windows": maximumWindows, "elements_observed": visited,
-                   "windows_observed": windows.count, "truncated": false],
+        "bounds": bounds,
         "checkboxes": checks,
     ]
-    return (result, settings[0], controls)
+    return (result, settingsElement, controls)
+}
+
+func syncControlsFromInventory(
+    _ inventory: [String: Any],
+    checkboxControls: [String: AXUIElement]
+) throws -> [String: OutputControl] {
+    guard let rows = inventory["outputs"] as? [[String: Any]] else {
+        throw SyncFailure(message: "output Sync rows are missing from complete inventory")
+    }
+    var result: [String: OutputControl] = [:]
+    for row in rows {
+        guard let name = row["name"] as? String,
+              let description = row["description"] as? String,
+              let identity = row["identity"] as? String,
+              let element = checkboxControls[identity],
+              result[name] == nil else {
+            throw SyncFailure(message: "output Sync checkbox is missing or duplicated")
+        }
+        result[name] = OutputControl(
+            name: name,
+            description: description,
+            element: element,
+            value: try checkboxValue(element)
+        )
+    }
+    guard result.count == options.expectedCount else {
+        throw SyncFailure(message: "complete inventory output Sync count differs from expected")
+    }
+    return result
 }
 
 func inputJSON(_ path: String) throws -> (Data, [String: Any]) {

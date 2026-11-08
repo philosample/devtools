@@ -332,6 +332,11 @@ def build_parser() -> argparse.ArgumentParser:
     midi_sync.add_argument("--expected-count", type=int, required=True)
     midi_sync.add_argument("--baseline", type=Path)
     midi_sync.add_argument(
+        "--historical-current-inventory",
+        type=Path,
+        help="fresh complete v2 inventory authorizing restore from an expired original baseline",
+    )
+    midi_sync.add_argument(
         "--out", type=Path, help="new baseline JSON path in inspect mode"
     )
     midi_sync.add_argument(
@@ -733,8 +738,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.operation is not None
                 or args.baseline is not None
                 or args.receipt is not None
+                or args.historical_current_inventory is not None
             ):
-                raise ValueError("--action, --baseline and --receipt require --execute")
+                raise ValueError(
+                    "--action, --baseline, --receipt and --historical-current-inventory require --execute"
+                )
+            if (
+                args.historical_current_inventory is not None
+                and args.operation != "restore"
+            ):
+                raise ValueError(
+                    "--historical-current-inventory is valid only with --action restore"
+                )
             result = run_live_midi_sync(
                 args.pid,
                 expected_bundle_id=args.expected_bundle_id,
@@ -744,6 +759,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_path=args.receipt if args.execute else args.out,
                 execute=args.execute,
                 max_baseline_age_seconds=args.max_baseline_age_seconds,
+                historical_current_path=args.historical_current_inventory,
             )
             _json_out(result)
             return 1 if result["status"] == "stopped" else 0
