@@ -664,6 +664,31 @@ class LiveMidiSyncControlTests(unittest.TestCase):
                 allow_stale=True,
             )
 
+    def test_historical_restore_allows_settings_window_index_drift_only(self):
+        original, current = historical_pair()
+        original["bounds"]["window_count"] = 2
+        original["bounds"]["windows_observed"] = 2
+        current["bounds"]["window_count"] = 2
+        current["bounds"]["windows_observed"] = 2
+        current["settings_window"]["index"] = 1
+        expected = historical_restore_expected(original, current)
+        output = next(row for row in current["outputs"] if row["name"] == "A")
+        self.assertEqual(expected[output["identity"]], output["value"])
+
+        for mutation in (
+            lambda window: window.update(identity="other-window"),
+            lambda window: window.update(title="Other"),
+            lambda window: window.update(index=2),
+            lambda window: window.update(index=True),
+        ):
+            changed = json.loads(json.dumps(current))
+            mutation(changed["settings_window"])
+            with (
+                self.subTest(window=changed["settings_window"]),
+                self.assertRaisesRegex(ValueError, "settings_window"),
+            ):
+                historical_restore_expected(original, changed)
+
     def test_historical_restore_rejects_generation_keyset_non_sync_drift_and_off_to_on(
         self,
     ):
@@ -1325,6 +1350,36 @@ let values = try historicalSyncRestoreValues(original, current)
 let originalRows = try syncCheckboxRows(original, expectedCount: 3)
 let firstOutput = originalRows.first { ($0["description"] as? String) == "A: MIDI Output: Sync" }!
 precondition(values[firstOutput["identity"] as! String] == 0)
+var indexDrift = current
+var indexBounds = indexDrift["bounds"] as! [String: Any]
+indexBounds["window_count"] = 2
+indexBounds["windows_observed"] = 2
+indexDrift["bounds"] = indexBounds
+var originalIndexBounds = original["bounds"] as! [String: Any]
+originalIndexBounds["window_count"] = 2
+originalIndexBounds["windows_observed"] = 2
+var originalWithTwoWindows = original
+originalWithTwoWindows["bounds"] = originalIndexBounds
+var indexWindow = indexDrift["settings_window"] as! [String: Any]
+indexWindow["index"] = 1
+indexDrift["settings_window"] = indexWindow
+_ = try historicalSyncRestoreValues(originalWithTwoWindows, indexDrift)
+var invalidWindow = indexDrift
+var invalidWindowFields = invalidWindow["settings_window"] as! [String: Any]
+invalidWindowFields["index"] = 2
+invalidWindow["settings_window"] = invalidWindowFields
+var invalidIndexRejected = false
+do { _ = try historicalSyncRestoreValues(originalWithTwoWindows, invalidWindow) }
+catch { invalidIndexRejected = true }
+precondition(invalidIndexRejected, "out-of-range Settings index must fail closed")
+invalidWindow = indexDrift
+invalidWindowFields = invalidWindow["settings_window"] as! [String: Any]
+invalidWindowFields["title"] = "Other"
+invalidWindow["settings_window"] = invalidWindowFields
+var invalidTitleRejected = false
+do { _ = try historicalSyncRestoreValues(originalWithTwoWindows, invalidWindow) }
+catch { invalidTitleRejected = true }
+precondition(invalidTitleRejected, "Settings title change must fail closed")
 func nativeShape(_ inventory: [String: Any]) -> [String: Any] {
     ["target": inventory["target"]!,
      "settings_window": inventory["settings_window"]!,
@@ -1334,6 +1389,10 @@ func nativeShape(_ inventory: [String: Any]) -> [String: Any] {
 let live = nativeShape(current)
 let compared = try compareSyncInventoryValues(current, live, values: values)
 precondition(compared.count == originalRows.count, "Python v2 baseline must match native-shaped live inventory")
+let twoWindowReference = nativeShape(originalWithTwoWindows)
+let twoWindowLive = nativeShape(indexDrift)
+let indexDriftValues = try historicalSyncRestoreValues(originalWithTwoWindows, indexDrift)
+_ = try compareSyncInventoryValues(twoWindowReference, twoWindowLive, values: indexDriftValues)
 func compareRejects(_ candidate: [String: Any]) -> Bool {
     do { _ = try compareSyncInventoryValues(current, candidate, values: values); return false }
     catch { return true }
@@ -1345,9 +1404,31 @@ liveChanged["target"] = liveTarget
 precondition(compareRejects(liveChanged), "native process generation drift must stop")
 liveChanged = live
 var liveWindow = liveChanged["settings_window"] as! [String: Any]
+liveWindow["identity"] = "other-window"
+liveChanged["settings_window"] = liveWindow
+precondition(compareRejects(liveChanged), "native Settings identity drift must stop")
+liveChanged = live
+liveWindow = liveChanged["settings_window"] as! [String: Any]
+liveWindow["title"] = "Other"
+liveChanged["settings_window"] = liveWindow
+precondition(compareRejects(liveChanged), "native Settings title drift must stop")
+liveChanged = live
+liveWindow = liveChanged["settings_window"] as! [String: Any]
 liveWindow["index"] = 1
 liveChanged["settings_window"] = liveWindow
-precondition(compareRejects(liveChanged), "native Settings index drift must stop")
+var indexRangeBounds = liveChanged["bounds"] as! [String: Any]
+indexRangeBounds["window_count"] = 2
+indexRangeBounds["windows_observed"] = 2
+liveChanged["bounds"] = indexRangeBounds
+var indexRangeReference = live
+var referenceRangeBounds = indexRangeReference["bounds"] as! [String: Any]
+referenceRangeBounds["window_count"] = 2
+referenceRangeBounds["windows_observed"] = 2
+indexRangeReference["bounds"] = referenceRangeBounds
+let indexRangeValues = try historicalSyncRestoreValues(originalWithTwoWindows, indexDrift)
+let indexRangeCompared = try compareSyncInventoryValues(indexRangeReference, liveChanged, values: indexRangeValues)
+precondition(indexRangeCompared.count == originalRows.count,
+             "native Settings index drift must preserve the identified complete inventory")
 liveChanged = live
 var liveRows = liveChanged["checkboxes"] as! [[String: Any]]
 liveRows.removeLast()
@@ -1388,6 +1469,16 @@ var window = changed["settings_window"] as! [String: Any]
 window["identity"] = "other-window"
 changed["settings_window"] = window
 precondition(rejects(changed), "Settings identity drift must stop")
+changed = current
+window = changed["settings_window"] as! [String: Any]
+window["title"] = "Other"
+changed["settings_window"] = window
+precondition(rejects(changed), "Settings title drift must stop")
+changed = current
+window = changed["settings_window"] as! [String: Any]
+window["index"] = true
+changed["settings_window"] = window
+precondition(rejects(changed), "invalid Settings index type must stop")
 changed = current
 var rows = changed["checkboxes"] as! [[String: Any]]
 rows.removeLast()
