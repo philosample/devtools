@@ -341,6 +341,16 @@ def _valid_focus_report(
     )
 
 
+def _native_focus_diagnostic(report: object, returncode: int) -> dict:
+    diagnostic = {"returncode": returncode, "json_object": isinstance(report, dict)}
+    if isinstance(report, dict):
+        for field, maximum in (("status", 32), ("phase", 128), ("error", 512)):
+            value = report.get(field)
+            if isinstance(value, str):
+                diagnostic[field] = value[:maximum]
+    return diagnostic
+
+
 def _valid_position_report(
     report: object,
     *,
@@ -1015,6 +1025,10 @@ def run_live_transport(
                 uncertain["error"] = (
                     "native helper returned an invalid or incomplete receipt; inspect Live before retry"
                 )
+                if selected_action in {"focus-window", "position-window"}:
+                    uncertain["native_helper"] = _native_focus_diagnostic(
+                        report, result.returncode
+                    )
                 if selected_action == "play":
                     for name in ("settings_close", "play", "stop"):
                         uncertain["actions"][name] = {

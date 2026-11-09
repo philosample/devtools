@@ -534,9 +534,36 @@ func currentProcessMatches(_ pid: pid_t, bundleID: String) -> Bool {
 
 func processGeneration(_ process: NSRunningApplication) throws -> Int64 {
     guard let launchDate = process.launchDate else { throw TransportFailure(phase: phase, message: "Live process generation is unavailable") }
+    guard let value = processGenerationValue(launchDate) else { throw TransportFailure(phase: phase, message: "Live process generation is invalid") }
+    return value
+}
+
+func processGenerationValue(_ launchDate: Date) -> Int64? {
     let value = launchDate.timeIntervalSince1970 * 1_000_000
-    guard value.isFinite, value > 0, value < Double(Int64.max) else { throw TransportFailure(phase: phase, message: "Live process generation is invalid") }
+    guard value.isFinite, value > 0, value < Double(Int64.max) else { return nil }
     return Int64(value.rounded(.towardZero))
+}
+
+func focusSnapshotValidationError(snapshotObservedAtUTC: String,
+                                  snapshotLaunchDate: String,
+                                  processLaunch: Date,
+                                  expectedGeneration: Int64,
+                                  now: Date) -> String? {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let snapshotDate = formatter.date(from: snapshotObservedAtUTC),
+          let snapshotLaunch = formatter.date(from: snapshotLaunchDate) else {
+        return "AX snapshot observation or launch date is invalid"
+    }
+    let snapshotAge = now.timeIntervalSince(snapshotDate)
+    guard snapshotAge >= -2 && snapshotAge <= 30 else {
+        return "AX snapshot is stale or from the future"
+    }
+    guard processGenerationValue(processLaunch) == expectedGeneration,
+          formatter.string(from: snapshotLaunch) == formatter.string(from: processLaunch) else {
+        return "AX snapshot belongs to a different Live process generation"
+    }
+    return nil
 }
 
 func pumpRunLoopTurn(until deadline: UInt64) {
@@ -946,21 +973,18 @@ func focusWindowAction(_ app: AXUIElement, process: NSRunningApplication, url: U
     let timestamp = ISO8601DateFormatter()
     timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     if !options.execute {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let snapshotDate = formatter.date(from: options.snapshotObservedAtUTC),
-              let snapshotLaunch = formatter.date(from: options.snapshotLaunchDate) else {
-            throw TransportFailure(phase: phase, message: "AX snapshot observation or launch date is invalid")
-        }
-        let snapshotAge = Date().timeIntervalSince(snapshotDate)
-        let snapshotGeneration = Int64((snapshotLaunch.timeIntervalSince1970 * 1_000).rounded(.towardZero))
         guard let processLaunch = process.launchDate else {
             throw TransportFailure(phase: phase, message: "Live launch date is unavailable")
         }
-        let processGenerationAtSnapshotPrecision = Int64((processLaunch.timeIntervalSince1970 * 1_000).rounded(.towardZero))
-        try require(snapshotAge >= -2 && snapshotAge <= 30, "AX snapshot is stale or from the future")
-        try require(snapshotGeneration == processGenerationAtSnapshotPrecision && processGenerationAtSnapshotPrecision == gen / 1_000,
-                    "AX snapshot belongs to a different Live process generation")
+        if let error = focusSnapshotValidationError(
+            snapshotObservedAtUTC: options.snapshotObservedAtUTC,
+            snapshotLaunchDate: options.snapshotLaunchDate,
+            processLaunch: processLaunch,
+            expectedGeneration: options.expectedGeneration ?? 0,
+            now: Date()
+        ) {
+            throw TransportFailure(phase: phase, message: error)
+        }
         return focusWindowPreflightReport(
             observedAt: timestamp.string(from: Date()),
             snapshotObservedAt: options.snapshotObservedAtUTC,
