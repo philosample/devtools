@@ -13,6 +13,7 @@ from codex_devtools.cli import build_parser, main
 from codex_devtools.live_transport_control import (
     FORMAT,
     _native_command,
+    _native_focus_diagnostic,
     _valid_focus_report,
     _valid_position_report,
     _valid_report,
@@ -512,6 +513,83 @@ class LiveTransportControlTests(unittest.TestCase):
                 )
             compile_helper.assert_not_called()
 
+    def test_focus_window_invalid_receipt_preserves_bounded_native_diagnostic(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            receipt_path = root / "preflight.json"
+            native_error = "TransportFailure(phase: focus-window-preflight, refusal)"
+            native_report = {
+                "format": "codex-devtools-live-transport-receipt-v1",
+                "status": "stopped",
+                "phase": "focus-window-preflight",
+                "action": "focus-window",
+                "read_only": True,
+                "target": {"pid": PID, "bundle_identifier": BUNDLE},
+                "set_url": set_path.as_uri(),
+                "actions": {},
+                "error": native_error,
+            }
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["native"], 1, json.dumps(native_report), ""
+                    ),
+                ) as native_run,
+            ):
+                result = run_live_transport(
+                    PID,
+                    expected_bundle_id=BUNDLE,
+                    set_path=set_path,
+                    action="focus-window",
+                    window_identity="1685072721",
+                    expected_generation=123456,
+                    snapshot_observed_at_utc="2026-11-08T12:00:00.000Z",
+                    snapshot_launch_date="2026-11-08T11:00:00.000Z",
+                    receipt_path=receipt_path,
+                    execute=False,
+                )
+
+            self.assertEqual(result["status"], "stopped")
+            self.assertEqual(result["phase"], "native-helper-invalid-receipt")
+            self.assertEqual(
+                result["error"],
+                "native helper returned an invalid or incomplete receipt; inspect Live before retry",
+            )
+            self.assertTrue(result["read_only"])
+            self.assertEqual(result["actions"], {})
+            self.assertFalse(result["manual_inspection_required"])
+            self.assertEqual(
+                result["native_helper"],
+                {
+                    "returncode": 1,
+                    "json_object": True,
+                    "status": "stopped",
+                    "phase": "focus-window-preflight",
+                    "error": native_error,
+                },
+            )
+            self.assertNotIn("--execute", native_run.call_args.args[0])
+            self.assertEqual(
+                json.loads(receipt_path.read_text(encoding="utf-8")), result
+            )
+
+    def test_focus_window_native_diagnostic_bounds_error_text(self):
+        diagnostic = _native_focus_diagnostic({"error": "x" * 600}, 1)
+        self.assertEqual(diagnostic["returncode"], 1)
+        self.assertTrue(diagnostic["json_object"])
+        self.assertEqual(len(diagnostic["error"]), 512)
+
     def test_focus_window_python_caller_runs_hash_pinned_two_stage_contract(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
             root = Path(temporary)
@@ -809,6 +887,120 @@ precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.li
                     "-o",
                     str(binary),
                 ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(binary)], capture_output=True, text=True, check=False, timeout=5
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(Path("/usr/bin/xcrun").exists(), "Swift toolchain required")
+    def test_swift_focus_snapshot_generation_uses_serialized_precision_and_exact_token(
+        self,
+    ):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_transport.swift"
+        ).read_text(encoding="utf-8")
+        token_start = source.index("func processGenerationValue(")
+        token_end = source.index("\nfunc focusSnapshotValidationError(", token_start)
+        validation_start = token_end + 1
+        validation_end = source.index("\nfunc ", validation_start)
+        production_contract = (
+            source[token_start:token_end] + source[validation_start:validation_end]
+        )
+        harness = f"""
+import Foundation
+{production_contract}
+let formatter = ISO8601DateFormatter()
+formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+let now = formatter.date(from: "2026-11-09T14:18:49.022Z")!
+let currentSnapshot = formatter.string(from: now)
+
+let roundedUpProcess = Date(timeIntervalSince1970: 1794176539.052507)
+let roundedUpGeneration = processGenerationValue(roundedUpProcess)!
+precondition(roundedUpGeneration == 1794176539052507)
+precondition(formatter.string(from: roundedUpProcess) == "2026-11-08T22:22:19.053Z")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: currentSnapshot,
+  snapshotLaunchDate: "2026-11-08T22:22:19.053Z",
+  processLaunch: roundedUpProcess,
+  expectedGeneration: roundedUpGeneration,
+  now: now
+) == nil)
+
+let roundedDownProcess = Date(timeIntervalSince1970: 1794176539.0524)
+let roundedDownGeneration = processGenerationValue(roundedDownProcess)!
+precondition(formatter.string(from: roundedDownProcess) == "2026-11-08T22:22:19.052Z")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: currentSnapshot,
+  snapshotLaunchDate: "2026-11-08T22:22:19.052Z",
+  processLaunch: roundedDownProcess,
+  expectedGeneration: roundedDownGeneration,
+  now: now
+) == nil)
+
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: currentSnapshot,
+  snapshotLaunchDate: "2026-11-08T22:22:19.053Z",
+  processLaunch: roundedUpProcess,
+  expectedGeneration: roundedUpGeneration + 1,
+  now: now
+) == "AX snapshot belongs to a different Live process generation")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: currentSnapshot,
+  snapshotLaunchDate: "2026-11-08T22:22:19.054Z",
+  processLaunch: roundedUpProcess,
+  expectedGeneration: roundedUpGeneration,
+  now: now
+) == "AX snapshot belongs to a different Live process generation")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: formatter.string(from: now.addingTimeInterval(-30)),
+  snapshotLaunchDate: "2026-11-08T22:22:19.053Z",
+  processLaunch: roundedUpProcess,
+  expectedGeneration: roundedUpGeneration,
+  now: now
+) == nil)
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: formatter.string(from: now.addingTimeInterval(-31)),
+  snapshotLaunchDate: "2026-11-08T22:22:19.053Z",
+  processLaunch: roundedUpProcess,
+  expectedGeneration: roundedUpGeneration,
+  now: now
+) == "AX snapshot is stale or from the future")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: formatter.string(from: now.addingTimeInterval(3)),
+  snapshotLaunchDate: "2026-11-08T22:22:19.053Z",
+  processLaunch: roundedUpProcess,
+  expectedGeneration: roundedUpGeneration,
+  now: now
+) == "AX snapshot is stale or from the future")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: "not-an-ISO8601-time",
+  snapshotLaunchDate: "2026-11-08T22:22:19.053Z",
+  processLaunch: roundedUpProcess,
+  expectedGeneration: roundedUpGeneration,
+  now: now
+) == "AX snapshot observation or launch date is invalid")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: currentSnapshot,
+  snapshotLaunchDate: "not-an-ISO8601-time",
+  processLaunch: roundedUpProcess,
+  expectedGeneration: roundedUpGeneration,
+  now: now
+) == "AX snapshot observation or launch date is invalid")
+"""
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            main_swift = Path(temporary) / "main.swift"
+            binary = Path(temporary) / "focus-generation"
+            main_swift.write_text(harness, encoding="utf-8")
+            compiled = subprocess.run(
+                ["/usr/bin/xcrun", "swiftc", str(main_swift), "-o", str(binary)],
                 capture_output=True,
                 text=True,
                 check=False,
