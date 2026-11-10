@@ -454,6 +454,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--expect-amxd-sha256",
         help="require the expected and referenced AMXD bytes to match this SHA-256",
     )
+    copy_ref = ableton_sub.add_parser(
+        "copy-with-device-ref",
+        help="preview or create a new sibling Set with one exact device reference",
+    )
+    copy_ref.add_argument("source", type=Path)
+    copy_ref.add_argument("destination", type=Path)
+    copy_ref.add_argument("--source-sha256", required=True)
+    copy_ref.add_argument("--old-amxd", type=Path, required=True)
+    copy_ref.add_argument("--old-sha256", required=True)
+    copy_ref.add_argument("--new-amxd", type=Path, required=True)
+    copy_ref.add_argument("--new-sha256", required=True)
+    copy_ref.add_argument("--execute", action="store_true")
     worktree = commands.add_parser(
         "worktree", help="track local ownership and guarded post-merge cleanup"
     )
@@ -670,6 +682,22 @@ def main(argv: list[str] | None = None) -> int:
                 expected_amxd_sha256=args.expect_amxd_sha256,
             )
             _json_out(result)
+            return 0
+        if args.group == "ableton" and args.action == "copy-with-device-ref":
+            from .ableton_copy import copy_with_device_ref
+
+            _json_out(
+                copy_with_device_ref(
+                    args.source,
+                    args.destination,
+                    source_sha256=args.source_sha256,
+                    old_amxd=args.old_amxd,
+                    old_sha256=args.old_sha256,
+                    new_amxd=args.new_amxd,
+                    new_sha256=args.new_sha256,
+                    execute=args.execute,
+                )
+            )
             return 0
         if args.group == "ax" and args.action == "snapshot":
             from .ax_snapshot import snapshot

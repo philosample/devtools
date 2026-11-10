@@ -45,3 +45,26 @@ path. It does not prove which device instance is active in Live, whether Live
 successfully resolved the dependency, or what the hosted device is doing. No
 folder scan, Set write, relocation, application launch, MIDI endpoint action,
 or installation is performed.
+
+## Explicit sibling copy with one replacement
+
+`ableton copy-with-device-ref SOURCE.als FRESH.als --source-sha256 HASH
+--old-amxd OLD.amxd --old-sha256 HASH --new-amxd NEW.amxd --new-sha256 HASH`
+previews a narrow reference change. Add `--execute` to create the new file.
+This separate action never changes the source or opens Live.
+
+Both Set paths must be canonical siblings in the same directory, preserving
+the original Project location. The destination must not exist. The source must
+contain exactly one FileRef, with an absolute old device path and a type-1
+relative path equal to that device's path relative to the Set directory.
+Only the Path and RelativePath attribute values change; all other decompressed
+XML bytes are preserved. Unsupported layouts fail instead of being normalized.
+The original Set and both device files must match their SHA-256 pins. Execution
+rechecks the pins, creates the destination exclusively, flushes it and its
+directory, and inspects the new reference and hash. A write/readback error can
+leave a new partial file; preserve it for inspection and never blindly retry.
+
+The JSON report records the output hash, replacement file hash and whether a
+copy occurred. This does not attest sidecars or replace complete package
+verification. A copied reference is not Live load, dependency resolution,
+parameter recall or performance evidence; qualify those independently.
