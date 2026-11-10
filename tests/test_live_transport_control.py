@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from unittest.mock import patch
 from codex_devtools.cli import build_parser, main
 from codex_devtools.live_transport_control import (
     FORMAT,
+    _cached_inspection_helper,
     _native_command,
     _native_focus_diagnostic,
     _valid_focus_report,
@@ -1583,10 +1585,9 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
                     return_value="Darwin",
                 ),
                 patch(
-                    "codex_devtools.live_transport_control._compile_helper",
-                    side_effect=lambda *_args: (
-                        events.append("compile")
-                        or subprocess.CompletedProcess(["swiftc"], 0, "", "")
+                    "codex_devtools.live_transport_control._cached_inspection_helper",
+                    side_effect=lambda *_args, **_kwargs: (
+                        events.append("cache") or Path("/tmp/live-transport")
                     ),
                 ),
                 patch(
@@ -1599,10 +1600,158 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
                 result = run_live_transport(
                     PID, expected_bundle_id=BUNDLE, set_path=set_path
                 )
-        self.assertEqual(events, ["compile", "inspect"])
+        self.assertEqual(events, ["cache", "inspect"])
         self.assertTrue(result["read_only"])
         self.assertEqual(result["set_url"], set_path.as_uri())
         self.assertEqual(result["status"], "observed")
+
+    def test_inspect_reuses_verified_helper_but_invokes_native_runner_each_time(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            set_path = root / "recall.als"
+            set_path.write_bytes(b"test Set")
+            cache_root = root / "cache"
+            events = []
+            native_commands = []
+            completed = subprocess.CompletedProcess(
+                args=["native"],
+                returncode=0,
+                stdout=json.dumps(transport_report(set_path, "inspect")),
+                stderr="",
+            )
+
+            def compile_helper(_source, binary):
+                events.append("compile")
+                binary.write_bytes(b"verified fake executable")
+                return subprocess.CompletedProcess(["swiftc"], 0, "", "")
+
+            def invoke_native(command, **_kwargs):
+                events.append("native-inspect")
+                native_commands.append(command)
+                return completed
+
+            with (
+                patch(
+                    "codex_devtools.live_transport_control.platform.system",
+                    return_value="Darwin",
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._inspection_cache_root",
+                    return_value=cache_root,
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._toolchain_identity",
+                    return_value={"compiler_version": "Swift test compiler"},
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    side_effect=compile_helper,
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.subprocess.run",
+                    side_effect=invoke_native,
+                ),
+            ):
+                first = run_live_transport(
+                    PID, expected_bundle_id=BUNDLE, set_path=set_path
+                )
+                second = run_live_transport(
+                    PID, expected_bundle_id=BUNDLE, set_path=set_path
+                )
+
+        self.assertEqual(first["status"], "observed")
+        self.assertEqual(second["status"], "observed")
+        self.assertEqual(events, ["compile", "native-inspect", "native-inspect"])
+        self.assertEqual(len(native_commands), 2)
+        self.assertEqual(native_commands[0], native_commands[1])
+        self.assertIn(str(cache_root), native_commands[0][0])
+
+    def test_inspection_helper_cache_invalidates_on_source_and_toolchain_changes(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            source = root / "helper.swift"
+            source.write_text("source one", encoding="utf-8")
+            cache_root = root / "cache"
+            toolchain = {"compiler_version": "Swift A"}
+            compiled = []
+
+            def compile_helper(_source, binary):
+                compiled.append(binary)
+                binary.write_bytes(f"binary {len(compiled)}".encode())
+                return subprocess.CompletedProcess(["swiftc"], 0, "", "")
+
+            with (
+                patch(
+                    "codex_devtools.live_transport_control._toolchain_identity",
+                    side_effect=lambda: dict(toolchain),
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    side_effect=compile_helper,
+                ),
+            ):
+                first = _cached_inspection_helper(source, cache_root=cache_root)
+                same = _cached_inspection_helper(source, cache_root=cache_root)
+                source.write_text("source two", encoding="utf-8")
+                changed_source = _cached_inspection_helper(
+                    source, cache_root=cache_root
+                )
+                toolchain["compiler_version"] = "Swift B"
+                changed_toolchain = _cached_inspection_helper(
+                    source, cache_root=cache_root
+                )
+
+        self.assertEqual(len(compiled), 3)
+        self.assertEqual(first, same)
+        self.assertNotEqual(first, changed_source)
+        self.assertNotEqual(changed_source, changed_toolchain)
+
+    def test_inspection_helper_cache_rejects_tampered_binary_and_symlink_entry(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            source = root / "helper.swift"
+            source.write_text("source", encoding="utf-8")
+            cache_root = root / "cache"
+            compiled = []
+
+            def compile_helper(_source, binary):
+                compiled.append(binary)
+                binary.write_bytes(b"valid fake executable")
+                return subprocess.CompletedProcess(["swiftc"], 0, "", "")
+
+            with (
+                patch(
+                    "codex_devtools.live_transport_control._toolchain_identity",
+                    return_value={"compiler_version": "Swift A"},
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    side_effect=compile_helper,
+                ),
+            ):
+                binary = _cached_inspection_helper(source, cache_root=cache_root)
+                binary.chmod(0o755)
+                with self.assertRaisesRegex(RuntimeError, "unsafe file metadata"):
+                    _cached_inspection_helper(source, cache_root=cache_root)
+                binary.chmod(0o700)
+                binary.write_bytes(b"tampered executable")
+                with self.assertRaisesRegex(RuntimeError, "binary hash mismatch"):
+                    _cached_inspection_helper(source, cache_root=cache_root)
+                entry = binary.parent
+                shutil.rmtree(entry)
+                outside = root / "outside"
+                outside.mkdir(mode=0o700)
+                (outside / "live_transport").write_bytes(b"untrusted")
+                (outside / "manifest.json").write_text("{}", encoding="utf-8")
+                entry.symlink_to(outside, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, "unsafe file metadata"):
+                    _cached_inspection_helper(source, cache_root=cache_root)
+                symlink_root = root / "cache-link"
+                symlink_root.symlink_to(outside, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, "cache directory is unsafe"):
+                    _cached_inspection_helper(source, cache_root=symlink_root)
+
+        self.assertEqual(len(compiled), 1)
 
     def test_inspect_preserves_validated_native_failure_receipt(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
@@ -1663,8 +1812,8 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
                     return_value="Darwin",
                 ),
                 patch(
-                    "codex_devtools.live_transport_control._compile_helper",
-                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                    "codex_devtools.live_transport_control._cached_inspection_helper",
+                    return_value=Path("/tmp/live-transport"),
                 ),
                 patch(
                     "codex_devtools.live_transport_control.subprocess.run",
@@ -1990,8 +2139,8 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
                     return_value="Darwin",
                 ),
                 patch(
-                    "codex_devtools.live_transport_control._compile_helper",
-                    return_value=subprocess.CompletedProcess(["swiftc"], 0, "", ""),
+                    "codex_devtools.live_transport_control._cached_inspection_helper",
+                    return_value=Path("/tmp/live-transport"),
                 ),
                 patch(
                     "codex_devtools.live_transport_control.subprocess.run",

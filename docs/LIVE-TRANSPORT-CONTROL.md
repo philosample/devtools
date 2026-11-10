@@ -18,8 +18,24 @@ Settings inventory:
       --execute --action play --play-for-seconds 5 --expected-output-count 23 \
       --receipt /private/tmp/live-transport-play.json
 
-The wrapper compiles the native helper before taking the fresh MIDI Output Sync
-inspection. Play requires exactly the independently supplied number of output
+The read-only `inspect` action reuses a compiled helper from the private
+`~/Library/Caches/codex-devtools/live-transport` cache. Its content-addressed
+identity includes the Swift source hash, resolved compiler path, compiler hash
+and version, selected Xcode developer directory, macOS SDK path/version, fixed
+compiler arguments, OS version, and architecture.
+The source and toolchain identity are checked again across compilation. Cache
+entries are published as complete directories and include a manifest with the
+compiled binary hash. Before every invocation, the wrapper requires owner-only
+regular files and directories and verifies the binary hash. A symlink, unsafe
+mode, malformed manifest, or hash mismatch stops inspection without running
+that helper. This protects against accidental or other-user cache tampering; it
+does not attest against a process running as the same user that can alter the
+cache between verification and execution. No transport observations are cached:
+each `inspect` still starts a fresh native process and validates its current
+PID, bundle, exact Set URL, and receipt. Play, Stop, focus-window, and
+position-window continue compiling into a fresh temporary directory each time.
+
+Play requires exactly the independently supplied number of output
 Sync controls to be readable and all off in that inspection. The helper checks
 the fresh baseline age and re-reads the complete, bounded Settings tree before
 closing only the unique Settings window with its

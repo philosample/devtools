@@ -7,6 +7,7 @@ import json
 import math
 import os
 import platform
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -25,6 +26,8 @@ MAX_PLAY_SECONDS = 15
 MAX_EXPECTED_OUTPUT_COUNT = 128
 COMPILE_TIMEOUT_SECONDS = 60
 NATIVE_TIMEOUT_SECONDS = 240
+_INSPECTION_CACHE_FORMAT = "codex-devtools-live-transport-helper-cache-v1"
+_INSPECTION_CACHE_MAX_MANIFEST_BYTES = 32_768
 
 
 def _set_file(path: Path) -> Path:
@@ -533,6 +536,220 @@ def _compile_helper(source: Path, binary: Path) -> subprocess.CompletedProcess[s
     )
 
 
+def _toolchain_identity() -> dict[str, object]:
+    """Describe the exact local Swift compiler and SDK used for this helper."""
+    commands = (
+        ["/usr/bin/xcrun", "--find", "swiftc"],
+        ["/usr/bin/xcrun", "swiftc", "--version"],
+        ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"],
+        ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"],
+        ["/usr/bin/xcode-select", "-p"],
+    )
+    outputs: list[str] = []
+    for command in commands:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode:
+            raise RuntimeError(
+                f"cannot identify Swift toolchain ({command[-1]}): "
+                f"{result.stderr.strip()[-1000:]}"
+            )
+        value = result.stdout.strip()
+        if not value or len(value) > 4096:
+            raise RuntimeError("Swift toolchain returned an invalid identity value")
+        outputs.append(value)
+    compiler = Path(outputs[0]).resolve(strict=True)
+    compiler_stat = compiler.stat()
+    return {
+        "compiler_path": str(compiler),
+        "compiler_size": compiler_stat.st_size,
+        "compiler_mtime_ns": compiler_stat.st_mtime_ns,
+        "compiler_sha256": _hash_file(compiler),
+        "compiler_version": outputs[1],
+        "sdk_path": str(Path(outputs[2]).resolve(strict=True)),
+        "sdk_version": outputs[3],
+        "selected_developer_directory": str(Path(outputs[4]).resolve(strict=True)),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "os_version": f"{platform.system()}-{platform.release()}",
+    }
+
+
+def _inspection_cache_root() -> Path:
+    return Path.home() / "Library" / "Caches" / "codex-devtools" / "live-transport"
+
+
+def _check_cache_directory(path: Path, *, create: bool = False) -> None:
+    if create:
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise RuntimeError(
+            f"inspection helper cache directory is unavailable: {path}"
+        ) from error
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise RuntimeError(f"inspection helper cache directory is unsafe: {path}")
+
+
+def _prepare_inspection_cache(root: Path) -> None:
+    home = Path.home()
+    if root == _inspection_cache_root():
+        for directory in (home / "Library", home / "Library" / "Caches"):
+            try:
+                info = directory.lstat()
+            except OSError as error:
+                raise RuntimeError(
+                    f"user cache parent is unavailable: {directory}"
+                ) from error
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                raise RuntimeError(f"user cache parent is unsafe: {directory}")
+    _check_cache_directory(root.parent, create=True)
+    _check_cache_directory(root, create=True)
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _cache_entry_binary(entry: Path, expected_identity: dict[str, object]) -> Path:
+    try:
+        directory = entry.lstat()
+        manifest_path = entry / "manifest.json"
+        binary = entry / "live_transport"
+        manifest_info = manifest_path.lstat()
+        binary_info = binary.lstat()
+        if (
+            not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != os.getuid()
+            or stat.S_IMODE(directory.st_mode) != 0o700
+            or not stat.S_ISREG(manifest_info.st_mode)
+            or manifest_info.st_uid != os.getuid()
+            or stat.S_IMODE(manifest_info.st_mode) != 0o600
+            or manifest_info.st_size > _INSPECTION_CACHE_MAX_MANIFEST_BYTES
+            or not stat.S_ISREG(binary_info.st_mode)
+            or binary_info.st_uid != os.getuid()
+            or stat.S_IMODE(binary_info.st_mode) != 0o700
+        ):
+            raise RuntimeError("inspection helper cache entry has unsafe file metadata")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            "inspection helper cache entry is unreadable or corrupt"
+        ) from error
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"format", "identity", "binary_sha256"}
+        or manifest.get("format") != _INSPECTION_CACHE_FORMAT
+        or manifest.get("identity") != expected_identity
+        or not isinstance(manifest.get("binary_sha256"), str)
+        or len(manifest["binary_sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in manifest["binary_sha256"]
+        )
+    ):
+        raise RuntimeError(
+            "inspection helper cache manifest does not match its identity"
+        )
+    if _hash_file(binary) != manifest["binary_sha256"]:
+        raise RuntimeError("inspection helper cache binary hash mismatch")
+    return binary
+
+
+def _cached_inspection_helper(source: Path, *, cache_root: Path | None = None) -> Path:
+    """Compile once per exact source/toolchain identity for read-only inspect."""
+    root = cache_root or _inspection_cache_root()
+    _prepare_inspection_cache(root)
+    source_bytes = source.read_bytes()
+    identity: dict[str, object] = {
+        "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "compile_argv": [
+            "/usr/bin/xcrun",
+            "swiftc",
+            "-framework",
+            "ApplicationServices",
+            "-framework",
+            "AppKit",
+            "-framework",
+            "CoreGraphics",
+            "-framework",
+            "CryptoKit",
+        ],
+        "toolchain": _toolchain_identity(),
+    }
+    identity_bytes = json.dumps(
+        identity, sort_keys=True, separators=(",", ":")
+    ).encode()
+    key = hashlib.sha256(identity_bytes).hexdigest()
+    entry = root / key
+    if entry.exists() or entry.is_symlink():
+        return _cache_entry_binary(entry, identity)
+
+    staging = Path(tempfile.mkdtemp(prefix=".building-", dir=root))
+    try:
+        if (
+            source.read_bytes() != source_bytes
+            or _toolchain_identity() != identity["toolchain"]
+        ):
+            raise RuntimeError(
+                "Swift source or toolchain changed before helper compilation"
+            )
+        binary = staging / "live_transport"
+        compilation = _compile_helper(source, binary)
+        if compilation.returncode:
+            raise RuntimeError(
+                compilation.stderr.strip()[-2000:] or "native helper compilation failed"
+            )
+        os.chmod(binary, 0o700)
+        if (
+            source.read_bytes() != source_bytes
+            or _toolchain_identity() != identity["toolchain"]
+        ):
+            raise RuntimeError(
+                "Swift source or toolchain changed during helper compilation"
+            )
+        manifest = {
+            "format": _INSPECTION_CACHE_FORMAT,
+            "identity": identity,
+            "binary_sha256": _hash_file(binary),
+        }
+        manifest_bytes = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":")
+        ).encode()
+        if len(manifest_bytes) > _INSPECTION_CACHE_MAX_MANIFEST_BYTES:
+            raise RuntimeError(
+                "inspection helper cache manifest exceeds its size bound"
+            )
+        manifest_path = staging / "manifest.json"
+        manifest_path.write_bytes(manifest_bytes)
+        os.chmod(manifest_path, 0o600)
+        try:
+            os.rename(staging, entry)
+        except FileExistsError:
+            return _cache_entry_binary(entry, identity)
+        return _cache_entry_binary(entry, identity)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
 def _native_command(
     binary: Path,
     *,
@@ -812,9 +1029,13 @@ def run_live_transport(
             temporary_dir = Path(temporary)
             binary = temporary_dir / "live_transport"
             source = Path(__file__).with_name("live_transport.swift")
+            compilation = None
             try:
-                compilation = _compile_helper(source, binary)
-            except (OSError, subprocess.SubprocessError) as error:
+                if selected_action == "inspect":
+                    binary = _cached_inspection_helper(source)
+                else:
+                    compilation = _compile_helper(source, binary)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
                 initial["phase"] = "helper-compile"
                 initial["error"] = f"native helper compile failed: {error}"
                 return (
@@ -822,7 +1043,7 @@ def run_live_transport(
                     if execute or selected_action in {"focus-window", "position-window"}
                     else initial
                 )
-            if compilation.returncode:
+            if compilation is not None and compilation.returncode:
                 initial["phase"] = "helper-compile"
                 initial["error"] = (
                     compilation.stderr.strip()[-2000:]
