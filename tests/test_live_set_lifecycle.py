@@ -1,15 +1,19 @@
+import hashlib
 import io
 import json
+import plistlib
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from codex_devtools import live_set_lifecycle as lifecycle
 from codex_devtools.cli import main
 from codex_devtools.live_set_lifecycle import FORMAT, run_lifecycle
 
@@ -850,6 +854,512 @@ class LiveSetLifecycleTests(unittest.TestCase):
                 ]
             )
         self.assertEqual(status, 1)
+
+
+class PausedLifecycleTests(unittest.TestCase):
+    """Real CLI dispatch with disposable files and mocked native process/UI boundary."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.source = self.root / "Source.als"
+        self.destination = self.root / "Saved.als"
+        self.source.write_bytes(b"source")
+        self.destination.write_bytes(b"saved Set bytes")
+        self.app = self.root / "Live.app"
+        (self.app / "Contents/MacOS").mkdir(parents=True)
+        (self.app / "Contents/Info.plist").write_bytes(
+            plistlib.dumps(
+                {
+                    "CFBundleIdentifier": BUNDLE,
+                    "CFBundleExecutable": "Live",
+                    "CFBundlePackageType": "APPL",
+                }
+            )
+        )
+        (self.app / "Contents/MacOS/Live").write_bytes(b"fixture executable")
+        (self.app / "Contents/MacOS/Live").chmod(0o700)
+        self.path = self.root / "paused.json"
+        self.receipt = self.paused()
+        self.digest = self.write_receipt(self.receipt)
+
+    def paused(self):
+        return {
+            "format": lifecycle.PAUSED_FORMAT,
+            "mode": "stop-before-reopen",
+            "status": "saved-and-quit",
+            "read_only": False,
+            "target": {"pid": PID, "bundle_identifier": BUNDLE},
+            "source_set_url": self.source.as_uri(),
+            "destination_set_url": self.destination.as_uri(),
+            "saved_set": lifecycle._pin_file(self.destination),
+            "app": lifecycle._app_pin(self.app, BUNDLE),
+            "actions": dict(lifecycle.PAUSED_ACTIONS),
+            "paused_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "evidence_limit": lifecycle.EVIDENCE_LIMIT,
+        }
+
+    def write_receipt(self, receipt):
+        data = json.dumps(receipt).encode()
+        self.path.write_bytes(data)
+        return hashlib.sha256(data).hexdigest()
+
+    def resume_report(self, execute=False):
+        report = {
+            "format": lifecycle.RESUME_FORMAT,
+            "mode": "resume",
+            "status": "reopened" if execute else "ready",
+            "read_only": not execute,
+            "target": self.receipt["target"],
+            "resumed_from": {"path": str(self.path), "sha256": self.digest},
+            "saved_set": self.receipt["saved_set"],
+            "app": self.receipt["app"],
+            "actions": dict(lifecycle.NO_ACTIONS),
+            "evidence_limit": lifecycle.EVIDENCE_LIMIT,
+        }
+        if execute:
+            report["actions"]["open"] = "exact_set_window_observed"
+            report["reopened_target"] = {
+                "pid": PID + 1,
+                "bundle_identifier": BUNDLE,
+                "process_name": "Live",
+            }
+        return report
+
+    def cli(self, arguments, native):
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            patch(
+                "codex_devtools.live_set_lifecycle.platform.system",
+                return_value="Darwin",
+            ),
+            patch(
+                "codex_devtools.live_set_lifecycle.subprocess.run", side_effect=native
+            ) as run,
+            redirect_stdout(output),
+            redirect_stderr(errors),
+        ):
+            status = main(["ax", "live-set-lifecycle", *arguments])
+        return status, output.getvalue(), errors.getvalue(), run
+
+    def resume_args(self, execute=False):
+        return ["--resume-receipt", str(self.path), "--receipt-sha256", self.digest] + (
+            ["--execute"] if execute else []
+        )
+
+    @staticmethod
+    def completed(report, status=0):
+        return subprocess.CompletedProcess([], status, json.dumps(report), "")
+
+    def test_cli_pause_stops_with_saved_set_and_no_open(self):
+        self.destination.unlink()
+
+        def native(command, **kwargs):
+            self.assertIn("--stop-before-reopen", command)
+            self.assertIn("--execute", command)
+            self.assertNotIn("--resume-receipt", command)
+            self.destination.write_bytes(b"saved Set bytes")
+            return self.completed(self.paused())
+
+        status, output, _, run = self.cli(
+            [
+                "--pid",
+                str(PID),
+                "--expected-bundle-id",
+                BUNDLE,
+                "--source-set",
+                str(self.source),
+                "--destination-set",
+                str(self.destination),
+                "--app",
+                str(self.app),
+                "--stop-before-reopen",
+                "--execute",
+            ],
+            native,
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(output)["status"], "saved-and-quit")
+        self.assertEqual(json.loads(output)["actions"]["open"], "not_attempted")
+        self.assertEqual(run.call_count, 1)
+
+    def test_pause_timeout_and_invalid_native_receipts_remain_stopped(self):
+        for result in (
+            subprocess.TimeoutExpired("swift", 240),
+            subprocess.CompletedProcess([], 0, "not JSON", ""),
+            self.completed({**self.receipt, "unexpected": 1}),
+        ):
+            with self.subTest(result=result):
+                self.destination.unlink()
+
+                def native(*args, result=result, **kwargs):
+                    self.destination.write_bytes(b"saved Set bytes")
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+
+                status, output, _, run = self.cli(
+                    [
+                        "--pid",
+                        str(PID),
+                        "--expected-bundle-id",
+                        BUNDLE,
+                        "--source-set",
+                        str(self.source),
+                        "--destination-set",
+                        str(self.destination),
+                        "--app",
+                        str(self.app),
+                        "--stop-before-reopen",
+                        "--execute",
+                    ],
+                    native,
+                )
+                report = json.loads(output)
+                self.assertEqual(status, 1)
+                self.assertEqual(report["status"], "stopped")
+                self.assertEqual(report["actions"]["quit"], "outcome_unknown")
+                self.assertEqual(report["actions"]["open"], "not_attempted")
+                self.assertEqual(run.call_count, 1)
+
+    def test_cli_resume_preflight_and_execute_only_request_open(self):
+        for execute in (False, True):
+            with self.subTest(execute=execute):
+                status, output, _, run = self.cli(
+                    self.resume_args(execute),
+                    lambda *a, execute=execute, **k: self.completed(
+                        self.resume_report(execute)
+                    ),
+                )
+                self.assertEqual(status, 0)
+                self.assertEqual(json.loads(output)["actions"]["save"], "not_attempted")
+                command = run.call_args.args[0]
+                self.assertEqual("--execute" in command, execute)
+                self.assertEqual(command[2:], self.resume_args(execute))
+                self.assertNotIn("--source-set", command)
+                self.assertNotIn("--pid", command)
+                self.assertEqual(run.call_count, 1)
+
+    def test_cli_rejects_mixed_or_unpinned_resume_without_native_call(self):
+        for arguments in (
+            ["--resume-receipt", str(self.path)],
+            self.resume_args() + ["--pid", str(PID)],
+            self.resume_args() + ["--stop-before-reopen"],
+            ["--receipt-sha256", self.digest],
+        ):
+            with self.subTest(arguments=arguments):
+                status, _, _, run = self.cli(arguments, None)
+                self.assertEqual(status, 2)
+                run.assert_not_called()
+
+    def test_tampered_hash_schema_modes_actions_and_invalid_dates_fail_closed(self):
+        invalids = []
+        for key, value in (
+            ("mode", "save-quit-reopen"),
+            ("status", "reopened"),
+            ("format", FORMAT),
+            ("read_only", 0),
+            ("extra", True),
+            ("paused_at_utc", "invalid timestamp"),
+            ("paused_at_utc", "2000-01-01T00:00:00"),
+            ("actions", {**lifecycle.PAUSED_ACTIONS, "open": "outcome_unknown"}),
+            ("target", {"pid": True, "bundle_identifier": BUNDLE}),
+            ("saved_set", {**self.receipt["saved_set"], "unexpected": 1}),
+        ):
+            invalids.append({**self.receipt, key: value})
+        for receipt in invalids:
+            with self.subTest(receipt=receipt):
+                self.digest = self.write_receipt(receipt)
+                status, _, _, run = self.cli(self.resume_args(True), None)
+                self.assertEqual(status, 2)
+                run.assert_not_called()
+        self.digest = self.write_receipt(self.receipt)
+        self.path.write_bytes(self.path.read_bytes() + b" ")
+        status, _, errors, run = self.cli(self.resume_args(True), None)
+        self.assertEqual(status, 2)
+        self.assertIn("SHA-256 mismatch", errors)
+        run.assert_not_called()
+
+    def test_unchanged_paused_state_has_no_arbitrary_age_expiry(self):
+        self.receipt["paused_at_utc"] = "2000-01-01T00:00:00Z"
+        self.digest = self.write_receipt(self.receipt)
+        status, _, _, run = self.cli(
+            self.resume_args(), lambda *a, **k: self.completed(self.resume_report())
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(run.call_count, 1)
+
+    def test_duplicate_keys_and_symlink_receipts_are_refused(self):
+        data = self.path.read_bytes().replace(b"{", b'{"mode":"resume",', 1)
+        self.path.write_bytes(data)
+        self.digest = hashlib.sha256(data).hexdigest()
+        status, _, errors, run = self.cli(self.resume_args(True), None)
+        self.assertEqual(status, 2)
+        self.assertIn("duplicate", errors)
+        run.assert_not_called()
+        self.path.unlink()
+        other = self.root / "other.json"
+        other.write_bytes(data)
+        self.path.symlink_to(other)
+        status, _, _, run = self.cli(self.resume_args(True), None)
+        self.assertEqual(status, 2)
+        run.assert_not_called()
+
+    def test_changed_set_app_and_replaced_identity_fail_before_native(self):
+        for path in (
+            self.destination,
+            self.app / "Contents/MacOS/Live",
+            self.app / "Contents/Info.plist",
+        ):
+            with self.subTest(path=path):
+                old = path.read_bytes()
+                path.write_bytes(old + b"changed")
+                status, _, _, run = self.cli(self.resume_args(True), None)
+                self.assertEqual(status, 2)
+                run.assert_not_called()
+                path.write_bytes(old)
+                self.receipt = self.paused()
+                self.digest = self.write_receipt(self.receipt)
+        original = self.destination.read_bytes()
+        self.destination.unlink()
+        self.destination.write_bytes(original)
+        status, _, _, run = self.cli(self.resume_args(True), None)
+        self.assertEqual(status, 2)
+        run.assert_not_called()
+
+    def test_native_process_conflict_and_uncertain_open_receipts_are_preserved(self):
+        for attempted, reason in (
+            (False, "old PID reused"),
+            (False, "Live already running"),
+            (True, "LaunchServices callback timeout"),
+            (True, "exact AXDocument not observed"),
+        ):
+            with self.subTest(reason=reason):
+                report = {
+                    "format": lifecycle.RESUME_FORMAT,
+                    "mode": "resume",
+                    "status": "stopped",
+                    "read_only": False,
+                    "target": self.receipt["target"],
+                    "resumed_from": {"path": str(self.path), "sha256": self.digest},
+                    "phase": "launchservices-open" if attempted else "resume-preflight",
+                    "error": reason,
+                    "actions": {
+                        **lifecycle.NO_ACTIONS,
+                        "open": "outcome_unknown" if attempted else "not_attempted",
+                    },
+                    "manual_inspection_required": attempted,
+                }
+                status, output, _, run = self.cli(
+                    self.resume_args(True),
+                    lambda *a, report=report, **k: self.completed(report, 1),
+                )
+                self.assertEqual(status, 1)
+                self.assertEqual(json.loads(output), report)
+                self.assertEqual(run.call_count, 1)
+
+    def test_timeout_malformed_and_wrong_process_never_claim_reopen(self):
+        cases = [
+            subprocess.TimeoutExpired("swift", 240),
+            subprocess.CompletedProcess([], 0, "not JSON", ""),
+        ]
+        for target in (
+            {"pid": PID, "bundle_identifier": BUNDLE, "process_name": "Live"},
+            {"pid": PID + 1, "bundle_identifier": "other", "process_name": "Live"},
+        ):
+            report = self.resume_report(True)
+            report["reopened_target"] = target
+            cases.append(self.completed(report))
+        report = self.resume_report(True)
+        report["actions"]["save"] = "destination_observed"
+        cases.append(self.completed(report))
+        for result in cases:
+            with self.subTest(result=result):
+
+                def native(*args, result=result, **kwargs):
+                    if isinstance(result, Exception):
+                        raise result
+                    return result
+
+                status, output, _, run = self.cli(self.resume_args(True), native)
+                receipt = json.loads(output)
+                self.assertEqual(status, 1)
+                self.assertEqual(receipt["actions"]["open"], "outcome_unknown")
+                self.assertEqual(receipt["actions"]["save"], "not_attempted")
+                self.assertTrue(receipt["manual_inspection_required"])
+                self.assertEqual(run.call_count, 1)
+
+    def test_post_open_byte_drift_preserves_unknown_outcome(self):
+        def native(*args, **kwargs):
+            self.destination.write_bytes(b"changed while opening")
+            return self.completed(self.resume_report(True))
+
+        status, output, _, _ = self.cli(self.resume_args(True), native)
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(output)["actions"]["open"], "outcome_unknown")
+
+    @unittest.skipUnless(
+        sys.platform == "darwin", "AppKit compile fixture requires macOS"
+    )
+    def test_compiled_native_receipt_and_resume_guards_with_disposable_fixtures(self):
+        # Compile production validation/state-machine code, substituting only the
+        # trust/process/launch interfaces. This never inspects or launches Live.
+        source = Path(lifecycle.__file__).with_suffix(".swift").read_text()
+        library = source[: source.index("let options = parseOptions()")]
+        library = library.replace("AXIsProcessTrusted()", "fixtureTrust()")
+        library = library.replace(
+            "func requirePausedProcessAbsent(", "func unusedProcessGuard("
+        )
+        library = library.replace("func reopenLifecycleSet(", "func unusedReopen(")
+        harness = r"""
+let fixtureScenario = CommandLine.arguments[3]
+var fixtureProcessChecks = 0
+var fixtureOpenCalls = 0
+func fixtureTrust() -> Bool { true }
+func requirePausedProcessAbsent(pid: pid_t, bundleID: String) throws {
+    fixtureProcessChecks += 1
+    if (fixtureScenario == "conflict-first" && fixtureProcessChecks == 1) ||
+       (fixtureScenario == "conflict-final" && fixtureProcessChecks == 2) {
+        throw LifecycleFailure(phase: phase, message: "fixture process conflict")
+    }
+    if fixtureProcessChecks == 1 {
+        if fixtureScenario == "receipt-drift" {
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: CommandLine.arguments[1]))
+            try handle.seekToEnd(); try handle.write(contentsOf: Data(" ".utf8)); try handle.close()
+        }
+        if fixtureScenario == "set-drift" || fixtureScenario == "app-drift" {
+            let receipt = try lifecycleReceipt(fixtureOptions)
+            let saved = receipt["saved_set"] as! [String: Any]
+            let app = receipt["app"] as! [String: Any]
+            let executable = app["executable_file"] as! [String: Any]
+            let path = (fixtureScenario == "set-drift" ? saved["path"] : executable["path"]) as! String
+            try Data("changed bytes".utf8).write(to: URL(fileURLWithPath: path))
+        }
+    }
+}
+func reopenLifecycleSet(destination: URL, appURL: URL, oldPID: pid_t, bundleID: String,
+                        processName: String, source: URL) throws -> [String: Any] {
+    fixtureOpenCalls += 1; openAttempted = true
+    if fixtureScenario == "open-timeout" { throw LifecycleFailure(phase: "launchservices-open", message: "fixture callback timeout") }
+    return ["reopened_target": ["pid": oldPID + 1, "bundle_identifier": bundleID, "process_name": "Live"]]
+}
+var fixtureOptions = Options()
+fixtureOptions.resumeReceipt = CommandLine.arguments[1]
+fixtureOptions.receiptSHA256 = CommandLine.arguments[2]
+fixtureOptions.execute = fixtureScenario != "inspect"
+var fixtureReport: [String: Any]
+do { fixtureReport = try runResumeLifecycle(fixtureOptions) }
+catch { fixtureReport = stoppedResumeLifecycle(fixtureOptions, error: String(describing: error)) }
+let fixtureOutput: [String: Any] = ["report": fixtureReport, "process_checks": fixtureProcessChecks, "open_calls": fixtureOpenCalls]
+let fixtureData = try JSONSerialization.data(withJSONObject: fixtureOutput, options: [.sortedKeys])
+print(String(data: fixtureData, encoding: .utf8)!)
+"""
+        swift = self.root / "fixture.swift"
+        binary = self.root / "fixture"
+        swift.write_text(library + harness)
+        build = subprocess.run(
+            [
+                "/usr/bin/swiftc",
+                "-framework",
+                "ApplicationServices",
+                "-framework",
+                "AppKit",
+                "-framework",
+                "CoreGraphics",
+                str(swift),
+                "-o",
+                str(binary),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(build.returncode, 0, build.stderr)
+        for scenario, checks, opens in (
+            ("inspect", 1, 0),
+            ("execute", 2, 1),
+            ("conflict-first", 1, 0),
+            ("conflict-final", 2, 0),
+            ("receipt-drift", 1, 0),
+            ("set-drift", 1, 0),
+            ("app-drift", 1, 0),
+            ("open-timeout", 2, 1),
+        ):
+            with self.subTest(scenario=scenario):
+                self.destination.write_bytes(b"saved Set bytes")
+                (self.app / "Contents/MacOS/Live").write_bytes(b"fixture executable")
+                self.receipt = self.paused()
+                self.digest = self.write_receipt(self.receipt)
+                result = subprocess.run(
+                    [str(binary), str(self.path), self.digest, scenario],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                observed = json.loads(result.stdout)
+                self.assertEqual(observed["process_checks"], checks, observed)
+                self.assertEqual(observed["open_calls"], opens)
+                report = observed["report"]
+                expected = {"inspect": "ready", "execute": "reopened"}.get(
+                    scenario, "stopped"
+                )
+                self.assertEqual(report["status"], expected, report)
+                self.assertEqual(report["actions"]["save"], "not_attempted")
+                self.assertEqual(report["actions"]["quit"], "not_attempted")
+                if scenario == "open-timeout":
+                    self.assertEqual(report["actions"]["open"], "outcome_unknown")
+                    self.assertTrue(report["manual_inspection_required"])
+                elif expected == "stopped":
+                    self.assertEqual(report["actions"]["open"], "not_attempted")
+                    self.assertFalse(report["manual_inspection_required"])
+
+    def test_native_resume_guard_order_and_pause_boundary_have_no_save_replay(self):
+        source = (Path(lifecycle.__file__).with_suffix(".swift")).read_text()
+        resume = source[
+            source.index("func runResumeLifecycle(") : source.index(
+                "func stoppedResumeLifecycle("
+            )
+        ]
+        self.assertEqual(resume.count("try lifecycleReceipt(options)"), 2)
+        self.assertEqual(resume.count("try requirePausedProcessAbsent("), 2)
+        self.assertLess(
+            resume.index("if !options.execute { return report }"),
+            resume.rindex("try lifecycleReceipt(options)"),
+        )
+        self.assertLess(
+            resume.rindex("try requirePausedProcessAbsent("),
+            resume.index("try reopenLifecycleSet("),
+        )
+        self.assertNotIn("try press(", resume)
+        self.assertNotIn("activateExactTarget", resume)
+        self.assertNotIn("saveAttempted =", resume)
+        absent = source[
+            source.index("func requirePausedProcessAbsent(") : source.index(
+                "func runResumeLifecycle("
+            )
+        ]
+        self.assertIn("kill(pid, 0)", absent)
+        self.assertIn("errno == ESRCH", absent)
+        self.assertIn("NSRunningApplication(processIdentifier: pid) == nil", absent)
+        self.assertIn(".isEmpty", absent)
+        pause = source[
+            source.index('phase = "verify-exit"') : source.index(
+                "func reopenLifecycleSet("
+            )
+        ]
+        self.assertLess(
+            pause.index("process.isTerminated && NSRunningApplication"),
+            pause.index("if options.stopBeforeReopen"),
+        )
+        self.assertLess(
+            pause.index('"status": "saved-and-quit"'),
+            pause.index("return try reopenLifecycleSet("),
+        )
+        self.assertNotIn("NSWorkspace.shared.open", pause)
 
 
 if __name__ == "__main__":

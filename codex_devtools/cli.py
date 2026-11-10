@@ -282,9 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
         "live-set-lifecycle",
         help="inspect or explicitly save, quit and reopen one exact Live Set",
     )
-    lifecycle.add_argument("--pid", required=True, type=int)
-    lifecycle.add_argument("--expected-bundle-id", required=True)
-    lifecycle.add_argument("--source-set", required=True, type=Path)
+    lifecycle.add_argument("--pid", type=int)
+    lifecycle.add_argument("--expected-bundle-id")
+    lifecycle.add_argument("--source-set", type=Path)
     lifecycle.add_argument("--destination-set", type=Path)
     lifecycle.add_argument(
         "--app", type=Path, help="exact Live.app bundle URL for reopen"
@@ -293,6 +293,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--execute",
         action="store_true",
         help="perform guarded Save As, Quit and LaunchServices reopen; default only inspects",
+    )
+    lifecycle.add_argument(
+        "--stop-before-reopen",
+        action="store_true",
+        help="save and quit, then return a saved-and-quit receipt without reopening",
+    )
+    lifecycle.add_argument(
+        "--resume-receipt",
+        type=Path,
+        help="inspect or explicitly reopen a paused receipt; excludes Save As options",
+    )
+    lifecycle.add_argument(
+        "--receipt-sha256",
+        help="reviewed SHA-256 of exact paused receipt bytes",
     )
     set_open = ax_sub.add_parser(
         "live-set-open",
@@ -694,16 +708,42 @@ def main(argv: list[str] | None = None) -> int:
             _json_out(result)
             return 1 if result["status"] == "stopped" else 0
         if args.group == "ax" and args.action == "live-set-lifecycle":
-            from .live_set_lifecycle import run_lifecycle
+            from .live_set_lifecycle import run_lifecycle, run_resume_lifecycle
 
-            result = run_lifecycle(
-                args.pid,
-                expected_bundle_id=args.expected_bundle_id,
-                source_set=args.source_set,
-                destination_set=args.destination_set,
-                app_bundle=args.app,
-                execute=args.execute,
-            )
+            if args.resume_receipt is not None:
+                if (
+                    any(
+                        value is not None
+                        for value in (
+                            args.pid,
+                            args.expected_bundle_id,
+                            args.source_set,
+                            args.destination_set,
+                            args.app,
+                        )
+                    )
+                    or args.stop_before_reopen
+                ):
+                    raise ValueError(
+                        "resume accepts only receipt path, SHA-256 and optional --execute"
+                    )
+                result = run_resume_lifecycle(
+                    args.resume_receipt,
+                    receipt_sha256=args.receipt_sha256,
+                    execute=args.execute,
+                )
+            else:
+                if args.receipt_sha256 is not None:
+                    raise ValueError("--receipt-sha256 requires --resume-receipt")
+                result = run_lifecycle(
+                    args.pid,
+                    expected_bundle_id=args.expected_bundle_id,
+                    source_set=args.source_set,
+                    destination_set=args.destination_set,
+                    app_bundle=args.app,
+                    execute=args.execute,
+                    stop_before_reopen=args.stop_before_reopen,
+                )
             _json_out(result)
             return 1 if result["status"] == "stopped" else 0
         if args.group == "ax" and args.action == "live-set-open":

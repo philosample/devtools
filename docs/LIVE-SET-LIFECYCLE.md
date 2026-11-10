@@ -28,6 +28,82 @@ python3 -m codex_devtools ax live-set-lifecycle \
   --app "/Applications/Ableton Live 12 Suite.app" --execute
 ```
 
+## Pause after Save As and normal Quit
+
+Add `--stop-before-reopen` to the existing preflight and action commands to leave
+Live closed at the exact PID-exit boundary. Preflight stays read-only. Only the
+explicit action command saves and quits:
+
+```sh
+python3 -m codex_devtools ax live-set-lifecycle \
+  --pid 84769 --expected-bundle-id com.ableton.live \
+  --source-set /absolute/path/Source.als \
+  --destination-set /absolute/path/Recall-copy.als \
+  --app "/Applications/Ableton Live 12 Suite.app" \
+  --stop-before-reopen --execute > /absolute/private/evidence/paused.json
+```
+
+Review the exit status and receipt before proceeding. A successful pause emits
+`codex-devtools-live-set-paused-v1`, mode `stop-before-reopen`, status
+`saved-and-quit`, and `open: not_attempted`. The closed receipt records the exact
+source/destination URLs, old PID/bundle ID, timestamp, complete saved Set file
+pin, and app path/bundle ID plus pins for `Contents/Info.plist` and its direct
+`Contents/MacOS` executable. File pins include SHA-256, size, device/inode and
+nanosecond modification/change times. The Set is bounded to 128 MiB, app metadata
+to 1 MiB, executable to 512 MiB, and the receipt to 64 KiB. Symlink components and
+Git-contained evidence/selected files are refused. Failure receipts remain
+`stopped`; an uncertain Save/Quit is never a resumable pause receipt.
+
+The tool returns promptly after verifying normal Quit and exact PID exit; it
+never waits for an external signal. The operator can use this closed interval
+for separately authorized work. This tool does not read, replace, toggle, archive
+or restore Live MIDI preferences. Retaining or independently verifying the
+working MIDI configuration remains the operator's responsibility.
+
+Resume uses the same command with a separate, exclusive option set. Pin the
+reviewed receipt's exact bytes, then run the read-only resume preflight:
+
+```sh
+shasum -a 256 /absolute/private/evidence/paused.json
+python3 -m codex_devtools ax live-set-lifecycle \
+  --resume-receipt /absolute/private/evidence/paused.json \
+  --receipt-sha256 <reviewed-receipt-sha256>
+```
+
+After a `ready` resume receipt, explicitly reopen:
+
+```sh
+python3 -m codex_devtools ax live-set-lifecycle \
+  --resume-receipt /absolute/private/evidence/paused.json \
+  --receipt-sha256 <reviewed-receipt-sha256> --execute
+```
+
+Resume accepts no PID, source/destination, app or pause flags: those identities
+come exclusively from the caller-pinned receipt. Both wrapper and native helper
+validate the closed pause schema, exact action/mode, saved Set bytes/identity and
+app metadata/executable pins. Immediately before the sole open effect, the native
+helper rereads the receipt and pins, requires the old PID absent (including
+non-GUI PID reuse or uncertain `kill(pid, 0)` results), and refuses any running
+application with the expected Live bundle ID. There is no age-only expiry for an
+unchanged paused state. A changed receipt, Set, app or process condition is stale
+authority and fails closed. The original source Set is not reopened or saved.
+
+The resume preflight performs no activation, launch, Save or Quit. Execution uses
+the shared `NSWorkspace` reopen/AX document verification path once, requires the
+selected app and a fresh PID, and never repeats Save As or Quit. Resume receipts
+use `codex-devtools-live-set-resume-v1`, mode `resume`; all actions except `open`
+remain `not_attempted`. An attempted open with missing callback, wrong identity,
+missing exact AX document, or invalid/changed post-open evidence remains
+`stopped` with `open: outcome_unknown` and manual inspection required. Only a
+post-open ctime delta is tolerated; Set bytes, inode, size and mtime must match.
+No restart retry, prompt dismissal, rollback or cleanup is automatic.
+
+The SHA pin records caller approval of exact receipt bytes; it does not
+authenticate the writer or establish independent native provenance. Process and
+file checks are separate observations, so an external actor can still race after
+the final check. Native lifecycle, retained preferences, SDK/LOM path and recall,
+MIDI/wire and hardware remain distinct acceptance gates.
+
 The destination must be a new sibling `.als` path in the source Set directory,
 outside Git, with no symlink path components. The tool refuses existing files.
 It activates only the exact Live PID and verifies it is frontmost with the
@@ -128,8 +204,9 @@ nonempty file observation do not establish M4L parameter restore, content
 equivalence, dependency resolution, MIDI, or hardware behavior. A `stopped`
 receipt after any UI action means inspect the target app before proceeding.
 
-Offline contract checks and Swift compilation do not open Live or exercise the
-native UI:
+Offline contract/CLI checks, the compiled fixture state machine with mocked
+trust/process/launch interfaces, and Swift compilation do not open Live or
+exercise the native UI:
 
 ```sh
 python3 -m unittest tests.test_live_set_lifecycle -v

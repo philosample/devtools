@@ -12,6 +12,9 @@ struct Options {
     var destinationSet: String?
     var appPath: String?
     var execute = false
+    var stopBeforeReopen = false
+    var resumeReceipt: String?
+    var receiptSHA256: String?
     var openExisting = false
     var sourceSHA256: String?
     var destinationSHA256: String?
@@ -218,6 +221,7 @@ func parseOptions() -> Options {
             index += 1
             continue
         }
+        if key == "--stop-before-reopen" { result.stopBeforeReopen = true; index += 1; continue }
         if key == "--save-copy-only" { result.saveCopyOnly = true; index += 1; continue }
         if key == "--project-required-dialog" { result.projectRequiredDialog = true; index += 1; continue }
         if key == "--open-existing" { result.openExisting = true; index += 1; continue }
@@ -225,6 +229,8 @@ func parseOptions() -> Options {
         guard index + 1 < args.count else { fail("missing value for \(key)") }
         let value = args[index + 1]
         switch key {
+        case "--resume-receipt": result.resumeReceipt = value
+        case "--receipt-sha256": result.receiptSHA256 = value
         case "--pid":
             guard let parsed = Int32(value), parsed > 0 else { fail("PID must be positive") }
             result.pid = pid_t(parsed)
@@ -239,6 +245,18 @@ func parseOptions() -> Options {
         default: fail("unknown option: \(key)")
         }
         index += 2
+    }
+    if result.resumeReceipt != nil {
+        guard result.receiptSHA256 != nil && result.pid == 0 && result.bundleID.isEmpty && result.sourceSet.isEmpty &&
+              result.destinationSet == nil && result.appPath == nil && !result.stopBeforeReopen && !result.openExisting &&
+              !result.saveCopyOnly && !result.saveOwnedSource && result.sourceSHA256 == nil && result.destinationSHA256 == nil &&
+              result.backupReceipt == nil && result.expectedFinalSet == nil && !result.projectRequiredDialog else {
+            fail("resume requires only a receipt path, SHA-256 and optional --execute")
+        }
+        return result
+    }
+    if result.receiptSHA256 != nil || (result.stopBeforeReopen && (result.openExisting || result.saveCopyOnly)) {
+        fail("incompatible lifecycle mode options")
     }
     guard result.pid > 0, !result.bundleID.isEmpty, !result.sourceSet.isEmpty else {
         fail("--pid, --bundle-id and --source-set are required")
@@ -1096,6 +1114,14 @@ func run(_ options: Options) throws -> [String: Any] {
         }
         destination = target
     }
+    var pausedApp: [String: Any]?
+    if options.stopBeforeReopen {
+        guard let path = options.appPath, destination != nil else {
+            throw LifecycleFailure(phase: phase, message: "pause requires exact destination and app")
+        }
+        pausedApp = try lifecycleAppPin(path, bundleID: options.bundleID)
+        try require(process.bundleURL?.path == path, "pause app differs from running process")
+    }
     guard options.execute else {
         if options.saveCopyOnly {
             return ["format": "codex-devtools-live-set-save-as-v1", "status": "ready", "read_only": true,
@@ -1236,6 +1262,12 @@ func run(_ options: Options) throws -> [String: Any] {
     let sourceAfterSaveIdentity = try fileIdentity(source)
     try require(sameFileIdentity(originalSourceIdentity, sourceAfterSaveIdentity), "source Set metadata changed during Save As")
 
+    let pausedSet = options.stopBeforeReopen ? try setPin(destination) : nil
+    if let pausedApp {
+        let currentApp = try lifecycleAppPin(rawAppPath, bundleID: options.bundleID)
+        try require(samePin(pausedApp, currentApp), "app changed before Quit")
+    }
+
     phase = "quit-menu"
     try ensureNoDialogs(appElement)
     let savedWindow = try exactDocumentWindow(appElement, url: destination)
@@ -1254,6 +1286,24 @@ func run(_ options: Options) throws -> [String: Any] {
     try require(process.isTerminated && NSRunningApplication(processIdentifier: options.pid) == nil, "Quit outcome unknown: original PID remains alive")
     try require(NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == options.bundleID }.isEmpty, "another Live process remains; reopen would be ambiguous")
 
+    if options.stopBeforeReopen {
+        let currentSet = try setPin(destination)
+        let currentApp = try lifecycleAppPin(rawAppPath, bundleID: options.bundleID)
+        try require(samePin(pausedSet!, currentSet) && samePin(pausedApp!, currentApp),
+                    "saved Set or app changed during Quit; no resumable receipt")
+        return ["format": pausedLifecycleFormat, "mode": "stop-before-reopen", "status": "saved-and-quit",
+                "target": ["pid": options.pid, "bundle_identifier": options.bundleID],
+                "source_set_url": source.absoluteString, "destination_set_url": destination.absoluteString,
+                "saved_set": currentSet, "app": pausedApp!, "read_only": false, "actions": pausedLifecycleActions,
+                "paused_at_utc": ISO8601DateFormatter().string(from: Date()),
+                "evidence_limit": pausedLifecycleLimit]
+    }
+    return try reopenLifecycleSet(destination: destination, appURL: appURL, oldPID: options.pid, bundleID: options.bundleID,
+                                  processName: process.localizedName ?? "", source: source)
+}
+
+func reopenLifecycleSet(destination: URL, appURL: URL, oldPID: pid_t, bundleID: String,
+                        processName: String, source: URL) throws -> [String: Any] {
     phase = "launchservices-open"
     let configuration = NSWorkspace.OpenConfiguration()
     openAttempted = true
@@ -1270,7 +1320,7 @@ func run(_ options: Options) throws -> [String: Any] {
     }
     if let openError { throw LifecycleFailure(phase: phase, message: "LaunchServices open failed: \(openError.localizedDescription)") }
     guard let reopened else { throw LifecycleFailure(phase: phase, message: "LaunchServices returned no application") }
-    try require(reopened.bundleIdentifier == options.bundleID && reopened.processIdentifier > 0 && reopened.processIdentifier != options.pid, "reopened Live process identity is unexpected")
+    try require(reopened.bundleIdentifier == bundleID && reopened.bundleURL?.path == appURL.path && reopened.processIdentifier > 0 && reopened.processIdentifier != oldPID, "reopened Live process identity is unexpected")
 
     phase = "verify-reopened-set"
     let newAppElement = AXUIElementCreateApplication(reopened.processIdentifier)
@@ -1287,8 +1337,8 @@ func run(_ options: Options) throws -> [String: Any] {
     }
     try require(exactWindow, "reopened Live did not expose the exact destination Set URL")
     return ["format": "codex-devtools-live-set-lifecycle-v1", "status": "reopened",
-            "target": ["pid": options.pid, "bundle_identifier": options.bundleID,
-                       "process_name": process.localizedName ?? ""],
+            "target": ["pid": oldPID, "bundle_identifier": bundleID,
+                       "process_name": processName],
             "reopened_target": ["pid": reopened.processIdentifier, "bundle_identifier": reopened.bundleIdentifier ?? "",
                                 "process_name": reopened.localizedName ?? ""],
             "source_set_url": source.absoluteString, "destination_set_url": destination.absoluteString,
@@ -1302,14 +1352,14 @@ struct SetObservationChanged: Error {}
 let maxPinnedSetBytes: Int64 = 128 * 1024 * 1024
 var openSourcePin: [String: Any]?
 
-func setPin(_ url: URL) throws -> [String: Any] {
+func setPin(_ url: URL, maxBytes: Int64 = maxPinnedSetBytes) throws -> [String: Any] {
     try ensureNoSymlinkChain(url, mustExist: true, outsideGit: true)
     let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
     try require(fd >= 0, "cannot open exact Set file without following symlinks")
     defer { Darwin.close(fd) }
     var before = stat(), after = stat(), current = stat()
     try require(fstat(fd, &before) == 0 && (before.st_mode & S_IFMT) == S_IFREG, "Set must be a regular file")
-    try require(before.st_size <= maxPinnedSetBytes, "Set exceeds bounded file size")
+    try require(before.st_size <= maxBytes, "Set exceeds bounded file size")
     if before.st_size <= 0 { throw SetObservationChanged() }
     var digest = SHA256(), count: Int64 = 0, buffer = [UInt8](repeating: 0, count: 65536)
     while true {
@@ -1317,7 +1367,7 @@ func setPin(_ url: URL) throws -> [String: Any] {
         try require(size >= 0, "Set file read failed")
         if size == 0 { break }
         count += Int64(size)
-        try require(count <= maxPinnedSetBytes, "Set exceeded file bound while reading")
+        try require(count <= maxBytes, "Set exceeded file bound while reading")
         digest.update(data: Data(buffer.prefix(size)))
     }
     try require(fstat(fd, &after) == 0 && lstat(url.path, &current) == 0, "Set disappeared while reading")
@@ -1547,7 +1597,173 @@ func stoppedOpen(_ options: Options, error: String) -> [String: Any] {
     return report
 }
 
+let pausedLifecycleFormat = "codex-devtools-live-set-paused-v1"
+let resumedLifecycleFormat = "codex-devtools-live-set-resume-v1"
+let pausedLifecycleLimit = "saved file bytes and exact PID exit only; MIDI settings, M4L recall, wire and hardware require independent verification"
+let lifecycleNoActions = ["focus": "not_attempted", "menu_navigation": "not_attempted", "save_as_menu": "not_attempted", "save": "not_attempted", "quit": "not_attempted", "open": "not_attempted"]
+let pausedLifecycleActions = ["focus": "verified", "menu_navigation": "verified", "save_as_menu": "verified_panel", "save": "destination_observed", "quit": "terminated", "open": "not_attempted"]
+
+func lifecycleAppPin(_ path: String, bundleID: String) throws -> [String: Any] {
+    let appURL = URL(fileURLWithPath: try lexicalPath(path))
+    let infoPin = try setPin(appURL.appendingPathComponent("Contents/Info.plist"), maxBytes: 1024 * 1024)
+    guard appURL.pathExtension == "app", let bundle = Bundle(url: appURL),
+          bundle.bundleIdentifier == bundleID,
+          let name = bundle.object(forInfoDictionaryKey: "CFBundleExecutable") as? String,
+          !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\\") else {
+        throw LifecycleFailure(phase: phase, message: "exact app bundle identity unavailable")
+    }
+    // Derive the canonical executable from the pinned metadata. Bundle.executableURL
+    // may introduce macOS /var aliases even for a caller-selected /private/var path.
+    let executable = appURL.appendingPathComponent("Contents/MacOS").appendingPathComponent(name)
+    let executablePin = try setPin(executable, maxBytes: 512 * 1024 * 1024)
+    let finalInfo = try setPin(appURL.appendingPathComponent("Contents/Info.plist"), maxBytes: 1024 * 1024)
+    try require(samePin(infoPin, finalInfo), "app metadata changed while pinning executable")
+    return ["path": appURL.path, "bundle_identifier": bundleID,
+            "info_file": infoPin, "executable_file": executablePin]
+}
+
+func validLifecycleFilePin(_ pin: [String: Any]) -> Bool {
+    let numbers = ["bytes", "mtime_seconds", "mtime_nanoseconds", "ctime_seconds", "ctime_nanoseconds"]
+    guard Set(pin.keys) == Set(numbers + ["path", "sha256", "device", "inode"]),
+          pin["path"] is String, let digest = pin["sha256"] as? String,
+          digest.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { return false }
+    for key in numbers {
+        guard let value = pin[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+              value.doubleValue == Double(value.int64Value) else { return false }
+    }
+    guard (pin["bytes"] as! NSNumber).int64Value > 0 else { return false }
+    for key in ["mtime_nanoseconds", "ctime_nanoseconds"] {
+        let value = (pin[key] as! NSNumber).int64Value
+        if value < 0 || value >= 1_000_000_000 { return false }
+    }
+    for key in ["device", "inode"] {
+        guard let value = pin[key] as? String, value.range(of: "^[0-9]+$", options: .regularExpression) != nil else { return false }
+    }
+    return true
+}
+
+func boundedLifecycleReceiptData(_ url: URL) throws -> Data {
+    let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW)
+    try require(fd >= 0, "cannot read paused receipt without following symlinks")
+    defer { Darwin.close(fd) }
+    var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+    while true {
+        let size = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+        try require(size >= 0, "paused receipt read failed")
+        if size == 0 { return data }
+        try require(data.count + size <= 65536, "paused receipt exceeded read bound")
+        data.append(contentsOf: buffer.prefix(size))
+    }
+}
+
+func lifecycleReceipt(_ options: Options) throws -> [String: Any] {
+    guard let path = options.resumeReceipt, let expected = options.receiptSHA256,
+          expected.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+        throw LifecycleFailure(phase: phase, message: "exact paused receipt and SHA-256 required")
+    }
+    let url = URL(fileURLWithPath: try lexicalPath(path))
+    let pin = try setPin(url, maxBytes: 65536)
+    try require(pin["sha256"] as? String == expected, "paused receipt SHA-256 mismatch")
+    let data = try boundedLifecycleReceiptData(url)
+    let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    let afterRead = try setPin(url, maxBytes: 65536)
+    try require(data.count <= 65536 && digest == expected && samePin(pin, afterRead), "paused receipt changed while reading")
+    guard let receipt = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+          Set(receipt.keys) == Set(["format", "mode", "status", "target", "source_set_url", "destination_set_url", "saved_set", "app", "read_only", "actions", "evidence_limit", "paused_at_utc"]),
+          receipt["format"] as? String == pausedLifecycleFormat, receipt["mode"] as? String == "stop-before-reopen",
+          receipt["status"] as? String == "saved-and-quit", let readOnly = receipt["read_only"] as? NSNumber,
+          CFGetTypeID(readOnly) == CFBooleanGetTypeID(), readOnly.boolValue == false,
+          let pausedAtRaw = receipt["paused_at_utc"] as? String, pausedAtRaw.count <= 40,
+          ISO8601DateFormatter().date(from: pausedAtRaw) != nil,
+          receipt["evidence_limit"] as? String == pausedLifecycleLimit,
+          let actions = receipt["actions"] as? [String: String], actions == pausedLifecycleActions,
+          let target = receipt["target"] as? [String: Any], Set(target.keys) == Set(["pid", "bundle_identifier"]),
+          let pidNumber = target["pid"] as? NSNumber, CFGetTypeID(pidNumber) != CFBooleanGetTypeID(),
+          pidNumber.doubleValue == Double(pidNumber.int32Value), pidNumber.int32Value > 0,
+          let bundleID = target["bundle_identifier"] as? String, !bundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          let saved = receipt["saved_set"] as? [String: Any], validLifecycleFilePin(saved), let savedPath = saved["path"] as? String,
+          let app = receipt["app"] as? [String: Any], Set(app.keys) == Set(["path", "bundle_identifier", "info_file", "executable_file"]),
+          let infoPin = app["info_file"] as? [String: Any], validLifecycleFilePin(infoPin),
+          let executablePin = app["executable_file"] as? [String: Any], validLifecycleFilePin(executablePin),
+          let appPath = app["path"] as? String,
+          let sourceRaw = receipt["source_set_url"] as? String, let source = URL(string: sourceRaw), source.isFileURL,
+          let destinationRaw = receipt["destination_set_url"] as? String else {
+        throw LifecycleFailure(phase: phase, message: "invalid closed saved-and-quit receipt")
+    }
+    let destination = try canonicalURL(savedPath), canonicalSource = try canonicalURL(source.path)
+    try require(sourceRaw == canonicalSource.absoluteString && destinationRaw == destination.absoluteString &&
+                destination != canonicalSource && destination.deletingLastPathComponent() == canonicalSource.deletingLastPathComponent(),
+                "paused receipt Set URLs are not exact siblings")
+    let currentSet = try setPin(destination), currentApp = try lifecycleAppPin(appPath, bundleID: bundleID)
+    try require(samePin(saved, currentSet) && samePin(app, currentApp),
+                "paused Set or app bytes/identity changed")
+    return receipt
+}
+
+func requirePausedProcessAbsent(pid: pid_t, bundleID: String) throws {
+    errno = 0
+    let result = kill(pid, 0)
+    try require(result == -1 && errno == ESRCH && NSRunningApplication(processIdentifier: pid) == nil,
+                "old paused PID is present or its absence is uncertain")
+    try require(NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == bundleID }.isEmpty,
+                "a Live process is already running; resume stopped")
+}
+
+func runResumeLifecycle(_ options: Options) throws -> [String: Any] {
+    phase = "resume-preflight"
+    let receipt = try lifecycleReceipt(options)
+    let target = receipt["target"] as! [String: Any], oldPID = pid_t((target["pid"] as! NSNumber).int32Value)
+    let bundleID = target["bundle_identifier"] as! String
+    initialPID = Int(oldPID); initialBundleID = bundleID
+    try require(AXIsProcessTrusted(), "Accessibility permission is not already trusted")
+    try requirePausedProcessAbsent(pid: oldPID, bundleID: bundleID)
+    var report: [String: Any] = ["format": resumedLifecycleFormat, "mode": "resume", "status": "ready", "read_only": true,
+        "target": target, "resumed_from": ["path": options.resumeReceipt!, "sha256": options.receiptSHA256!],
+        "saved_set": receipt["saved_set"]!, "app": receipt["app"]!, "actions": lifecycleNoActions,
+        "evidence_limit": pausedLifecycleLimit]
+    if !options.execute { return report }
+    phase = "resume-before-open"
+    // Re-read the caller-pinned receipt, file and app immediately before the only effect.
+    let current = try lifecycleReceipt(options)
+    try require(samePin(receipt, current), "paused receipt changed before open")
+    try requirePausedProcessAbsent(pid: oldPID, bundleID: bundleID)
+    let destination = try canonicalURL((receipt["saved_set"] as! [String: Any])["path"] as! String)
+    let appURL = URL(fileURLWithPath: (receipt["app"] as! [String: Any])["path"] as! String)
+    let source = URL(string: receipt["source_set_url"] as! String)!
+    let reopened = try reopenLifecycleSet(destination: destination, appURL: appURL, oldPID: oldPID,
+                                         bundleID: bundleID, processName: "", source: source)
+    let after = try setPin(destination), saved = receipt["saved_set"] as! [String: Any]
+    try require(sameOpenedDestination(saved, after), "saved Set bytes/identity changed during resume")
+    let afterApp = try lifecycleAppPin(appURL.path, bundleID: bundleID)
+    try require(samePin(receipt["app"] as! [String: Any], afterApp), "app changed during resume")
+    report["status"] = "reopened"; report["read_only"] = false
+    var actions = lifecycleNoActions; actions["open"] = "exact_set_window_observed"
+    report["actions"] = actions; report["reopened_target"] = reopened["reopened_target"]!
+    return report
+}
+
+func stoppedResumeLifecycle(_ options: Options, error: String) -> [String: Any] {
+    var actions = lifecycleNoActions; actions["open"] = openAttempted ? "outcome_unknown" : "not_attempted"
+    return ["format": resumedLifecycleFormat, "mode": "resume", "status": "stopped", "read_only": !options.execute,
+            "target": ["pid": initialPID ?? 0, "bundle_identifier": initialBundleID ?? ""],
+            "resumed_from": ["path": options.resumeReceipt!, "sha256": options.receiptSHA256!],
+            "phase": phase, "error": error, "actions": actions, "manual_inspection_required": openAttempted]
+}
+
 let options = parseOptions()
+if options.resumeReceipt != nil {
+    do {
+        let report = try runResumeLifecycle(options)
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        print(String(data: data, encoding: .utf8) ?? "{}")
+    } catch {
+        let message = (error as? LifecycleFailure)?.message ?? String(describing: error)
+        let report = stoppedResumeLifecycle(options, error: message)
+        if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { print(String(data: data, encoding: .utf8) ?? "{}") }
+        exit(1)
+    }
+    exit(0)
+}
 if options.openExisting {
     do {
         let report = try runOpenExisting(options)
