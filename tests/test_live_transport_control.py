@@ -1,6 +1,8 @@
+import errno
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +16,7 @@ from codex_devtools.cli import build_parser, main
 from codex_devtools.live_transport_control import (
     FORMAT,
     _cached_inspection_helper,
+    _helper_compile_command,
     _native_command,
     _native_focus_diagnostic,
     _valid_focus_report,
@@ -1674,6 +1677,11 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
             cache_root = root / "cache"
             toolchain = {"compiler_version": "Swift A"}
             compiled = []
+            command_changed = False
+
+            def compile_command(source_argument, binary_argument):
+                command = _helper_compile_command(source_argument, binary_argument)
+                return command + (["-DREVIEW_VARIANT"] if command_changed else [])
 
             def compile_helper(_source, binary):
                 compiled.append(binary)
@@ -1689,9 +1697,29 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
                     "codex_devtools.live_transport_control._compile_helper",
                     side_effect=compile_helper,
                 ),
+                patch(
+                    "codex_devtools.live_transport_control._helper_compile_command",
+                    side_effect=compile_command,
+                ),
             ):
                 first = _cached_inspection_helper(source, cache_root=cache_root)
                 same = _cached_inspection_helper(source, cache_root=cache_root)
+                manifest = json.loads(
+                    (first.parent / "manifest.json").read_text(encoding="utf-8")
+                )
+                expected_argv = _helper_compile_command(
+                    Path("<SOURCE>"), Path("<BINARY>")
+                )
+                actual_normalized_argv = _helper_compile_command(
+                    source, Path("<BINARY>")
+                )
+                actual_normalized_argv[actual_normalized_argv.index(str(source))] = (
+                    "<SOURCE>"
+                )
+                self.assertEqual(manifest["identity"]["compile_argv"], expected_argv)
+                self.assertEqual(
+                    manifest["identity"]["compile_argv"], actual_normalized_argv
+                )
                 source.write_text("source two", encoding="utf-8")
                 changed_source = _cached_inspection_helper(
                     source, cache_root=cache_root
@@ -1700,11 +1728,67 @@ precondition(!cgBoundsMatch(duplicateTitleSameSizeElsewhere, geometry:selected))
                 changed_toolchain = _cached_inspection_helper(
                     source, cache_root=cache_root
                 )
+                command_changed = True
+                changed_command = _cached_inspection_helper(
+                    source, cache_root=cache_root
+                )
 
-        self.assertEqual(len(compiled), 3)
+        self.assertEqual(len(compiled), 4)
         self.assertEqual(first, same)
         self.assertNotEqual(first, changed_source)
         self.assertNotEqual(changed_source, changed_toolchain)
+        self.assertNotEqual(changed_toolchain, changed_command)
+
+    def test_inspection_cache_reuses_actual_winner_after_enotempty_rename(self):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:
+            root = Path(temporary)
+            source = root / "helper.swift"
+            source.write_text("source", encoding="utf-8")
+            cache_root = root / "cache"
+            compiled = []
+            publication_errors = []
+            real_rename = os.rename
+
+            def compile_helper(_source, binary):
+                compiled.append(binary)
+                binary.write_bytes(b"winning helper")
+                return subprocess.CompletedProcess(["swiftc"], 0, "", "")
+
+            def concurrent_publish(staging, destination):
+                destination.mkdir(mode=0o700)
+                winning_binary = destination / "live_transport"
+                shutil.copyfile(staging / "live_transport", winning_binary)
+                winning_binary.chmod(0o700)
+                winning_manifest = destination / "manifest.json"
+                shutil.copyfile(staging / "manifest.json", winning_manifest)
+                winning_manifest.chmod(0o600)
+                try:
+                    real_rename(staging, destination)
+                except OSError as error:
+                    publication_errors.append(error.errno)
+                    raise
+                self.fail("rename unexpectedly replaced a nonempty cache entry")
+
+            with (
+                patch(
+                    "codex_devtools.live_transport_control._toolchain_identity",
+                    return_value={"compiler_version": "Swift A"},
+                ),
+                patch(
+                    "codex_devtools.live_transport_control._compile_helper",
+                    side_effect=compile_helper,
+                ),
+                patch(
+                    "codex_devtools.live_transport_control.os.rename",
+                    side_effect=concurrent_publish,
+                ),
+            ):
+                reused = _cached_inspection_helper(source, cache_root=cache_root)
+                reused_bytes = reused.read_bytes()
+
+        self.assertEqual(publication_errors, [errno.ENOTEMPTY])
+        self.assertEqual(len(compiled), 1)
+        self.assertEqual(reused_bytes, b"winning helper")
 
     def test_inspection_helper_cache_rejects_tampered_binary_and_symlink_entry(self):
         with tempfile.TemporaryDirectory(dir="/private/tmp") as temporary:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -512,23 +513,27 @@ def _valid_position_report(
     )
 
 
+def _helper_compile_command(source: Path, binary: Path) -> list[str]:
+    return [
+        "/usr/bin/xcrun",
+        "swiftc",
+        "-framework",
+        "ApplicationServices",
+        "-framework",
+        "AppKit",
+        "-framework",
+        "CoreGraphics",
+        "-framework",
+        "CryptoKit",
+        str(source),
+        "-o",
+        str(binary),
+    ]
+
+
 def _compile_helper(source: Path, binary: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [
-            "/usr/bin/xcrun",
-            "swiftc",
-            "-framework",
-            "ApplicationServices",
-            "-framework",
-            "AppKit",
-            "-framework",
-            "CoreGraphics",
-            "-framework",
-            "CryptoKit",
-            str(source),
-            "-o",
-            str(binary),
-        ],
+        _helper_compile_command(source, binary),
         check=False,
         capture_output=True,
         text=True,
@@ -680,18 +685,7 @@ def _cached_inspection_helper(source: Path, *, cache_root: Path | None = None) -
     source_bytes = source.read_bytes()
     identity: dict[str, object] = {
         "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
-        "compile_argv": [
-            "/usr/bin/xcrun",
-            "swiftc",
-            "-framework",
-            "ApplicationServices",
-            "-framework",
-            "AppKit",
-            "-framework",
-            "CoreGraphics",
-            "-framework",
-            "CryptoKit",
-        ],
+        "compile_argv": _helper_compile_command(Path("<SOURCE>"), Path("<BINARY>")),
         "toolchain": _toolchain_identity(),
     }
     identity_bytes = json.dumps(
@@ -742,7 +736,9 @@ def _cached_inspection_helper(source: Path, *, cache_root: Path | None = None) -
         os.chmod(manifest_path, 0o600)
         try:
             os.rename(staging, entry)
-        except FileExistsError:
+        except OSError as error:
+            if error.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise
             return _cache_entry_binary(entry, identity)
         return _cache_entry_binary(entry, identity)
     finally:
