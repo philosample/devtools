@@ -914,6 +914,15 @@ precondition(!focusReceiptIsCurrent(receipt, pid:58198, bundleID:"com.ableton.li
         production_contract = (
             source[token_start:token_end] + source[validation_start:validation_end]
         )
+        position_action_start = source.index("func positionWindowAction(")
+        position_action_end = source.index(
+            "\nfunc positionWindowIsCurrent(", position_action_start
+        )
+        position_action = source[position_action_start:position_action_end]
+        self.assertIn("focusSnapshotValidationError(", position_action)
+        self.assertIn("options.expectedGeneration == generation", position_action)
+        self.assertIn("expectedGeneration: generation", position_action)
+        self.assertNotIn("snapshotGeneration", position_action)
         harness = f"""
 import Foundation
 {production_contract}
@@ -933,6 +942,34 @@ precondition(focusSnapshotValidationError(
   expectedGeneration: roundedUpGeneration,
   now: now
 ) == nil)
+
+// Regression for the real position-window failure: process generation has
+// microsecond precision while the AX snapshot launch date is serialized to ms.
+let live83387Launch = Date(timeIntervalSince1970: 1794243863.288635)
+let live83387Generation = processGenerationValue(live83387Launch)!
+precondition(live83387Generation == 1794243863288635)
+precondition(formatter.string(from: live83387Launch) == "2026-11-09T17:04:23.289Z")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: "2026-11-09T17:15:00.000Z",
+  snapshotLaunchDate: "2026-11-09T17:04:23.289Z",
+  processLaunch: live83387Launch,
+  expectedGeneration: live83387Generation,
+  now: formatter.date(from: "2026-11-09T17:15:00.000Z")!
+) == nil)
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: "2026-11-09T17:15:00.000Z",
+  snapshotLaunchDate: "2026-11-09T17:04:23.289Z",
+  processLaunch: live83387Launch,
+  expectedGeneration: live83387Generation + 1,
+  now: formatter.date(from: "2026-11-09T17:15:00.000Z")!
+) == "AX snapshot belongs to a different Live process generation")
+precondition(focusSnapshotValidationError(
+  snapshotObservedAtUTC: "2026-11-09T17:15:00.000Z",
+  snapshotLaunchDate: "2026-11-09T17:04:23.290Z",
+  processLaunch: live83387Launch,
+  expectedGeneration: live83387Generation,
+  now: formatter.date(from: "2026-11-09T17:15:00.000Z")!
+) == "AX snapshot belongs to a different Live process generation")
 
 let roundedDownProcess = Date(timeIntervalSince1970: 1794176539.0524)
 let roundedDownGeneration = processGenerationValue(roundedDownProcess)!

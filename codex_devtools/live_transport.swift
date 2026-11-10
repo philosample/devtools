@@ -1151,19 +1151,18 @@ func positionWindowAction(_ app: AXUIElement, process: NSRunningApplication, url
     let timestamp = ISO8601DateFormatter()
     timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     if !options.execute {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let snapshotDate = formatter.date(from: options.snapshotObservedAtUTC),
-              let snapshotLaunch = formatter.date(from: options.snapshotLaunchDate),
-              let processLaunch = process.launchDate else {
-            throw TransportFailure(phase: phase, message: "AX snapshot or Live launch date is invalid")
+        guard let processLaunch = process.launchDate else {
+            throw TransportFailure(phase: phase, message: "Live launch date is unavailable")
         }
-        let snapshotAge = Date().timeIntervalSince(snapshotDate)
-        let snapshotGeneration = Int64((snapshotLaunch.timeIntervalSince1970 * 1_000).rounded(.towardZero))
-        let processGenerationAtSnapshotPrecision = Int64((processLaunch.timeIntervalSince1970 * 1_000).rounded(.towardZero))
-        try require(snapshotAge >= -2 && snapshotAge <= 30, "AX snapshot is stale or from the future")
-        try require(snapshotGeneration == processGenerationAtSnapshotPrecision && processGenerationAtSnapshotPrecision == generation / 1_000,
-                    "AX snapshot belongs to a different Live process generation")
+        if let error = focusSnapshotValidationError(
+            snapshotObservedAtUTC: options.snapshotObservedAtUTC,
+            snapshotLaunchDate: options.snapshotLaunchDate,
+            processLaunch: processLaunch,
+            expectedGeneration: generation,
+            now: Date()
+        ) {
+            throw TransportFailure(phase: phase, message: error)
+        }
         return positionWindowReport(
             observedAt: timestamp.string(from: Date()), snapshotObservedAt: options.snapshotObservedAtUTC,
             snapshotLaunchDate: options.snapshotLaunchDate, pid: options.pid, bundleID: options.bundleID,
