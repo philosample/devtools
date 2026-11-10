@@ -456,7 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     copy_ref = ableton_sub.add_parser(
         "copy-with-device-ref",
-        help="preview or create a new sibling Set with one exact device reference",
+        help="preview or create a sibling Set by replacing one exact device reference",
     )
     copy_ref.add_argument("source", type=Path)
     copy_ref.add_argument("destination", type=Path)
