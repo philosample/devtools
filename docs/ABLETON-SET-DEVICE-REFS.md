@@ -55,10 +55,15 @@ This separate action never changes the source or opens Live.
 
 Both Set paths must be canonical siblings in the same directory, preserving
 the original Project location. The destination must not exist. The source must
-contain exactly one FileRef, with an absolute old device path and a type-1
-relative path equal to that device's path relative to the Set directory.
-Only the Path and RelativePath attribute values change; all other decompressed
-XML bytes are preserved. Unsupported layouts fail instead of being normalized.
+contain exactly one FileRef occurrence whose absolute Path exactly matches
+`--old-amxd`, with a type-1 relative path equal to that device's path relative
+to the Set directory. Other FileRefs, including repeated references to other
+AMXDs, are preserved in their original order. If the old path is missing or
+appears more than once, the command refuses the copy. Only the selected
+FileRef's Path and RelativePath attribute values change; all other decompressed
+XML bytes are preserved. The preview reports the selected FileRef's zero-based
+index and exactly two XML attribute edits. Unsupported layouts fail instead
+of being normalized.
 The original Set and both device files must match their SHA-256 pins. Execution
 rechecks the pins, creates the destination exclusively, flushes it and its
 directory, and inspects the new reference and hash. A write/readback error can

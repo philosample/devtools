@@ -91,10 +91,6 @@ class ReferenceCopyTests(unittest.TestCase):
     def test_multiple_or_unsupported_refs_refuse_without_writing(self):
         for xml in (
             self.xml.replace(
-                b"</LiveSet>",
-                b'<FileRef><Path Value="extra.amxd"/></FileRef></LiveSet>',
-            ),
-            self.xml.replace(
                 b'RelativePathType Value="1"', b'RelativePathType Value="3"'
             ),
             self.xml.replace(b'Value="old.amxd"', b'Value="wrong.amxd"'),
@@ -143,3 +139,89 @@ class ReferenceCopyTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(json.loads(output.getvalue())["executed"], execute)
             self.assertEqual(self.destination.exists(), execute)
+
+    def test_real_cli_selects_one_reference_among_repeated_product_refs(self):
+        product = self.root / "INTTR Performance.amxd"
+        product.write_bytes(b"product")
+        product_ref = (
+            f'<FileRef><RelativePathType Value="1"/>'
+            f'<RelativePath Value="{product.name}"/><Path Value="{product}"/>'
+            "</FileRef>"
+        )
+        harness_ref = (
+            f'<FileRef><RelativePathType Value="1"/>'
+            f'<RelativePath Value="{self.old.name}"/><Path Value="{self.old}"/>'
+            "</FileRef>"
+        )
+        xml = (
+            '<?xml version="1.0"?><Ableton><LiveSet><Unrelated Value="keep"/>'
+            + harness_ref
+            + product_ref
+            + product_ref
+            + "</LiveSet></Ableton>"
+        ).encode()
+        self.source.write_bytes(gzip.compress(xml, mtime=0))
+        args = [
+            "ableton",
+            "copy-with-device-ref",
+            str(self.source),
+            str(self.destination),
+            "--source-sha256",
+            self.digest(self.source),
+            "--old-amxd",
+            str(self.old),
+            "--old-sha256",
+            self.digest(self.old),
+            "--new-amxd",
+            str(self.new),
+            "--new-sha256",
+            self.digest(self.new),
+        ]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(args), 0)
+        preview = json.loads(output.getvalue())
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(preview["state"], "ready")
+        self.assertEqual(preview["xml_attribute_edits"], 2)
+        self.assertEqual(
+            preview["selected_file_ref"],
+            {
+                "index": 0,
+                "old_path": str(self.old),
+                "new_path": str(self.new),
+            },
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(args + ["--execute"]), 0)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["executed"])
+        self.assertEqual(result["output_sha256"], preview["output_sha256"])
+        expected = xml.replace(
+            f'<RelativePath Value="{self.old.name}"/>'.encode(),
+            f'<RelativePath Value="{html.escape(self.new.name)}"/>'.encode(),
+        ).replace(
+            f'<Path Value="{self.old}"/>'.encode(),
+            f'<Path Value="{html.escape(str(self.new))}"/>'.encode(),
+        )
+        self.assertEqual(gzip.decompress(self.destination.read_bytes()), expected)
+
+    def test_exact_old_path_must_match_once(self):
+        wrong_path = self.xml.replace(
+            f'Path Value="{self.old}"'.encode(), b'Path Value="/other/wrong.amxd"'
+        )
+        duplicate = self.xml.replace(
+            b"</LiveSet>",
+            self.xml[
+                self.xml.index(b"<FileRef") : self.xml.index(b"</FileRef>")
+                + len(b"</FileRef>")
+            ]
+            + b"</LiveSet>",
+        )
+        for xml in (wrong_path, duplicate):
+            with self.subTest(xml=xml), self.assertRaises(ValueError):
+                self.source.write_bytes(gzip.compress(xml, mtime=0))
+                self.call(source_sha256=self.digest(self.source), execute=True)
+            self.assertFalse(self.destination.exists())
