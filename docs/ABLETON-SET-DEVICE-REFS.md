@@ -51,19 +51,28 @@ or installation is performed.
 `ableton copy-with-device-ref SOURCE.als FRESH.als --source-sha256 HASH
 --old-amxd OLD.amxd --old-sha256 HASH --new-amxd NEW.amxd --new-sha256 HASH`
 previews a narrow reference change. Add `--execute` to create the new file.
-This separate action never changes the source or opens Live.
+This separate action never changes the source or opens Live. `--expected-occurrences`
+declares how many exact `Path.Value` matches to select; it defaults to `1` and
+accepts only integers from `1` through `16`.
 
 Both Set paths must be canonical siblings in the same directory, preserving
 the original Project location. The destination must not exist. The source must
-contain exactly one FileRef occurrence whose absolute Path exactly matches
-`--old-amxd`, with a type-1 relative path equal to that device's path relative
-to the Set directory. Other FileRefs, including repeated references to other
-AMXDs, are preserved in their original order. If the old path is missing or
-appears more than once, the command refuses the copy. Only the selected
-FileRef's Path and RelativePath attribute values change; all other decompressed
-XML bytes are preserved. The preview reports the selected FileRef's zero-based
-index and exactly two XML attribute edits. Unsupported layouts fail instead
-of being normalized.
+contain exactly the declared number of FileRefs whose absolute Path exactly
+matches `--old-amxd`. The default requires one; duplicate exact references are
+refused unless their exact count is explicitly declared. Counts above 16,
+missing matches, or any count mismatch refuse the copy. Every selected
+FileRef is independently validated before output. In strict mode each must
+have a type-1 relative path equal to that device's path relative to the Set
+directory. Other FileRefs, including repeated references to other AMXDs, are
+preserved in their original order. Only each selected FileRef's `Path` and
+`RelativePath` attribute values change; all other decompressed XML bytes are
+preserved. The preview reports declared and actual match counts, each selected
+FileRef's zero-based index and old/new paths, exact old/new relative attribute
+bytes in hexadecimal, and two XML attribute edits per selected reference.
+For one selected reference, the existing `selected_file_ref` receipt field is
+retained; `selected_file_refs` contains the per-reference receipt list. For
+multiple references, the list identifies every edit and the singular field is
+omitted. Unsupported layouts fail instead of being normalized.
 The original Set and both device files must match their SHA-256 pins. Execution
 rechecks the pins, creates the destination exclusively, flushes it and its
 directory, and inspects the new reference and hash. A write/readback error can
@@ -93,8 +102,12 @@ python3 -m codex_devtools ableton copy-with-device-ref \
 ```
 
 Preview first; `--execute` explicitly creates only the fresh sibling Set.
-All existing source/device pins, canonical paths, single selected FileRef,
-exclusive destination creation and execution/readback checks still apply.
+All existing source/device pins, canonical paths, exact declared occurrence
+count (default one, maximum 16), per-reference validation, exclusive
+destination creation and execution/readback checks still apply. Each selected
+reference is transformed independently; distinct safe relative prefixes are
+preserved independently. The receipt lists the old/new relative attribute
+bytes for every selected reference as well as a prefix/tail transform for each.
 This opt-in additionally requires:
 
 - The AMXDs have the same basename in distinct canonical sibling bundle
