@@ -16,6 +16,8 @@ struct Options {
     var resumeReceipt: String?
     var receiptSHA256: String?
     var openExisting = false
+    var reconcilePendingOpen = false
+    var expectedGeneration: Int64?
     var sourceSHA256: String?
     var destinationSHA256: String?
     var saveOwnedSource = false
@@ -225,6 +227,7 @@ func parseOptions() -> Options {
         if key == "--save-copy-only" { result.saveCopyOnly = true; index += 1; continue }
         if key == "--project-required-dialog" { result.projectRequiredDialog = true; index += 1; continue }
         if key == "--open-existing" { result.openExisting = true; index += 1; continue }
+        if key == "--reconcile-pending-open" { result.reconcilePendingOpen = true; index += 1; continue }
         if key == "--save-owned-source" { result.saveOwnedSource = true; index += 1; continue }
         guard index + 1 < args.count else { fail("missing value for \(key)") }
         let value = args[index + 1]
@@ -240,6 +243,9 @@ func parseOptions() -> Options {
         case "--app": result.appPath = value
         case "--source-sha256": result.sourceSHA256 = value
         case "--destination-sha256": result.destinationSHA256 = value
+        case "--expected-generation":
+            guard let parsed = Int64(value), parsed > 0 else { fail("expected generation must be positive") }
+            result.expectedGeneration = parsed
         case "--backup-receipt": result.backupReceipt = value
         case "--expected-final-set": result.expectedFinalSet = value
         default: fail("unknown option: \(key)")
@@ -250,7 +256,8 @@ func parseOptions() -> Options {
         guard result.receiptSHA256 != nil && result.pid == 0 && result.bundleID.isEmpty && result.sourceSet.isEmpty &&
               result.destinationSet == nil && result.appPath == nil && !result.stopBeforeReopen && !result.openExisting &&
               !result.saveCopyOnly && !result.saveOwnedSource && result.sourceSHA256 == nil && result.destinationSHA256 == nil &&
-              result.backupReceipt == nil && result.expectedFinalSet == nil && !result.projectRequiredDialog else {
+              result.backupReceipt == nil && result.expectedFinalSet == nil && !result.projectRequiredDialog &&
+              !result.reconcilePendingOpen && result.expectedGeneration == nil else {
             fail("resume requires only a receipt path, SHA-256 and optional --execute")
         }
         return result
@@ -266,6 +273,13 @@ func parseOptions() -> Options {
     }
     if result.openExisting && (result.destinationSet == nil || result.appPath == nil || result.sourceSHA256 == nil || result.destinationSHA256 == nil) {
         fail("--open-existing requires exact source/destination hashes, destination and app")
+    }
+    if result.reconcilePendingOpen {
+        guard result.openExisting && result.saveOwnedSource && result.expectedGeneration != nil else {
+            fail("--reconcile-pending-open requires --open-existing, --save-owned-source and --expected-generation")
+        }
+    } else if result.expectedGeneration != nil {
+        fail("--expected-generation requires --reconcile-pending-open")
     }
     if !result.openExisting && !result.saveCopyOnly && (result.sourceSHA256 != nil || result.destinationSHA256 != nil || result.saveOwnedSource || result.backupReceipt != nil) {
         fail("existing-Set open options require --open-existing")
@@ -976,6 +990,87 @@ func saveCopyTransport(_ sourceWindow: AXUIElement) throws -> [String: Int] {
     return values
 }
 
+func saveChangesDialogSignature(_ rows: [[String: Any]], expectedText: String) -> Bool {
+    guard rows.count == 7 else { return false }
+    let byRole = Dictionary(grouping: rows) { $0["role"] as? String ?? "" }
+    guard byRole.keys.count == 4,
+          byRole["AXWindow"]?.count == 1,
+          byRole["AXGroup"]?.count == 1,
+          byRole["AXStaticText"]?.count == 2,
+          byRole["AXButton"]?.count == 3,
+          let window = byRole["AXWindow"]?.first,
+          window["subrole"] as? String == "AXDialog",
+          window["title"] as? String == "" else { return false }
+    let texts = byRole["AXStaticText"]!
+    guard texts.filter({
+        $0["identifier"] as? String == "DialogText" &&
+        $0["value"] as? String == expectedText
+    }).count == 1,
+    texts.filter({ $0["value"] as? String == "" }).count == 1 else { return false }
+    let buttons = byRole["AXButton"]!
+    for (id, description) in [
+        ("Save", "Save"),
+        ("Cancel", "Cancel"),
+        ("Don’tSave", "Don’t Save")
+    ] {
+        guard buttons.filter({
+            $0["identifier"] as? String == id &&
+            $0["description"] as? String == description &&
+            $0["enabled"] as? Bool == true &&
+            $0["press"] as? Bool == true
+        }).count == 1 else { return false }
+    }
+    return true
+}
+
+func canWaitForReconciliationDialog(blockerCount: Int, exactSameDialog: Bool) -> Bool {
+    blockerCount == 1 && exactSameDialog
+}
+
+func isReconciliationBlockingWindow(_ window: AXUIElement) -> Bool {
+    let elementRole = (try? role(window)) ?? ""
+    let elementSubrole = optionalAX(window, kAXSubroleAttribute as String) as? String
+    return ["AXDialog", "AXSheet", "AXAlert"].contains(elementRole) ||
+        ["AXDialog", "AXSheet", "AXAlert"].contains(elementSubrole ?? "") ||
+        attributeBool(window, "AXModal") == true ||
+        (elementRole == (kAXWindowRole as String) && identifier(window) == "open-panel")
+}
+
+func exactSaveChangesDialog(_ app: AXUIElement, expectedText: String) throws -> (AXUIElement, AXUIElement) {
+    let matches = try windows(app).filter {
+        (try? role($0)) == (kAXWindowRole as String) &&
+        optionalAX($0, kAXSubroleAttribute as String) as? String == "AXDialog" &&
+        title($0) == ""
+    }
+    try require(matches.count == 1, "exact blank-title Save Changes dialog is absent or ambiguous")
+    let dialog = matches[0]
+    let blockers = try windows(app).filter { isReconciliationBlockingWindow($0) }
+    try require(blockers.count == 1 && CFEqual(blockers[0], dialog),
+                "another dialog, sheet or file panel is open")
+    let elements = try allElements([dialog], maxDepth: 4, maxElements: 16)
+    let rows: [[String: Any]] = try elements.map { element in
+        [
+            "role": try role(element),
+            "subrole": optionalAX(element, kAXSubroleAttribute as String) as Any? ?? NSNull(),
+            "title": title(element) as Any? ?? NSNull(),
+            "identifier": identifier(element) as Any? ?? NSNull(),
+            "description": optionalAX(element, kAXDescriptionAttribute as String) as Any? ?? NSNull(),
+            "value": stringValue(element) as Any? ?? NSNull(),
+            "enabled": attributeBool(element, kAXEnabledAttribute as String) as Any? ?? NSNull(),
+            "press": ((try? actionNames(element)) ?? []).contains(kAXPressAction as String)
+        ]
+    }
+    try require(saveChangesDialogSignature(rows, expectedText: expectedText),
+                "Save Changes dialog signature/text/controls differ; no control pressed")
+    let buttons = elements.filter {
+        (try? role($0)) == (kAXButtonRole as String) &&
+        identifier($0) == "Save" &&
+        optionalAX($0, kAXDescriptionAttribute as String) as? String == "Save"
+    }
+    try require(buttons.count == 1, "exact Save Changes Save button is ambiguous")
+    return (dialog, buttons[0])
+}
+
 func saveCopyDirectoryPin(_ url: URL, empty: Bool) throws -> [String: String] {
     let normalized = try lexicalPath(url.path)
     try require(url.path == normalized, "canonical destination directory required")
@@ -1405,6 +1500,181 @@ func requireSameProcess(_ process: NSRunningApplication, options: Options) throw
     try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid, "exact Live PID lost foreground")
 }
 
+func processGenerationValue(_ launchDate: Date) -> Int64? {
+    let value = launchDate.timeIntervalSince1970 * 1_000_000
+    guard value.isFinite, value > 0, value < Double(Int64.max) else { return nil }
+    return Int64(value.rounded(.towardZero))
+}
+
+func requireExpectedGeneration(_ process: NSRunningApplication, options: Options) throws {
+    guard let launchDate = process.launchDate,
+          let generation = processGenerationValue(launchDate) else {
+        throw LifecycleFailure(phase: phase, message: "Live process generation is unavailable")
+    }
+    try require(generation == options.expectedGeneration,
+                "Live process generation differs from the reviewed inspection")
+}
+
+func runReconcilePendingOpen(_ options: Options) throws -> [String: Any] {
+    phase = "reconcile-preflight"
+    initialPID = Int(options.pid); initialBundleID = options.bundleID
+    let deadline = ProcessInfo.processInfo.systemUptime + 180
+    try require(AXIsProcessTrusted(), "Accessibility permission is not already trusted")
+    guard let process = NSRunningApplication(processIdentifier: options.pid) else {
+        throw LifecycleFailure(phase: phase, message: "exact target Live PID is unavailable")
+    }
+    try require(process.bundleIdentifier == options.bundleID, "exact PID bundle identifier mismatch")
+    try requireExpectedGeneration(process, options: options)
+    let running = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == options.bundleID }
+    try require(running.count == 1 && running[0].processIdentifier == options.pid,
+                "ambiguous running Live applications")
+    let source = try canonicalURL(options.sourceSet)
+    let destination = try canonicalURL(options.destinationSet!)
+    let sourcePin = try setPin(source), destinationPin = try setPin(destination)
+    try require(source != destination &&
+                !(sourcePin["device"] as? String == destinationPin["device"] as? String &&
+                  sourcePin["inode"] as? String == destinationPin["inode"] as? String),
+                "source/destination aliases are forbidden")
+    try require(sourcePin["sha256"] as? String == options.sourceSHA256 &&
+                destinationPin["sha256"] as? String == options.destinationSHA256,
+                "reviewed source/destination SHA-256 mismatch")
+    let appURL = URL(fileURLWithPath: options.appPath!)
+    try require(appURL.path == options.appPath && appURL.resolvingSymlinksInPath().path == appURL.path &&
+                appURL.pathExtension == "app" && process.bundleURL?.path == appURL.path &&
+                Bundle(url: appURL)?.bundleIdentifier == options.bundleID,
+                "exact Live app differs from running target")
+    let app = AXUIElementCreateApplication(options.pid)
+    let sourceWindow = try exactDocumentWindow(app, url: source)
+    let expectedText = "Save changes to \"\(source.deletingPathExtension().lastPathComponent)\" before closing?"
+    let (dialog, _) = try exactSaveChangesDialog(app, expectedText: expectedText)
+    try require(focusedWindowIs(app, dialog), "exact Save Changes dialog is not the focused Live window")
+    try requireSameProcess(process, options: options)
+    let transport = try saveCopyTransport(sourceWindow)
+    if !options.execute {
+        return [
+            "format": "codex-devtools-live-set-open-v1", "status": "ready", "read_only": true,
+            "target": ["pid": options.pid, "bundle_identifier": options.bundleID],
+            "source_set_url": source.absoluteString, "destination_set_url": destination.absoluteString,
+            "source_file": sourcePin, "destination_file": destinationPin,
+            "save_owned_source": true, "reconcile_pending_open": true,
+            "expected_generation": options.expectedGeneration!,
+            "dialog_text": expectedText, "transport": transport,
+            "pending_destination_binding_pre_action": "unverified",
+            "open_initiated_by_helper": false,
+            "actions": openActions(readOnly: true)
+        ]
+    }
+
+    phase = "reconcile-backup"
+    let backupPath = try checkedSourceBackup(options.backupReceipt!, source: source,
+                                             destination: destination, options: options)
+    let sourceAttributes = try fileIdentity(source)
+    try require((sourceAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+                "explicit source Save requires current-user ownership")
+    let beforeSaveSource = try setPin(source), beforeSaveDestination = try setPin(destination)
+    try require(samePin(beforeSaveSource, sourcePin) && samePin(beforeSaveDestination, destinationPin),
+                "source/destination changed while checking backup")
+
+    phase = "reconcile-before-save"
+    try requireExpectedGeneration(process, options: options)
+    try requireSameProcess(process, options: options)
+    let freshSourceWindow = try exactDocumentWindow(app, url: source)
+    let freshTransport = try saveCopyTransport(freshSourceWindow)
+    try require(freshTransport == transport, "source transport state changed before Save")
+    let (freshDialog, saveButton) = try exactSaveChangesDialog(app, expectedText: expectedText)
+    try require(CFEqual(dialog, freshDialog) && focusedWindowIs(app, freshDialog),
+                "exact Save Changes window changed before Save")
+    let finalSource = try setPin(source), finalDestination = try setPin(destination)
+    try require(samePin(finalSource, sourcePin) && samePin(finalDestination, destinationPin),
+                "source/destination changed immediately before Save")
+    try require(ProcessInfo.processInfo.systemUptime < deadline, "reconciliation deadline expired before Save")
+    try requireExpectedGeneration(process, options: options)
+    try requireSameProcess(process, options: options)
+
+    phase = "save-owned-source-dialog"
+    focusVerified = true
+    saveAttempted = true
+    try press(saveButton)
+    openAttempted = true // Records the original pending Open outcome, not a helper-issued Open.
+
+    phase = "observe-original-pending-open"
+    let verifyDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + 90)
+    var previousSource: [String: Any]?
+    var previousDestination: [String: Any]?
+    var stable = 0
+    while ProcessInfo.processInfo.systemUptime < verifyDeadline {
+        try requireExpectedGeneration(process, options: options)
+        try requireSameProcess(process, options: options)
+        let currentWindows = try windows(app)
+        let blockers = currentWindows.filter { isReconciliationBlockingWindow($0) }
+        if !blockers.isEmpty {
+            try require(canWaitForReconciliationDialog(
+                blockerCount: blockers.count,
+                exactSameDialog: blockers.count == 1 && CFEqual(blockers[0], dialog)
+            ),
+                        "unexpected dialog after Save; original pending Open outcome is unknown")
+            let (stillOpenDialog, _) = try exactSaveChangesDialog(app, expectedText: expectedText)
+            try require(CFEqual(stillOpenDialog, dialog) && focusedWindowIs(app, stillOpenDialog),
+                        "Save Changes dialog changed after Save; outcome is unknown")
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+            continue
+        }
+        let matches = try currentWindows.filter { window in
+            guard let raw = optionalAX(window, kAXDocumentAttribute as String) as? String else { return false }
+            return try sameSetURL(raw, expected: destination)
+        }
+        try require(matches.count <= 1, "ambiguous destination Set URL after Save")
+        if let destinationWindow = matches.first,
+           focusedWindowIs(app, destinationWindow) {
+            let savedSource = try setPin(source)
+            let openedDestination = try setPin(destination)
+            try require(!samePin(savedSource, sourcePin),
+                        "Save Changes closed without a positive source-file transition")
+            try require(sameOpenedDestination(destinationPin, openedDestination),
+                        "original pending Open reached a changed destination file")
+            let finalWindow = try exactDocumentWindow(app, url: destination)
+            try require(focusedWindowIs(app, finalWindow),
+                        "pinned destination lost focus during reconciliation")
+            _ = try saveCopyTransport(finalWindow)
+            if let priorSource = previousSource, let priorDestination = previousDestination,
+               samePin(priorSource, savedSource), samePin(priorDestination, openedDestination) {
+                stable += 1
+            } else {
+                stable = 1
+            }
+            previousSource = savedSource
+            previousDestination = openedDestination
+            if stable >= 3 {
+                sourceSaveVerified = true
+                openSourcePin = savedSource
+                return [
+                    "format": "codex-devtools-live-set-open-v1", "status": "reconciled", "read_only": false,
+                    "target": ["pid": options.pid, "bundle_identifier": options.bundleID],
+                    "same_process": true, "source_set_url": source.absoluteString,
+                    "destination_set_url": destination.absoluteString,
+                    "source_file": savedSource, "source_file_before_save": sourcePin,
+                    "destination_file": destinationPin, "destination_file_after_open": openedDestination,
+                    "destination_metadata_delta": samePin(destinationPin, openedDestination) ? [] : ["ctime"],
+                    "save_owned_source": true, "reconcile_pending_open": true,
+                    "reconciled_pending_open": true, "expected_generation": options.expectedGeneration!,
+                    "dialog_text": expectedText,
+                    "pending_destination_binding_pre_action": "unverified",
+                    "open_initiated_by_helper": false,
+                    "backup_receipt": options.backupReceipt!,
+                    "backup_file": backupPath,
+                    "transport_before_save": transport,
+                    "transport_after_open": try saveCopyTransport(finalWindow),
+                    "actions": openActions(readOnly: false),
+                    "evidence_limit": "exact dialog Save, source file transition and stable same-process destination AX URL/file pins; the dialog does not expose the pending destination before Save, so the pending request is not pre-action-bound by this helper"
+                ]
+            }
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+    }
+    throw LifecycleFailure(phase: phase,
+                           message: "original pending Open did not resolve to the exact pinned destination within the deadline; Save outcome is unknown and must not be retried")
+}
+
 func checkedSourceBackup(_ receiptPath: String, source: URL, destination: URL, options: Options) throws -> String {
     let path = URL(fileURLWithPath: try lexicalPath(receiptPath))
     try ensureNoSymlinkChain(path, mustExist: true, outsideGit: true)
@@ -1592,6 +1862,12 @@ func stoppedOpen(_ options: Options, error: String) -> [String: Any] {
         "target": ["pid": options.pid, "bundle_identifier": options.bundleID], "phase": phase, "error": error,
         "actions": actions, "manual_inspection_required": uiActionAttempted || focusAttempted || saveAttempted || openAttempted,
         "backup_receipt": options.backupReceipt as Any? ?? NSNull()]
+    if options.reconcilePendingOpen {
+        report["reconcile_pending_open"] = true
+        report["expected_generation"] = options.expectedGeneration as Any? ?? NSNull()
+        report["pending_destination_binding_pre_action"] = "unverified"
+        report["open_initiated_by_helper"] = false
+    }
     if let openSourcePin { report["saved_source_file"] = openSourcePin }
     if let menuDiagnostics { report["diagnostics"] = menuDiagnostics }
     return report
@@ -1766,7 +2042,9 @@ if options.resumeReceipt != nil {
 }
 if options.openExisting {
     do {
-        let report = try runOpenExisting(options)
+        let report = try options.reconcilePendingOpen
+            ? runReconcilePendingOpen(options)
+            : runOpenExisting(options)
         let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
         print(String(data: data, encoding: .utf8) ?? "{}")
     } catch let error as LifecycleFailure {

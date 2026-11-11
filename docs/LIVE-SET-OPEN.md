@@ -1,10 +1,12 @@
 # Guarded same-process Live Set open
 
 `ax live-set-open` is read-only preflight unless `--execute` is explicit. It uses
-one fixed `--open-existing` mode in the existing lifecycle Swift helper, reusing
+the fixed `--open-existing` modes in the existing lifecycle Swift helper, reusing
 its exact AX document URL, path, menu, foreground/focus, dialog and NSWorkspace
-operations. It does not duplicate a per-Set UI script or accept arbitrary keys,
-AppleScript, prompt text, menu items or actions.
+operations. The ordinary mode never answers prompts; the separate reconciliation
+mode below admits only one exact Save control. The tool does not duplicate a
+per-Set UI script or accept arbitrary keys, AppleScript, prompt text, menu items
+or actions.
 
 Both source and destination must already be nonempty regular `.als` files outside
 Git, with canonical absolute paths and no symlink components or hardlink alias.
@@ -26,6 +28,63 @@ Without a Save permission, the command never saves the source. If Live presents 
 Save-changes prompt during the one open attempt, the command stops and leaves it
 untouched. It never presses Don't Save, Replace, Save As, or a prompt's Save button.
 The caller must inspect and reconcile that pending operation before another action.
+
+## Reconcile one already-open Save Changes dialog
+
+`--reconcile-pending-open` is a separate explicit mode for a pending Open that
+has already produced one exact Save Changes dialog. It requires
+`--save-owned-source`, a private `--backup-root`, and
+`--expected-generation` from a fresh read-only process inspection. Obtain the
+token through the existing CLI before the dialog Save action:
+
+```sh
+python3 -m codex_devtools ax live-settings-tab \
+  --pid 84769 --expected-bundle-id com.ableton.live \
+  --window-title "Current Set title"
+```
+
+Use the `target.process_generation` field only after confirming the returned PID
+and bundle ID. This command is read-only by default. A `stopped` status caused
+by the already-open modal does not show that Settings was inspected or changed;
+the process token alone is the evidence needed here. Collect it again immediately
+before reconciliation so process restart or stale identity is caught. Preflight is
+read-only and checks the current exact source Set, source/destination hashes,
+process generation, focused dialog signature, and Play/Link/record transport
+controls all off. The dialog must contain the exact source-derived text
+`Save changes to "<source title>" before closing?` and exactly one enabled,
+pressable Save, Cancel, and Don’t Save button. No other dialog is accepted.
+
+After reviewing the ready receipt, add `--execute`. The helper creates and
+rechecks the private exact-byte source backup, then rechecks process generation,
+frontmost Live PID, current source window/URL, transport state, dialog identity,
+and both Set pins immediately before one AXPress of that exact Save button.
+It never presses Cancel or Don’t Save. Saving resumes the original pending
+Open; this mode does not issue another Open. The receipt labels the pending
+destination as unverified before Save because the dialog exposes no destination
+URL. Completion requires the source file to show a positive transition and the
+same Live process to show the exact pinned destination URL with stable file
+identity/hash and stopped transport. The exact original dialog may remain
+visible briefly after the one Save press; the helper waits for it to close without
+pressing again. A changed/ambiguous dialog, a different destination, source
+remaining current, or timeout is stopped/unknown and must be inspected manually.
+The Save is never retried and no additional Open is sent.
+
+```sh
+python3 -m codex_devtools ax live-set-open \
+  --pid 84769 --expected-bundle-id com.ableton.live \
+  --source-set /private/owned/Current.als --source-sha256 SOURCE_SHA256 \
+  --destination-set /private/owned/Existing.als --destination-sha256 DESTINATION_SHA256 \
+  --app "/Applications/Ableton Live 12 Beta.app" \
+  --save-owned-source --backup-root /private/owned/private-backups \
+  --reconcile-pending-open --expected-generation PROCESS_GENERATION
+```
+
+Read the exact `ready` receipt before repeating with `--execute`. This does
+not attest to the pending destination before Save, and `reconciled` proves only
+the exact dialog Save, source file transition, and stable same-process
+destination AX/file observations. A prior pending-open intent must be recorded
+and reviewed by the caller. No M4L recall, runtime, wire, or hardware behavior
+is established.
 
 ## Explicitly preserve an owned source before opening
 

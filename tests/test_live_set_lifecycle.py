@@ -310,7 +310,9 @@ class LiveSetLifecycleTests(unittest.TestCase):
             / "codex_devtools"
             / "live_set_lifecycle.swift"
         ).read_text()
-        run_source = native_source[native_source.index("func run(_ options:") :]
+        run_start = native_source.index("func run(_ options:")
+        run_end = native_source.index("func reopenLifecycleSet(", run_start)
+        run_source = native_source[run_start:run_end]
         dismissed = run_source.index("try waitForGoToSheetDismissed(refreshedWindow)")
         readiness = run_source.index("try waitForSaveButtonEnabled(")
         attempted = run_source.index("saveAttempted = true")

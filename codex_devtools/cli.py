@@ -321,6 +321,16 @@ def build_parser() -> argparse.ArgumentParser:
     set_open.add_argument("--app", required=True, type=Path)
     set_open.add_argument("--save-owned-source", action="store_true")
     set_open.add_argument("--backup-root", type=Path)
+    set_open.add_argument(
+        "--reconcile-pending-open",
+        action="store_true",
+        help="save once in the exact already-open Save Changes dialog and observe its original pending Open",
+    )
+    set_open.add_argument(
+        "--expected-generation",
+        type=int,
+        help="Live process generation from a fresh read-only inspection; required for dialog reconciliation",
+    )
     set_open.add_argument("--execute", action="store_true")
     save_as = ax_sub.add_parser(
         "live-set-save-as",
@@ -777,6 +787,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.group == "ax" and args.action == "live-set-open":
             from .live_set_open import run_set_open
 
+            if args.reconcile_pending_open and (
+                not args.save_owned_source or args.backup_root is None
+            ):
+                raise ValueError(
+                    "--reconcile-pending-open requires --save-owned-source and --backup-root"
+                )
+            if args.reconcile_pending_open and args.expected_generation is None:
+                raise ValueError(
+                    "--reconcile-pending-open requires --expected-generation"
+                )
+            if not args.reconcile_pending_open and args.expected_generation is not None:
+                raise ValueError(
+                    "--expected-generation requires --reconcile-pending-open"
+                )
             result = run_set_open(
                 args.pid,
                 expected_bundle_id=args.expected_bundle_id,
@@ -787,6 +811,8 @@ def main(argv: list[str] | None = None) -> int:
                 app_bundle=args.app,
                 save_owned_source=args.save_owned_source,
                 backup_root=args.backup_root,
+                reconcile_pending_open=args.reconcile_pending_open,
+                expected_generation=args.expected_generation,
                 execute=args.execute,
             )
             _json_out(result)
