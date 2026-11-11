@@ -40,6 +40,67 @@ struct OutputControl {
     let value: Int
 }
 
+struct SeenInputAXElement {
+    let element: AXUIElement
+    let index: Int
+    let depth: Int
+    let role: String
+    let description: String
+}
+
+struct InputAXTraversalContext {
+    let index: Int
+    let depth: Int
+    let role: String
+    let description: String
+}
+
+func firstEqualIndex<Element, Candidate>(
+    in bucket: [Element],
+    candidate: Candidate,
+    equals: (Element, Candidate) -> Bool
+) -> Int? {
+    bucket.firstIndex { equals($0, candidate) }
+}
+
+func boundedAXDiagnosticText(_ value: String?) -> String {
+    guard let value else { return "<unavailable>" }
+    let singleLine = value
+        .replacingOccurrences(of: "\r", with: " ")
+        .replacingOccurrences(of: "\n", with: " ")
+        .replacingOccurrences(of: "\t", with: " ")
+        .replacingOccurrences(of: "'", with: "’")
+    return String(singleLine.prefix(80))
+}
+
+func diagnosticAXText(_ element: AXUIElement, _ attribute: String) -> String {
+    do {
+        guard let value = try axValue(element, attribute, allowUnsupported: true) else {
+            return "<unavailable>"
+        }
+        guard let text = value as? String else { return "<non-string>" }
+        return boundedAXDiagnosticText(text)
+    } catch {
+        return "<unreadable>"
+    }
+}
+
+func inputAXIdentityFailure(
+    hash: CFHashCode,
+    equal: Bool,
+    previous: InputAXTraversalContext,
+    current: InputAXTraversalContext
+) -> String {
+    let classification = equal ? "AX element repeats under CFEqual" : "distinct AX elements share CFHash"
+    return "\(classification): hash=\(hash), CFEqual=\(equal), " +
+        "previous(index=\(previous.index),depth=\(previous.depth),role='\(previous.role)',description='\(previous.description)'), " +
+        "current(index=\(current.index),depth=\(current.depth),role='\(current.role)',description='\(current.description)')"
+}
+
+func inputAXElementBoundFailure(visited: Int, maximum: Int) -> String {
+    "input Settings AX tree exceeds native element bound (visited \(visited), maximum \(maximum))"
+}
+
 var phase = "startup"
 var receipt: [String: Any]?
 var options = Options()
@@ -1116,7 +1177,7 @@ func inputInventory(
     let settingsIndex = settings[0].offset
     let settingsElement = settings[0].element
     var queue: [(AXUIElement, Int)] = [(settingsElement, 0)]
-    var seen = Set<CFHashCode>()
+    var seen: [CFHashCode: [SeenInputAXElement]] = [:]
     var controls: [String: AXUIElement] = [:]
     var checks: [[String: Any]] = []
     var groups: [String: Set<String>] = [:]
@@ -1126,13 +1187,51 @@ func inputInventory(
     while !queue.isEmpty {
         let (element, depth) = queue.removeFirst()
         let hash = CFHash(element)
-        guard seen.insert(hash).inserted, visited < maximumElements else {
-            throw SyncFailure(message: "duplicate AX identity or incomplete input tree")
+        let sameHash = seen[hash] ?? []
+        if let previousIndex = firstEqualIndex(
+            in: sameHash,
+            candidate: element,
+            equals: { CFEqual($0.element, $1) }
+        ) {
+            let previous = sameHash[previousIndex]
+            let current = InputAXTraversalContext(
+                index: visited, depth: depth,
+                role: diagnosticAXText(element, kAXRoleAttribute as String),
+                description: diagnosticAXText(element, kAXDescriptionAttribute as String)
+            )
+            let prior = InputAXTraversalContext(
+                index: previous.index, depth: previous.depth,
+                role: previous.role, description: previous.description
+            )
+            throw SyncFailure(message: inputAXIdentityFailure(
+                hash: hash, equal: true, previous: prior, current: current
+            ))
+        }
+        if let previous = sameHash.first {
+            let current = InputAXTraversalContext(
+                index: visited, depth: depth,
+                role: diagnosticAXText(element, kAXRoleAttribute as String),
+                description: diagnosticAXText(element, kAXDescriptionAttribute as String)
+            )
+            let prior = InputAXTraversalContext(
+                index: previous.index, depth: previous.depth,
+                role: previous.role, description: previous.description
+            )
+            throw SyncFailure(message: inputAXIdentityFailure(
+                hash: hash, equal: false, previous: prior, current: current
+            ))
+        }
+        guard visited < maximumElements else {
+            throw SyncFailure(message: inputAXElementBoundFailure(visited: visited, maximum: maximumElements))
         }
         let index = visited
         visited += 1
         let role = try requiredString(element, kAXRoleAttribute as String)
         let optionalDescription = try axValue(element, kAXDescriptionAttribute as String, allowUnsupported: role != (kAXCheckBoxRole as String)) as? String
+        seen[hash, default: []].append(SeenInputAXElement(
+            element: element, index: index, depth: depth, role: boundedAXDiagnosticText(role),
+            description: boundedAXDiagnosticText(optionalDescription)
+        ))
         if role != (kAXCheckBoxRole as String), optionalDescription?.contains(": MIDI Input:") == true {
             throw SyncFailure(message: "input description on unexpected non-checkbox role")
         }

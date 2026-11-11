@@ -18,6 +18,13 @@ A missing/partial/ambiguous group, duplicate identity, unreadable checkbox,
 disabled On input, wrong PID/bundle or truncated tree blocks use. Disabled Off
 inputs may be recorded and are never pressed.
 
+On an inventory refusal, the native helper distinguishes an element-limit
+failure, a repeated element that compares equal under `CFEqual`, and distinct
+elements that share a `CFHash`. Both identity cases remain fail-closed. The
+diagnostic includes bounded prior/current index, depth, role and description
+context; it does not authorize continuing with a partial tree. This detail is
+read-only diagnostics and does not change baseline identities or the schema.
+
 ```sh
 python3 -m codex_devtools ax live-midi-inputs \
   --pid PID --expected-bundle-id com.ableton.live --expected-count INPUT_ROWS \

@@ -669,6 +669,32 @@ class NativePolicySourceTests(unittest.TestCase):
 options.expectedCount = 2
 precondition(inputFlags == Set(["Track", "Sync", "Remote Control"]))
 precondition(!inputFlags.contains("Remote"), "unobserved short alias must fail")
+struct FakeAXIdentity { let value: Int }
+let fakeIdentityHash: (FakeAXIdentity) -> CFHashCode = { _ in 41 }
+let firstFake = FakeAXIdentity(value: 1)
+let equalFake = FakeAXIdentity(value: 1)
+let collidingFake = FakeAXIdentity(value: 2)
+precondition(fakeIdentityHash(firstFake) == fakeIdentityHash(collidingFake), "fixture must collide by hash")
+let fakeBucket = [firstFake]
+precondition(firstEqualIndex(in: fakeBucket, candidate: equalFake, equals: { $0.value == $1.value }) == 0,
+             "equal element in hash bucket must be reported as a repeat")
+precondition(firstEqualIndex(in: fakeBucket, candidate: collidingFake, equals: { $0.value == $1.value }) == nil,
+             "unequal element in hash bucket must be reported as a collision")
+let previousContext = InputAXTraversalContext(index: 3, depth: 2, role: "AXGroup", description: "Previous group")
+let currentContext = InputAXTraversalContext(index: 4, depth: 3, role: "AXCheckBox", description: "Current input")
+let repeatMessage = inputAXIdentityFailure(hash: 41, equal: true, previous: previousContext, current: currentContext)
+precondition(repeatMessage.contains("AX element repeats under CFEqual") && repeatMessage.contains("CFEqual=true"),
+             "equal AX elements must have a specific fail-closed diagnostic")
+precondition(repeatMessage.contains("Previous group") && repeatMessage.contains("Current input") && repeatMessage.contains("depth=3"),
+             "diagnostic must include prior/current bounded traversal context")
+let collisionMessage = inputAXIdentityFailure(hash: 41, equal: false, previous: previousContext, current: currentContext)
+precondition(collisionMessage.contains("distinct AX elements share CFHash") && collisionMessage.contains("CFEqual=false"),
+             "hash collisions must be distinguished from equal elements")
+precondition(boundedAXDiagnosticText(String(repeating: "x", count: 100)).count == 80,
+             "diagnostic labels must remain bounded")
+let boundMessage = inputAXElementBoundFailure(visited: 1500, maximum: 1500)
+precondition(boundMessage.contains("visited 1500") && boundMessage.contains("maximum 1500"),
+             "element bound refusal must report separately from identity repeats")
 let (_, baseline) = try inputJSON(CommandLine.arguments[1])
 try compareInputs(baseline, baseline)
 var rejected = false
