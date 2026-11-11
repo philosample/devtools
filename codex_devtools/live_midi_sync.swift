@@ -40,12 +40,21 @@ struct OutputControl {
     let value: Int
 }
 
-struct SeenInputAXElement {
-    let element: AXUIElement
+struct SeenInputAXElement<Element> {
+    let element: Element
     let index: Int
     let depth: Int
     let role: String
     let description: String
+}
+
+struct InputAXTraversalNode<Element> {
+    let element: Element
+    let hash: CFHashCode
+    let index: Int
+    let depth: Int
+    let role: String
+    let description: String?
 }
 
 struct InputAXTraversalContext {
@@ -99,6 +108,72 @@ func inputAXIdentityFailure(
 
 func inputAXElementBoundFailure(visited: Int, maximum: Int) -> String {
     "input Settings AX tree exceeds native element bound (visited \(visited), maximum \(maximum))"
+}
+
+func claimInputCheckboxIdentity(_ identity: String, identities: inout Set<String>) throws {
+    guard identities.insert(identity).inserted else {
+        throw SyncFailure(message: "distinct AX checkboxes share exported CFHash identity: \(identity)")
+    }
+}
+
+func traverseInputAXGraph<Element>(
+    root: Element,
+    maximumElements: Int,
+    maximumDepth: Int,
+    hash: (Element) -> CFHashCode,
+    equal: (Element, Element) -> Bool,
+    attributes: (Element) throws -> (role: String, description: String?),
+    diagnosticContext: (Element, Int, Int) -> InputAXTraversalContext,
+    children: (Element) throws -> [Element],
+    visit: (InputAXTraversalNode<Element>) throws -> Void
+) throws -> Int {
+    var queue: [(Element, Int)] = [(root, 0)]
+    var seen: [CFHashCode: [SeenInputAXElement<Element>]] = [:]
+    var visited = 0
+
+    while !queue.isEmpty {
+        let (element, depth) = queue.removeFirst()
+        let identityHash = hash(element)
+        let sameHash = seen[identityHash] ?? []
+        if let previousIndex = firstEqualIndex(
+            in: sameHash,
+            candidate: element,
+            equals: { equal($0.element, $1) }
+        ) {
+            let previous = sameHash[previousIndex]
+            let current = diagnosticContext(element, visited, depth)
+            let prior = InputAXTraversalContext(
+                index: previous.index, depth: previous.depth,
+                role: previous.role, description: previous.description
+            )
+            throw SyncFailure(message: inputAXIdentityFailure(
+                hash: identityHash, equal: true, previous: prior, current: current
+            ))
+        }
+
+        guard visited < maximumElements else {
+            throw SyncFailure(message: inputAXElementBoundFailure(visited: visited, maximum: maximumElements))
+        }
+        let index = visited
+        visited += 1
+        let (role, description) = try attributes(element)
+        seen[identityHash, default: []].append(SeenInputAXElement(
+            element: element, index: index, depth: depth, role: boundedAXDiagnosticText(role),
+            description: boundedAXDiagnosticText(description)
+        ))
+        try visit(InputAXTraversalNode(
+            element: element, hash: identityHash, index: index, depth: depth,
+            role: role, description: description
+        ))
+
+        let descendants = try children(element)
+        guard depth < maximumDepth || descendants.isEmpty,
+              visited + queue.count + descendants.count <= maximumElements else {
+            throw SyncFailure(message: "input Settings tree exceeds bounds")
+        }
+        queue.append(contentsOf: descendants.map { ($0, depth + 1) })
+    }
+    return visited
 }
 
 var phase = "startup"
@@ -1176,97 +1251,69 @@ func inputInventory(
     guard settings.count == 1 else { throw SyncFailure(message: "unique Settings window required") }
     let settingsIndex = settings[0].offset
     let settingsElement = settings[0].element
-    var queue: [(AXUIElement, Int)] = [(settingsElement, 0)]
-    var seen: [CFHashCode: [SeenInputAXElement]] = [:]
     var controls: [String: AXUIElement] = [:]
     var checks: [[String: Any]] = []
     var groups: [String: Set<String>] = [:]
     var order: [String] = []
     var descriptions = Set<String>()
-    var visited = 0
-    while !queue.isEmpty {
-        let (element, depth) = queue.removeFirst()
-        let hash = CFHash(element)
-        let sameHash = seen[hash] ?? []
-        if let previousIndex = firstEqualIndex(
-            in: sameHash,
-            candidate: element,
-            equals: { CFEqual($0.element, $1) }
-        ) {
-            let previous = sameHash[previousIndex]
-            let current = InputAXTraversalContext(
-                index: visited, depth: depth,
+    var checkboxIdentities = Set<String>()
+    let visited = try traverseInputAXGraph(
+        root: settingsElement,
+        maximumElements: maximumElements,
+        maximumDepth: maximumDepth,
+        hash: { CFHash($0) },
+        equal: { CFEqual($0, $1) },
+        attributes: { element in
+            let role = try requiredString(element, kAXRoleAttribute as String)
+            let description = try axValue(
+                element, kAXDescriptionAttribute as String,
+                allowUnsupported: role != (kAXCheckBoxRole as String)
+            ) as? String
+            return (role, description)
+        },
+        diagnosticContext: { element, index, depth in
+            InputAXTraversalContext(
+                index: index, depth: depth,
                 role: diagnosticAXText(element, kAXRoleAttribute as String),
                 description: diagnosticAXText(element, kAXDescriptionAttribute as String)
             )
-            let prior = InputAXTraversalContext(
-                index: previous.index, depth: previous.depth,
-                role: previous.role, description: previous.description
-            )
-            throw SyncFailure(message: inputAXIdentityFailure(
-                hash: hash, equal: true, previous: prior, current: current
-            ))
-        }
-        if let previous = sameHash.first {
-            let current = InputAXTraversalContext(
-                index: visited, depth: depth,
-                role: diagnosticAXText(element, kAXRoleAttribute as String),
-                description: diagnosticAXText(element, kAXDescriptionAttribute as String)
-            )
-            let prior = InputAXTraversalContext(
-                index: previous.index, depth: previous.depth,
-                role: previous.role, description: previous.description
-            )
-            throw SyncFailure(message: inputAXIdentityFailure(
-                hash: hash, equal: false, previous: prior, current: current
-            ))
-        }
-        guard visited < maximumElements else {
-            throw SyncFailure(message: inputAXElementBoundFailure(visited: visited, maximum: maximumElements))
-        }
-        let index = visited
-        visited += 1
-        let role = try requiredString(element, kAXRoleAttribute as String)
-        let optionalDescription = try axValue(element, kAXDescriptionAttribute as String, allowUnsupported: role != (kAXCheckBoxRole as String)) as? String
-        seen[hash, default: []].append(SeenInputAXElement(
-            element: element, index: index, depth: depth, role: boundedAXDiagnosticText(role),
-            description: boundedAXDiagnosticText(optionalDescription)
-        ))
-        if role != (kAXCheckBoxRole as String), optionalDescription?.contains(": MIDI Input:") == true {
-            throw SyncFailure(message: "input description on unexpected non-checkbox role")
-        }
-        if role == (kAXCheckBoxRole as String) {
-            guard let description = optionalDescription, !description.isEmpty,
-                  descriptions.insert(description).inserted, checks.count < 512 else {
-                throw SyncFailure(message: "checkbox description unknown, duplicate or over bound")
+        },
+        children: { try childElements($0) },
+        visit: { node in
+            let element = node.element
+            let role = node.role
+            let optionalDescription = node.description
+            if role != (kAXCheckBoxRole as String), optionalDescription?.contains(": MIDI Input:") == true {
+                throw SyncFailure(message: "input description on unexpected non-checkbox role")
             }
-            let value = try checkboxValue(element)
-            let isEnabled = try enabled(element)
-            let identity = String(hash)
-            checks.append(["index": index, "identity": identity, "description": description,
-                           "role": role, "enabled": isEnabled, "value": value])
-            controls[identity] = element
-            if description.contains(": MIDI Input:") {
-                let parts = description.components(separatedBy: ": MIDI Input: ")
-                guard parts.count == 2, !parts[0].isEmpty,
-                      parts[0] == parts[0].trimmingCharacters(in: .whitespacesAndNewlines),
-                      inputFlags.contains(parts[1]),
-                      isEnabled || value == 0 else {
-                    throw SyncFailure(message: "ambiguous or unmodifiable input checkbox")
+            if role == (kAXCheckBoxRole as String) {
+                let identity = String(node.hash)
+                try claimInputCheckboxIdentity(identity, identities: &checkboxIdentities)
+                guard let description = optionalDescription, !description.isEmpty,
+                      descriptions.insert(description).inserted, checks.count < 512 else {
+                    throw SyncFailure(message: "checkbox description unknown, duplicate or over bound")
                 }
-                if groups[parts[0]] == nil { groups[parts[0]] = []; order.append(parts[0]) }
-                guard groups[parts[0]]!.insert(parts[1]).inserted else {
-                    throw SyncFailure(message: "duplicate input flag")
+                let value = try checkboxValue(element)
+                let isEnabled = try enabled(element)
+                checks.append(["index": node.index, "identity": identity, "description": description,
+                               "role": role, "enabled": isEnabled, "value": value])
+                controls[identity] = element
+                if description.contains(": MIDI Input:") {
+                    let parts = description.components(separatedBy: ": MIDI Input: ")
+                    guard parts.count == 2, !parts[0].isEmpty,
+                          parts[0] == parts[0].trimmingCharacters(in: .whitespacesAndNewlines),
+                          inputFlags.contains(parts[1]),
+                          isEnabled || value == 0 else {
+                        throw SyncFailure(message: "ambiguous or unmodifiable input checkbox")
+                    }
+                    if groups[parts[0]] == nil { groups[parts[0]] = []; order.append(parts[0]) }
+                    guard groups[parts[0]]!.insert(parts[1]).inserted else {
+                        throw SyncFailure(message: "duplicate input flag")
+                    }
                 }
             }
         }
-        let children = try childElements(element)
-        guard depth < maximumDepth || children.isEmpty,
-              visited + queue.count + children.count <= maximumElements else {
-            throw SyncFailure(message: "input Settings tree exceeds bounds")
-        }
-        queue.append(contentsOf: children.map { ($0, depth + 1) })
-    }
+    )
     guard groups.values.allSatisfy({ $0 == inputFlags }),
           (!validateInputGroups || groups.count == options.expectedCount) else {
         throw SyncFailure(message: "input groups are missing, partial or differ from caller count")
