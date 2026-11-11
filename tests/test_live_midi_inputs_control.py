@@ -695,6 +695,109 @@ precondition(boundedAXDiagnosticText(String(repeating: "x", count: 100)).count =
 let boundMessage = inputAXElementBoundFailure(visited: 1500, maximum: 1500)
 precondition(boundMessage.contains("visited 1500") && boundMessage.contains("maximum 1500"),
              "element bound refusal must report separately from identity repeats")
+final class FakeInputAXNode {
+    let id: Int
+    let hash: CFHashCode
+    let role: String
+    let description: String?
+    var descendants: [FakeInputAXNode] = []
+    init(_ id: Int, _ hash: CFHashCode, _ role: String, _ description: String? = nil) {
+        self.id = id
+        self.hash = hash
+        self.role = role
+        self.description = description
+    }
+}
+func runFakeInputTraversal(
+    _ root: FakeInputAXNode,
+    maximumElements: Int = 32,
+    maximumDepth: Int = 12,
+    checkboxControls: inout [String: Int]
+) throws -> [String] {
+    var roles: [String] = []
+    var checkboxIdentities = Set<String>()
+    _ = try traverseInputAXGraph(
+        root: root,
+        maximumElements: maximumElements,
+        maximumDepth: maximumDepth,
+        hash: { $0.hash },
+        equal: { $0.id == $1.id },
+        attributes: { ($0.role, $0.description) },
+        diagnosticContext: { node, index, depth in
+            InputAXTraversalContext(index: index, depth: depth, role: node.role,
+                                    description: boundedAXDiagnosticText(node.description))
+        },
+        children: { $0.descendants },
+        visit: { node in
+            roles.append(node.role)
+            if node.role == "AXCheckBox" {
+                let identity = String(node.hash)
+                try claimInputCheckboxIdentity(identity, identities: &checkboxIdentities)
+                checkboxControls[identity] = node.element.id
+            }
+        }
+    )
+    return roles
+}
+let collisionRoot = FakeInputAXNode(1, 1, "AXWindow")
+let collisionRadio = FakeInputAXNode(2, 41, "AXRadioButton", "Display & Input")
+let collisionGroup = FakeInputAXNode(3, 41, "AXGroup")
+collisionGroup.descendants = (0..<136).map { index in
+    FakeInputAXNode(100 + index, CFHashCode(1000 + index), "AXCheckBox", "Device \(index): MIDI Input: Track")
+}
+collisionRoot.descendants = [collisionRadio, collisionGroup]
+var fakeControls: [String: Int] = [:]
+let collisionRoles = try runFakeInputTraversal(
+    collisionRoot, maximumElements: 1500, checkboxControls: &fakeControls
+)
+precondition(Array(collisionRoles.prefix(3)) == ["AXWindow", "AXRadioButton", "AXGroup"]
+             && collisionRoles.count == 139 && fakeControls.count == 136,
+             "unequal radio/group collision must continue through all 136 checkbox descendants")
+let collisionRepeatRoot = FakeInputAXNode(60, 200, "AXWindow")
+let collisionRepeatRadio = FakeInputAXNode(61, 41, "AXRadioButton", "Display & Input")
+let collisionRepeatGroup = FakeInputAXNode(62, 41, "AXGroup")
+let equalRadioAfterCollision = FakeInputAXNode(61, 41, "AXRadioButton", "Display & Input")
+collisionRepeatRoot.descendants = [collisionRepeatRadio, collisionRepeatGroup, equalRadioAfterCollision]
+var collisionRepeatRejected = false
+do { _ = try runFakeInputTraversal(collisionRepeatRoot, checkboxControls: &fakeControls) }
+catch let error as SyncFailure {
+    collisionRepeatRejected = error.message.contains("AX element repeats under CFEqual")
+        && error.message.contains("previous(index=1")
+}
+precondition(collisionRepeatRejected,
+             "the hash bucket must retain prior distinct nodes and still find a later true repeat")
+let cycleRoot = FakeInputAXNode(10, 70, "AXWindow")
+let cycleGroup = FakeInputAXNode(11, 71, "AXGroup")
+let equalCycleRoot = FakeInputAXNode(10, 70, "AXWindow")
+cycleRoot.descendants = [cycleGroup]
+cycleGroup.descendants = [equalCycleRoot]
+var cycleRejected = false
+do { _ = try runFakeInputTraversal(cycleRoot, checkboxControls: &fakeControls) }
+catch let error as SyncFailure { cycleRejected = error.message.contains("AX element repeats under CFEqual") }
+precondition(cycleRejected, "a true CFEqual cycle must continue to fail closed")
+let checkboxCollisionRoot = FakeInputAXNode(20, 80, "AXWindow")
+let checkboxFirst = FakeInputAXNode(21, 88, "AXCheckBox", "First checkbox")
+let checkboxSecond = FakeInputAXNode(22, 88, "AXCheckBox", "Second checkbox")
+checkboxCollisionRoot.descendants = [checkboxFirst, checkboxSecond]
+var checkboxCollisionControls: [String: Int] = [:]
+var checkboxCollisionRejected = false
+do { _ = try runFakeInputTraversal(checkboxCollisionRoot, checkboxControls: &checkboxCollisionControls) }
+catch let error as SyncFailure { checkboxCollisionRejected = error.message.contains("distinct AX checkboxes share exported CFHash identity") }
+precondition(checkboxCollisionRejected && checkboxCollisionControls == ["88": 21],
+             "distinct checkbox hash collision must fail before controls dictionary overwrite")
+let boundedRoot = FakeInputAXNode(30, 90, "AXWindow")
+boundedRoot.descendants = [FakeInputAXNode(31, 91, "AXGroup"), FakeInputAXNode(32, 92, "AXGroup"),
+                           FakeInputAXNode(33, 93, "AXGroup")]
+var boundRejected = false
+do { _ = try runFakeInputTraversal(boundedRoot, maximumElements: 2, checkboxControls: &fakeControls) }
+catch let error as SyncFailure { boundRejected = error.message.contains("input Settings tree exceeds bounds") }
+precondition(boundRejected, "production traversal must retain its element bound")
+let deepRoot = FakeInputAXNode(40, 100, "AXWindow")
+deepRoot.descendants = [FakeInputAXNode(41, 101, "AXGroup")]
+var depthRejected = false
+do { _ = try runFakeInputTraversal(deepRoot, maximumDepth: 0, checkboxControls: &fakeControls) }
+catch let error as SyncFailure { depthRejected = error.message.contains("input Settings tree exceeds bounds") }
+precondition(depthRejected, "production traversal must retain its depth bound")
 let (_, baseline) = try inputJSON(CommandLine.arguments[1])
 try compareInputs(baseline, baseline)
 var rejected = false

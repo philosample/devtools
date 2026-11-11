@@ -18,12 +18,14 @@ A missing/partial/ambiguous group, duplicate identity, unreadable checkbox,
 disabled On input, wrong PID/bundle or truncated tree blocks use. Disabled Off
 inputs may be recorded and are never pressed.
 
-On an inventory refusal, the native helper distinguishes an element-limit
-failure, a repeated element that compares equal under `CFEqual`, and distinct
-elements that share a `CFHash`. Both identity cases remain fail-closed. The
-diagnostic includes bounded prior/current index, depth, role and description
-context; it does not authorize continuing with a partial tree. This detail is
-read-only diagnostics and does not change baseline identities or the schema.
+The native helper tracks every visited AX reference in a bucket for its
+`CFHash`. Distinct elements that share a hash continue through the bounded tree
+traversal; an element that compares equal to an earlier reference under
+`CFEqual` still fails closed. If two distinct checkboxes share the same
+exported `String(CFHash)` identity, inventory also fails before that key can
+overwrite a control. Element/depth limits, exact checkbox counts, descriptions,
+groups and completeness checks remain required. No nodes are silently skipped,
+and the baseline identity format and schema do not change.
 
 ```sh
 python3 -m codex_devtools ax live-midi-inputs \
@@ -38,8 +40,10 @@ and exact 0/1 value. `inventory_sha256` hashes the canonical baseline content
 excluding that field; action receipts additionally pin the original file bytes.
 The schema is `codex-devtools-live-midi-inputs-baseline-v1`. AX identities are
 opaque CFHash values: native verification must establish their continuity
-across helper invocations on the actual Live/macOS version. Identity drift or
-hash collisions stop use, rather than authorizing name-only matching.
+across helper invocations on the actual Live/macOS version. Distinct
+noncheckbox AX elements may share a hash during complete traversal; a repeated
+`CFEqual` element or duplicate checkbox hash identity still stops use, rather
+than authorizing name-only matching.
 
 ## Explicit actions
 
