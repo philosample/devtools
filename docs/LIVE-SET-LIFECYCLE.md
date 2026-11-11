@@ -115,6 +115,15 @@ fresh absence of the destination immediately before one Save click. A late
 Replace/security/discard prompt, missing or duplicate control, changed source
 URL, unexpected dialog, or failed readback stops the operation. No prompt is
 accepted and no action is retried automatically.
+If process-targeted activation does not make that PID frontmost, the helper may
+make one Launch Services activation request for the already-pinned Live.app
+bundle, without a document and with new-instance creation disabled. Before and
+after that request it rechecks the running PID and generation, unique bundle
+instance, bundle and executable paths, and the pinned app metadata/executable.
+Running-app substitution is disabled. It accepts the callback only for the same
+PID, then re-verifies frontmost state and the exact Set window focus. A callback
+error, timeout, changed identity, or new process stops the operation; it never
+retries activation or continues to Save from a failed check.
 Before sending Go To Folder, it raises the exact Save window if needed, sets
 `AXFocused=true` on the observed filename field, and verifies both the field's
 focus value and the app's focused-element/window identity. It rechecks the

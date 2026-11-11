@@ -114,6 +114,32 @@ struct SaveCopyWindowAssessment {
     let sharingOverlay: WindowSharingOverlaySignature?
 }
 
+struct LifecycleActivationEvidence {
+    let withinDeadline: Bool
+    let exactPID: Bool
+    let expectedGeneration: Bool
+    let exactBundle: Bool
+    let exactExecutable: Bool
+    let exactAppIdentity: Bool
+    let uniqueRunningTarget: Bool
+    let returnedApplicationIsPinned: Bool
+    let frontmost: Bool
+}
+
+func lifecycleActivationIdentityIsPinned(_ evidence: LifecycleActivationEvidence) -> Bool {
+    evidence.exactPID && evidence.expectedGeneration && evidence.exactBundle &&
+        evidence.exactExecutable && evidence.exactAppIdentity &&
+        evidence.uniqueRunningTarget && evidence.returnedApplicationIsPinned
+}
+
+func lifecycleActivationFallbackAllows(_ evidence: LifecycleActivationEvidence) -> Bool {
+    evidence.withinDeadline && lifecycleActivationIdentityIsPinned(evidence) && !evidence.frontmost
+}
+
+func lifecycleActivationComplete(_ evidence: LifecycleActivationEvidence) -> Bool {
+    evidence.withinDeadline && lifecycleActivationIdentityIsPinned(evidence) && evidence.frontmost
+}
+
 struct FileMenuCancelPreflightEvidence {
     let exactProcess: Bool
     let expectedGeneration: Bool
@@ -1016,15 +1042,155 @@ func focusWindow(_ app: AXUIElement, pid: pid_t, window: AXUIElement) throws {
     throw LifecycleFailure(phase: phase, message: "exact AX window did not become focused")
 }
 
-func activateExactTarget(_ process: NSRunningApplication, app: AXUIElement, sourceWindow: AXUIElement) throws {
+func lifecycleActivationEvidence(
+    process: NSRunningApplication,
+    options: Options,
+    generation: Int64,
+    appPin: [String: Any],
+    returnedApplication: NSRunningApplication? = nil,
+    verifyAppPin: Bool = false
+) throws -> LifecycleActivationEvidence {
+    guard let appPath = options.appPath else {
+        throw LifecycleFailure(phase: phase, message: "exact Live.app path required for activation")
+    }
+    let appURL = URL(fileURLWithPath: appPath)
+    let app = Bundle(url: appURL)
+    let executableName = app?.object(forInfoDictionaryKey: "CFBundleExecutable") as? String
+    let expectedExecutable = executableName.map {
+        appURL.appendingPathComponent("Contents/MacOS").appendingPathComponent($0)
+    }
+    let current = NSRunningApplication(processIdentifier: options.pid)
+    let matching = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == options.bundleID }
+    let currentGeneration = current?.launchDate.flatMap(processGenerationValue)
+    let processGeneration = process.launchDate.flatMap(processGenerationValue)
+    let appPinMatches: Bool
+    if verifyAppPin {
+        appPinMatches = samePin(appPin, try lifecycleAppPin(appPath, bundleID: options.bundleID))
+    } else {
+        appPinMatches = appPin["path"] as? String == appURL.path
+    }
+    let normalizedExecutable = expectedExecutable?.resolvingSymlinksInPath().standardizedFileURL.path
+    let currentExecutable = current?.executableURL?.resolvingSymlinksInPath().standardizedFileURL.path
+    let originalExecutable = process.executableURL?.resolvingSymlinksInPath().standardizedFileURL.path
+    let returnedGeneration = returnedApplication?.launchDate.flatMap(processGenerationValue)
+    let returnedApplicationIsPinned = returnedApplication.map {
+        $0.processIdentifier == options.pid && !$0.isTerminated &&
+            $0.bundleIdentifier == options.bundleID && $0.bundleURL?.standardizedFileURL.path == appURL.standardizedFileURL.path &&
+            returnedGeneration == generation
+    } ?? true
+    return LifecycleActivationEvidence(
+        withinDeadline: saveCopyDeadline.map { ProcessInfo.processInfo.systemUptime < $0 } ?? true,
+        exactPID: process.processIdentifier == options.pid && !process.isTerminated &&
+            current?.processIdentifier == options.pid && current?.isTerminated == false,
+        expectedGeneration: processGeneration == generation && currentGeneration == generation &&
+            (options.expectedGeneration == nil || options.expectedGeneration == generation),
+        exactBundle: process.bundleIdentifier == options.bundleID && current?.bundleIdentifier == options.bundleID &&
+            process.bundleURL?.standardizedFileURL.path == appURL.standardizedFileURL.path &&
+            current?.bundleURL?.standardizedFileURL.path == appURL.standardizedFileURL.path &&
+            app?.bundleIdentifier == options.bundleID,
+        exactExecutable: normalizedExecutable != nil && currentExecutable == normalizedExecutable &&
+            originalExecutable == normalizedExecutable,
+        exactAppIdentity: appURL.path == appPath && appURL.resolvingSymlinksInPath().path == appURL.path &&
+            appPinMatches,
+        uniqueRunningTarget: matching.count == 1 && matching[0].processIdentifier == options.pid,
+        returnedApplicationIsPinned: returnedApplicationIsPinned,
+        frontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid
+    )
+}
+
+func activatePinnedApplicationViaLaunchServices(
+    _ process: NSRunningApplication,
+    options: Options,
+    generation: Int64,
+    appPin: [String: Any]
+) throws -> NSRunningApplication {
+    let before = try lifecycleActivationEvidence(
+        process: process, options: options, generation: generation, appPin: appPin,
+        verifyAppPin: true
+    )
+    try require(lifecycleActivationFallbackAllows(before), "exact Live activation fallback preflight changed")
+    guard let appPath = options.appPath else {
+        throw LifecycleFailure(phase: phase, message: "exact Live.app path required for activation fallback")
+    }
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = true
+    configuration.addsToRecentItems = false
+    configuration.allowsRunningApplicationSubstitution = false
+    configuration.createsNewApplicationInstance = false
+    let appURL = URL(fileURLWithPath: appPath)
+    let semaphore = DispatchSemaphore(value: 0)
+    var opened: NSRunningApplication?
+    var openError: Error?
+    NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { application, error in
+        opened = application
+        openError = error
+        semaphore.signal()
+    }
+    guard semaphore.wait(timeout: .now() + 10) == .success else {
+        throw LifecycleFailure(phase: phase, message: "LaunchServices activation outcome unknown; no retry")
+    }
+    if let openError {
+        throw LifecycleFailure(phase: phase, message: "LaunchServices activation failed: \(openError.localizedDescription)")
+    }
+    guard let opened else {
+        throw LifecycleFailure(phase: phase, message: "LaunchServices returned no Live application")
+    }
+    let after = try lifecycleActivationEvidence(
+        process: process, options: options, generation: generation, appPin: appPin,
+        returnedApplication: opened, verifyAppPin: true
+    )
+    try require(lifecycleActivationIdentityIsPinned(after), "LaunchServices returned a different Live process or app; no retry")
+    return opened
+}
+
+func activateExactTarget(
+    _ process: NSRunningApplication,
+    app: AXUIElement,
+    sourceWindow: AXUIElement,
+    options: Options
+) throws {
     try checkSaveCopyDeadline()
     phase = "activate-target"
+    guard let launchDate = process.launchDate,
+          let generation = processGenerationValue(launchDate) else {
+        throw LifecycleFailure(phase: phase, message: "exact Live process generation unavailable before activation")
+    }
+    guard let appPath = options.appPath else {
+        throw LifecycleFailure(phase: phase, message: "exact Live.app path required before activation")
+    }
+    let appPin = try lifecycleAppPin(appPath, bundleID: options.bundleID)
+    let initialEvidence = try lifecycleActivationEvidence(
+        process: process, options: options, generation: generation, appPin: appPin
+    )
+    try require(lifecycleActivationIdentityIsPinned(initialEvidence), "exact Live process/app identity changed before activation")
     uiActionAttempted = true
     focusAttempted = true
     let activated = process.activate()
     try require(activated, "activation of exact Live process was refused")
-    try waitForFrontmost(pid: process.processIdentifier)
+    do {
+        try waitForFrontmost(pid: process.processIdentifier)
+    } catch let error as LifecycleFailure where error.message == "exact Live PID did not become the frontmost application" {
+        let afterDirectActivation = try lifecycleActivationEvidence(
+            process: process, options: options, generation: generation, appPin: appPin
+        )
+        if !lifecycleActivationComplete(afterDirectActivation) {
+            try require(lifecycleActivationFallbackAllows(afterDirectActivation), "exact Live process/app identity changed after activation")
+            _ = try activatePinnedApplicationViaLaunchServices(
+                process, options: options, generation: generation, appPin: appPin
+            )
+            try waitForFrontmost(pid: process.processIdentifier)
+        }
+    }
+    let frontmostEvidence = try lifecycleActivationEvidence(
+        process: process, options: options, generation: generation, appPin: appPin,
+        verifyAppPin: true
+    )
+    try require(lifecycleActivationComplete(frontmostEvidence), "exact Live process/app is not verified frontmost")
     try focusWindow(app, pid: process.processIdentifier, window: sourceWindow)
+    let focusedEvidence = try lifecycleActivationEvidence(
+        process: process, options: options, generation: generation, appPin: appPin
+    )
+    try require(lifecycleActivationComplete(focusedEvidence), "exact Live process/app changed before focus acceptance")
     focusVerified = true
 }
 
@@ -1444,7 +1610,7 @@ func run(_ options: Options) throws -> [String: Any] {
     try require(appBundleID == options.bundleID, "Live.app bundle ID differs from target bundle ID")
 
     let sourceWindow = try exactDocumentWindow(appElement, url: source)
-    try activateExactTarget(process, app: appElement, sourceWindow: initialProjectDialog ?? sourceWindow)
+    try activateExactTarget(process, app: appElement, sourceWindow: initialProjectDialog ?? sourceWindow, options: options)
     if options.saveCopyOnly {
         try requireSameProcess(process, options: options)
         _ = try checkedSaveCopyBackup(options, source: source, selected: destination, final: copyFinal!, directory: destination.deletingLastPathComponent())
@@ -2624,7 +2790,7 @@ func runOpenExisting(_ options: Options) throws -> [String: Any] {
     if options.saveOwnedSource {
         backupPath = try checkedSourceBackup(options.backupReceipt!, source: source, destination: destination, options: options)
     }
-    try activateExactTarget(process, app: app, sourceWindow: sourceWindow)
+    try activateExactTarget(process, app: app, sourceWindow: sourceWindow, options: options)
     try requireSameProcess(process, options: options)
     if options.saveOwnedSource {
         let ownedSourceAttributes = try fileIdentity(source)

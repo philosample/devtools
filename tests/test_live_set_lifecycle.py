@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -488,7 +489,6 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertIn("kCFBooleanTrue", focus_helper)
         self.assertIn("kAXFocusedAttribute as String", focus_helper)
         self.assertNotIn("press(", focus_helper)
-
         return_key = native_source.index(
             "try postKeyStroke(pid: options.pid, code: 36)"
         )
@@ -504,6 +504,164 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertLess(path_frontmost, return_key)
         self.assertLess(path_window, return_key)
         self.assertLess(path_focus, return_key)
+
+    @unittest.skipUnless(shutil.which("swiftc"), "Swift compiler")
+    def test_swift_activation_fallback_policy_requires_the_same_pinned_process_and_app(
+        self,
+    ):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        start = native_source.index("struct LifecycleActivationEvidence")
+        end = native_source.index("struct FileMenuCancelPreflightEvidence", start)
+        policy = native_source[start:end]
+        with tempfile.TemporaryDirectory() as temp:
+            program = Path(temp) / "activation-policy.swift"
+            executable = Path(temp) / "activation-policy"
+            program.write_text(
+                policy
+                + """
+                let waiting = LifecycleActivationEvidence(
+                    withinDeadline: true, exactPID: true, expectedGeneration: true,
+                    exactBundle: true, exactExecutable: true, exactAppIdentity: true,
+                    uniqueRunningTarget: true, returnedApplicationIsPinned: true, frontmost: false)
+                precondition(lifecycleActivationFallbackAllows(waiting))
+                precondition(!lifecycleActivationComplete(waiting))
+                precondition(lifecycleActivationComplete(LifecycleActivationEvidence(
+                    withinDeadline: true, exactPID: true, expectedGeneration: true,
+                    exactBundle: true, exactExecutable: true, exactAppIdentity: true,
+                    uniqueRunningTarget: true, returnedApplicationIsPinned: true, frontmost: true)))
+                let refusals = [
+                    LifecycleActivationEvidence(withinDeadline: true, exactPID: false, expectedGeneration: true,
+                        exactBundle: true, exactExecutable: true, exactAppIdentity: true, uniqueRunningTarget: true,
+                        returnedApplicationIsPinned: true, frontmost: false),
+                    LifecycleActivationEvidence(withinDeadline: true, exactPID: true, expectedGeneration: false,
+                        exactBundle: true, exactExecutable: true, exactAppIdentity: true, uniqueRunningTarget: true,
+                        returnedApplicationIsPinned: true, frontmost: false),
+                    LifecycleActivationEvidence(withinDeadline: true, exactPID: true, expectedGeneration: true,
+                        exactBundle: false, exactExecutable: true, exactAppIdentity: true, uniqueRunningTarget: true,
+                        returnedApplicationIsPinned: true, frontmost: false),
+                    LifecycleActivationEvidence(withinDeadline: true, exactPID: true, expectedGeneration: true,
+                        exactBundle: true, exactExecutable: false, exactAppIdentity: true, uniqueRunningTarget: true,
+                        returnedApplicationIsPinned: true, frontmost: false),
+                    LifecycleActivationEvidence(withinDeadline: true, exactPID: true, expectedGeneration: true,
+                        exactBundle: true, exactExecutable: true, exactAppIdentity: false, uniqueRunningTarget: true,
+                        returnedApplicationIsPinned: true, frontmost: false),
+                    LifecycleActivationEvidence(withinDeadline: true, exactPID: true, expectedGeneration: true,
+                        exactBundle: true, exactExecutable: true, exactAppIdentity: true, uniqueRunningTarget: false,
+                        returnedApplicationIsPinned: true, frontmost: false),
+                    LifecycleActivationEvidence(withinDeadline: true, exactPID: true, expectedGeneration: true,
+                        exactBundle: true, exactExecutable: true, exactAppIdentity: true, uniqueRunningTarget: true,
+                        returnedApplicationIsPinned: false, frontmost: false),
+                    LifecycleActivationEvidence(withinDeadline: false, exactPID: true, expectedGeneration: true,
+                        exactBundle: true, exactExecutable: true, exactAppIdentity: true, uniqueRunningTarget: true,
+                        returnedApplicationIsPinned: true, frontmost: false)
+                ]
+                precondition(refusals.allSatisfy { !lifecycleActivationFallbackAllows($0) })
+                precondition(refusals.allSatisfy { !lifecycleActivationComplete($0) })
+                precondition(!lifecycleActivationFallbackAllows(LifecycleActivationEvidence(
+                    withinDeadline: true, exactPID: true, expectedGeneration: true, exactBundle: true,
+                    exactExecutable: true, exactAppIdentity: true, uniqueRunningTarget: true,
+                    returnedApplicationIsPinned: true, frontmost: true)))
+                """
+            )
+            compiled = subprocess.run(
+                ["swiftc", str(program), "-o", str(executable)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(executable)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_launchservices_fallback_is_one_exact_app_activation_before_save(self):
+        native_source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools"
+            / "live_set_lifecycle.swift"
+        ).read_text()
+        activation = native_source[
+            native_source.index(
+                "func activatePinnedApplicationViaLaunchServices("
+            ) : native_source.index(
+                "func makeKeyEvent(",
+                native_source.index("func activatePinnedApplicationViaLaunchServices("),
+            )
+        ]
+        self.assertEqual(activation.count("openApplication(at: appURL"), 1)
+        self.assertIn(
+            "configuration.allowsRunningApplicationSubstitution = false", activation
+        )
+        self.assertIn("configuration.createsNewApplicationInstance = false", activation)
+        self.assertIn("configuration.addsToRecentItems = false", activation)
+        self.assertIn("lifecycleActivationFallbackAllows(before)", activation)
+        self.assertIn("returnedApplication: opened", activation)
+        self.assertIn("LaunchServices activation outcome unknown; no retry", activation)
+        self.assertIn("if let openError", activation)
+        self.assertIn("guard let opened", activation)
+        self.assertIn("LaunchServices activation failed:", activation)
+        self.assertIn("LaunchServices returned no Live application", activation)
+        self.assertLess(
+            activation.index("if let openError"), activation.index("return opened")
+        )
+        self.assertLess(
+            activation.index("guard let opened"), activation.index("return opened")
+        )
+        self.assertNotIn("NSWorkspace.shared.open([", activation)
+
+        target = native_source[
+            native_source.index("func activateExactTarget(") : native_source.index(
+                "func makeKeyEvent(", native_source.index("func activateExactTarget(")
+            )
+        ]
+        self.assertLess(
+            target.index("process.activate()"), target.index("waitForFrontmost")
+        )
+        self.assertLess(
+            target.index("waitForFrontmost"),
+            target.index("activatePinnedApplicationViaLaunchServices"),
+        )
+        self.assertIn(
+            'catch let error as LifecycleFailure where error.message == "exact Live PID did not become the frontmost application"',
+            target,
+        )
+        self.assertLess(
+            target.index("try require(activated"),
+            target.index("activatePinnedApplicationViaLaunchServices"),
+        )
+        self.assertLess(
+            target.index("lifecycleActivationFallbackAllows(afterDirectActivation)"),
+            target.index("activatePinnedApplicationViaLaunchServices"),
+        )
+        self.assertIn("lifecycleActivationComplete(frontmostEvidence)", target)
+        self.assertIn("lifecycleActivationComplete(focusedEvidence)", target)
+
+        run_source = native_source[
+            native_source.index("func run(_ options:") : native_source.index(
+                "func reopenLifecycleSet("
+            )
+        ]
+        self.assertLess(
+            run_source.index("try activateExactTarget("),
+            run_source.index("findMenuItem(app: appElement"),
+        )
+        self.assertLess(
+            run_source.index("try activateExactTarget("),
+            run_source.index("saveAttempted = true"),
+        )
+        self.assertLess(
+            run_source.index("try activateExactTarget("), run_source.index("try press(")
+        )
 
     def test_go_to_path_focus_must_be_the_observed_sheet_child(self):
         native_source = (
