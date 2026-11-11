@@ -1,5 +1,6 @@
 """Filesystem and native-receipt/source contracts only; no Live or UI actions."""
 
+import hashlib
 import io
 import json
 import os
@@ -510,6 +511,372 @@ class SameProcessSetOpenTests(unittest.TestCase):
             ):
                 run_set_open(PID, **self.options(**changes))
                 native.assert_not_called()
+
+    def _cancel_receipts(self):
+        from codex_devtools.live_set_open import _read_set
+
+        private = self.root / "private"
+        private.mkdir(mode=0o700)
+        original = {
+            "actions": {
+                "focus": "verified",
+                "menu_navigation": "not_attempted",
+                "save_as_menu": "not_attempted",
+                "save": "not_attempted",
+                "quit": "not_attempted",
+                "open": "outcome_unknown",
+            },
+            "backup_receipt": None,
+            "error": "exact destination AX URL was not observed",
+            "format": FORMAT,
+            "manual_inspection_required": True,
+            "phase": "verify-opened-existing-set",
+            "read_only": False,
+            "source_backup": None,
+            "status": "stopped",
+            "target": {"pid": PID, "bundle_identifier": BUNDLE},
+        }
+        original_path = private / "original.json"
+        original_bytes = json.dumps(original, sort_keys=True).encode()
+        original_path.write_bytes(original_bytes)
+        original_path.chmod(0o400)
+        source_pin = _read_set(self.source, self.source_sha)[1]
+        destination_pin = _read_set(self.destination, self.destination_sha)[1]
+        marker = private / "attempt.json"
+        preflight = {
+            "actions": {
+                "focus": "verified",
+                "file_menu_cancel": "not_attempted",
+                "open": "outcome_unknown",
+            },
+            "attempt_marker": str(marker),
+            "blocking_windows": [],
+            "destination_file": destination_pin,
+            "destination_set_url": self.destination.as_uri(),
+            "file_menu": {
+                "actions": ["AXCancel"],
+                "cancel_action": True,
+                "enabled": True,
+                "role": "AXMenuBarItem",
+                "selected": True,
+                "title": "File",
+            },
+            "focused_window_matches_source": True,
+            "format": FORMAT,
+            "open_initiated_by_helper": False,
+            "original_open_receipt_sha256": hashlib.sha256(original_bytes).hexdigest(),
+            "pending_destination_binding_pre_action": "unverified",
+            "phase": "file-menu-cancel-preflight",
+            "read_only": True,
+            "selected_menu_count": 1,
+            "source_file": source_pin,
+            "source_set_url": self.source.as_uri(),
+            "source_transport": {
+                "play": 0,
+                "link": 0,
+                "arrangement_record": 0,
+                "session_record": 0,
+            },
+            "status": "ready",
+            "target": {
+                "pid": PID,
+                "bundle_identifier": BUNDLE,
+                "process_generation": 123456789,
+            },
+        }
+        preflight_path = private / "preflight.json"
+        preflight_bytes = json.dumps(preflight, sort_keys=True).encode()
+        preflight_path.write_bytes(preflight_bytes)
+        preflight_path.chmod(0o400)
+        common = {
+            "cancel_selected_file_menu": True,
+            "observe_original_pending_open": True,
+            "expected_generation": 123456789,
+            "original_open_receipt": original_path,
+            "original_open_receipt_sha256": hashlib.sha256(original_bytes).hexdigest(),
+            "attempt_marker": marker,
+        }
+        return (
+            common,
+            preflight,
+            preflight_path,
+            hashlib.sha256(preflight_bytes).hexdigest(),
+            marker,
+        )
+
+    def test_cancel_mode_preview_is_receipt_pinned_and_read_only(self):
+        common, preflight, preflight_path, _preflight_sha, marker = (
+            self._cancel_receipts()
+        )
+        result_receipt = dict(preflight)
+
+        with (
+            patch(
+                "codex_devtools.live_set_open.platform.system", return_value="Darwin"
+            ),
+            patch(
+                "codex_devtools.live_set_open.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, json.dumps(result_receipt), ""
+                ),
+            ) as native,
+        ):
+            result = run_set_open(PID, **self.options(**common))
+        self.assertEqual(result["status"], "ready")
+        self.assertFalse(marker.exists())
+        command = native.call_args.args[0]
+        self.assertIn("--cancel-selected-file-menu", command)
+        self.assertIn("--observe-original-pending-open", command)
+        self.assertNotIn("--execute", command)
+        self.assertNotIn("--preflight-receipt", command)
+        self.assertFalse(preflight_path == marker)
+
+    def test_cancel_execute_requires_exact_preflight_then_consumes_one_marker(self):
+        common, preflight, preflight_path, preflight_sha, marker = (
+            self._cancel_receipts()
+        )
+        pin = preflight["destination_file"]
+        source_pin = preflight["source_file"]
+        transport = preflight["source_transport"]
+
+        def native(command, **kwargs):
+            self.assertIn("--execute", command)
+            marker.write_text("one-use\n")
+            receipt = {
+                "format": FORMAT,
+                "status": "original_open_observed",
+                "phase": "observe-original-pending-open",
+                "read_only": False,
+                "target": {
+                    "pid": PID,
+                    "bundle_identifier": BUNDLE,
+                    "process_generation": 123456789,
+                },
+                "source_set_url": self.source.as_uri(),
+                "destination_set_url": self.destination.as_uri(),
+                "source_file": source_pin,
+                "destination_file": pin,
+                "original_open_receipt_sha256": common["original_open_receipt_sha256"],
+                "pending_destination_binding_pre_action": "unverified",
+                "open_initiated_by_helper": False,
+                "attempt_marker": str(marker),
+                "same_process": True,
+                "source_file_after": source_pin,
+                "destination_file_before": pin,
+                "destination_file_after": pin,
+                "destination_metadata_delta": [],
+                "transport_before": transport,
+                "transport_after": transport,
+                "stable_destination_observations": 3,
+                "file_menu_closed": True,
+                "actions": {
+                    "focus": "verified",
+                    "file_menu_cancel": "AXCancel_succeeded",
+                    "open": "exact_destination_observed",
+                },
+                "manual_inspection_required": False,
+            }
+            return subprocess.CompletedProcess(command, 0, json.dumps(receipt), "")
+
+        with (
+            patch(
+                "codex_devtools.live_set_open.platform.system", return_value="Darwin"
+            ),
+            patch("codex_devtools.live_set_open.subprocess.run", side_effect=native),
+        ):
+            result = run_set_open(
+                PID,
+                **self.options(
+                    **common,
+                    preflight_receipt=preflight_path,
+                    preflight_receipt_sha256=preflight_sha,
+                    execute=True,
+                ),
+            )
+        self.assertEqual(result["status"], "original_open_observed")
+        self.assertTrue(marker.exists())
+
+    def test_cancel_mode_cli_routes_explicit_receipts_and_generation(self):
+        common, _, _, _, _ = self._cancel_receipts()
+        args = [
+            "ax",
+            "live-set-open",
+            "--pid",
+            str(PID),
+            "--expected-bundle-id",
+            BUNDLE,
+            "--source-set",
+            str(self.source),
+            "--destination-set",
+            str(self.destination),
+            "--source-sha256",
+            self.source_sha,
+            "--destination-sha256",
+            self.destination_sha,
+            "--app",
+            str(self.app),
+            "--expected-generation",
+            str(common["expected_generation"]),
+            "--original-open-receipt",
+            str(common["original_open_receipt"]),
+            "--original-open-receipt-sha256",
+            common["original_open_receipt_sha256"],
+            "--attempt-marker",
+            str(common["attempt_marker"]),
+            "--cancel-selected-file-menu",
+            "--observe-original-pending-open",
+        ]
+        with (
+            patch(
+                "codex_devtools.live_set_open.run_set_open",
+                return_value={"status": "ready"},
+            ) as call,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(args), 0)
+        self.assertTrue(call.call_args.kwargs["cancel_selected_file_menu"])
+        self.assertTrue(call.call_args.kwargs["observe_original_pending_open"])
+        self.assertEqual(call.call_args.kwargs["expected_generation"], 123456789)
+
+    def test_existing_attempt_marker_refuses_before_native_invocation(self):
+        common, _, _, _, marker = self._cancel_receipts()
+        marker.write_text("prior one-use attempt\n")
+        with (
+            patch(
+                "codex_devtools.live_set_open.platform.system", return_value="Darwin"
+            ),
+            patch("codex_devtools.live_set_open.subprocess.run") as native,
+            self.assertRaisesRegex(ValueError, "cannot be retried"),
+        ):
+            run_set_open(PID, **self.options(**common))
+        native.assert_not_called()
+
+    def test_original_and_preflight_cancel_receipts_have_closed_contracts(self):
+        from codex_devtools.live_set_open import (
+            _validate_cancel_preflight,
+            _validate_original_unknown_open,
+        )
+
+        common, preflight, _, _, marker = self._cancel_receipts()
+        _validate_original_unknown_open(
+            json.loads(common["original_open_receipt"].read_text()),
+            pid=PID,
+            bundle=BUNDLE,
+        )
+        with self.assertRaises(ValueError):
+            altered = json.loads(common["original_open_receipt"].read_text())
+            altered["actions"]["save"] = "outcome_unknown"
+            _validate_original_unknown_open(altered, pid=PID, bundle=BUNDLE)
+        with self.assertRaises(ValueError):
+            altered = dict(preflight, unreviewed_extension=True)
+            _validate_cancel_preflight(
+                altered,
+                pid=PID,
+                bundle=BUNDLE,
+                generation=123456789,
+                source=self.source,
+                destination=self.destination,
+                source_pin=preflight["source_file"],
+                destination_pin=preflight["destination_file"],
+                original_receipt_sha256=common["original_open_receipt_sha256"],
+                attempt_marker=marker,
+            )
+
+    def test_cancel_swift_contract_is_one_axcancel_and_observe_only(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools/live_set_lifecycle.swift"
+        ).read_text()
+        body = source[
+            source.index("func runFileMenuCancelObserve(") : source.index(
+                "func requireSameProcess("
+            )
+        ]
+        marker = body.index("try createFileMenuCancelAttemptMarker")
+        cancel = body.index("AXUIElementPerformAction(finalMenu, kAXCancelAction")
+        observe = body.index('phase = "observe-original-pending-open"')
+        self.assertLess(marker, cancel)
+        self.assertLess(cancel, observe)
+        self.assertEqual(
+            body.count("AXUIElementPerformAction(finalMenu, kAXCancelAction"), 1
+        )
+        self.assertNotIn("try press(", body)
+        self.assertNotIn("NSWorkspace.shared.open", body)
+        self.assertNotIn("kAXPressAction", body)
+        self.assertIn("stable >= 3", body)
+        self.assertIn("try requireSameProcess(process, options: options)", body)
+        self.assertIn("samePin(currentSource, sourcePin)", body)
+        self.assertIn("selectedMenus == 0", body)
+
+    @unittest.skipUnless(shutil.which("swiftc"), "Swift compiler")
+    def test_swift_cancel_preflight_wait_and_success_predicates_fail_closed(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools/live_set_lifecycle.swift"
+        ).read_text()
+        start = source.index("struct FileMenuCancelPreflightEvidence")
+        end = source.index("func saveCopyWindowBlocks(", start)
+        predicates = source[start:end]
+        with tempfile.TemporaryDirectory() as temp:
+            program = Path(temp) / "cancel-policy.swift"
+            executable = Path(temp) / "cancel-policy"
+            program.write_text(
+                predicates
+                + """
+                let ready = FileMenuCancelPreflightEvidence(
+                    exactProcess: true, expectedGeneration: true, currentDesktop: true,
+                    exactSourceWindowFocused: true, sourcePinMatches: true,
+                    destinationPinMatches: true, transportStopped: true,
+                    noBlockingWindows: true, uniqueFileMenuCount: 1, selectedMenuCount: 1,
+                    fileMenuSelected: true, fileMenuEnabled: true, cancelActionAvailable: true)
+                precondition(fileMenuCancelPreflightAllows(ready))
+                precondition(!fileMenuCancelPreflightAllows(FileMenuCancelPreflightEvidence(
+                    exactProcess: true, expectedGeneration: true, currentDesktop: true,
+                    exactSourceWindowFocused: true, sourcePinMatches: true,
+                    destinationPinMatches: true, transportStopped: true,
+                    noBlockingWindows: true, uniqueFileMenuCount: 1, selectedMenuCount: 0,
+                    fileMenuSelected: false, fileMenuEnabled: true, cancelActionAvailable: true)))
+                precondition(!fileMenuCancelPreflightAllows(FileMenuCancelPreflightEvidence(
+                    exactProcess: true, expectedGeneration: false, currentDesktop: true,
+                    exactSourceWindowFocused: true, sourcePinMatches: true,
+                    destinationPinMatches: true, transportStopped: true,
+                    noBlockingWindows: true, uniqueFileMenuCount: 1, selectedMenuCount: 1,
+                    fileMenuSelected: true, fileMenuEnabled: true, cancelActionAvailable: true)))
+                let wait = PendingOpenWaitEvidence(
+                    exactProcess: true, expectedGeneration: true, noBlockingWindows: true,
+                    onlyOwnedSourceWindow: true, sourcePinMatches: true,
+                    sourceTransportStopped: true, fileMenuClosed: true)
+                precondition(pendingOpenWaitAllows(wait))
+                precondition(!pendingOpenWaitAllows(PendingOpenWaitEvidence(
+                    exactProcess: true, expectedGeneration: true, noBlockingWindows: true,
+                    onlyOwnedSourceWindow: true, sourcePinMatches: true,
+                    sourceTransportStopped: true, fileMenuClosed: false)))
+                let success = PendingOpenSuccessEvidence(
+                    exactProcess: true, expectedGeneration: true, exactDestinationFocused: true,
+                    destinationPinStable: true, sourcePinUnchanged: true,
+                    sourceAndDestinationTransportStopped: true, noBlockingWindows: true,
+                    fileMenuClosed: true)
+                precondition(pendingOpenSuccessAllows(success))
+                precondition(!pendingOpenSuccessAllows(PendingOpenSuccessEvidence(
+                    exactProcess: false, expectedGeneration: true, exactDestinationFocused: true,
+                    destinationPinStable: true, sourcePinUnchanged: true,
+                    sourceAndDestinationTransportStopped: true, noBlockingWindows: true,
+                    fileMenuClosed: true)))
+                print("File-menu cancellation guards passed")
+                """
+            )
+            compiled = subprocess.run(
+                ["swiftc", str(program), "-o", str(executable)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(executable)], check=False, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("File-menu cancellation guards passed", result.stdout)
 
     def test_swift_reconcile_is_one_save_no_second_open_and_waits_for_same_dialog_close(
         self,

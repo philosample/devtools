@@ -86,6 +86,56 @@ destination AX/file observations. A prior pending-open intent must be recorded
 and reviewed by the caller. No M4L recall, runtime, wire, or hardware behavior
 is established.
 
+## Cancel one selected File menu and observe an original pending Open
+
+`--cancel-selected-file-menu --observe-original-pending-open` is a separate
+one-shot mode for a caller that already issued one Open and retained its exact
+`stopped` receipt with `open=outcome_unknown`. The original receipt is accepted
+only with its closed action/target schema and a caller-reviewed SHA-256. It does
+not bind the pending destination; the receipt states
+`pending_destination_binding_pre_action=unverified` and
+`open_initiated_by_helper=false`.
+
+Use the exact source and destination paths and hashes from the caller's existing
+read-only inspection. Choose a new marker path inside an existing private
+current-user directory outside Git. Preview reads only: it requires the original
+source Set to remain focused, the same Live PID and inspected process generation,
+the source/destination pins and stopped transport, no blocking windows, and
+exactly one selected and enabled `File` menu item with `AXCancel`. If any part
+is absent or ambiguous, it stops without action.
+
+```sh
+python3 -m codex_devtools ax live-set-open \
+  --pid 84769 --expected-bundle-id com.ableton.live \
+  --source-set /private/owned/Current.als --source-sha256 SOURCE_SHA256 \
+  --destination-set /private/owned/Existing.als --destination-sha256 DESTINATION_SHA256 \
+  --app "/Applications/Ableton Live 12 Beta.app" \
+  --expected-generation PROCESS_GENERATION \
+  --original-open-receipt /private/owned/original-unknown-open.json \
+  --original-open-receipt-sha256 ORIGINAL_RECEIPT_SHA256 \
+  --attempt-marker /private/owned/private-state/file-menu-cancel-once.json \
+  --cancel-selected-file-menu --observe-original-pending-open
+```
+
+Review the exact `ready` receipt and its SHA-256. Execute once with the same
+inputs plus `--preflight-receipt` and `--preflight-receipt-sha256`, then
+`--execute`. The helper rechecks all process, file, focus, menu and transport
+guards at the action boundary, creates the private marker exclusively, and
+performs one `AXCancel` on that exact selected `File` menu item. It never calls
+AXPress, Save, Quit, or another Open. The marker is consumed before the sole
+cancel attempt; an existing marker refuses any retry.
+
+After cancellation, the helper only observes the already-pending Open. It waits
+up to 90 seconds while the source remains the sole focused document, the File
+menu stays closed, the source pin stays unchanged and transport stays stopped.
+Success requires three stable observations of the exact destination AX URL in
+the same Live process, destination focus, unchanged source bytes/identity,
+destination bytes/identity matching the approved pin (allowing only ctime),
+stopped transport and no blocking windows. If cancellation or completion is
+uncertain, the result is `stopped`/unknown and the marker prevents another
+attempt. This proves only the same-process AX URL and file observations; it does
+not prove M4L recall, runtime, wire, or hardware behavior.
+
 ## Explicitly preserve an owned source before opening
 
 Only `--save-owned-source` authorizes one `File` → `Save Live Set` action on the
