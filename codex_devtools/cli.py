@@ -494,6 +494,11 @@ def build_parser() -> argparse.ArgumentParser:
     copy_ref.add_argument("--old-sha256", required=True)
     copy_ref.add_argument("--new-amxd", type=Path, required=True)
     copy_ref.add_argument("--new-sha256", required=True)
+    copy_ref.add_argument(
+        "--diagnostic-sibling-bundle",
+        action="store_true",
+        help="diagnostic only: preserve raw relative prefix and replace safe sibling-bundle tail; relative base/resolution unverified",
+    )
     copy_ref.add_argument("--execute", action="store_true")
     worktree = commands.add_parser(
         "worktree", help="track local ownership and guarded post-merge cleanup"
@@ -725,6 +730,7 @@ def main(argv: list[str] | None = None) -> int:
                     new_amxd=args.new_amxd,
                     new_sha256=args.new_sha256,
                     execute=args.execute,
+                    diagnostic_sibling_bundle=args.diagnostic_sibling_bundle,
                 )
             )
             return 0

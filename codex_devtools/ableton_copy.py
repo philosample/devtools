@@ -17,6 +17,63 @@ from .ableton_set import (
 )
 from .maxfiles import sha256
 
+# This opt-in diagnostic subset deliberately does not decode or normalize paths.
+_SAFE_COMPONENT = re.compile(r"[A-Za-z0-9_-](?:[A-Za-z0-9._ -]*[A-Za-z0-9_-])?\Z")
+
+
+def _sibling_bundle_relative_path(old: Path, new: Path, reference: dict) -> dict:
+    if (
+        old.name != new.name
+        or old.parent == new.parent
+        or old.parent.parent != new.parent.parent
+    ):
+        raise ValueError(
+            "diagnostic mode requires same-basename AMXDs in distinct canonical sibling bundles"
+        )
+    relative = reference["relative_path"]
+    if reference["relative_path_type"] != "1" or not isinstance(relative, str):
+        raise ValueError("diagnostic mode requires exactly one type-1 relative path")
+    # Bound both traversal and total input; '..' is allowed only in a leading run.
+    # No base is chosen; prefix components are not resolved or collapsed.
+    if len(relative) > 4096:
+        raise ValueError("diagnostic relative path exceeds 4096 characters")
+    parts = relative.split("/")
+    parents = 0
+    while parents < len(parts) and parts[parents] == "..":
+        parents += 1
+    ordinary = parts[parents:]
+    if (
+        parents > 32
+        or len(parts) > 64
+        or len(ordinary) < 2
+        or any(not _SAFE_COMPONENT.fullmatch(part) for part in ordinary)
+        or any(
+            not _SAFE_COMPONENT.fullmatch(part)
+            for part in (old.parent.name, new.parent.name, old.name)
+        )
+        or parts[-2:] != [old.parent.name, old.name]
+        or any(
+            part in (old.parent.name, new.parent.name, old.name) for part in parts[:-2]
+        )
+    ):
+        raise ValueError(
+            "unsupported diagnostic relative path or ambiguous sibling-bundle tail"
+        )
+    old_tail = f"{old.parent.name}/{old.name}"
+    new_tail = f"{new.parent.name}/{new.name}"
+    prefix = relative[: -len(old_tail)]
+    return {
+        "old_relative_path": relative,
+        "new_relative_path": prefix + new_tail,
+        "preserved_prefix": prefix,
+        "old_relative_path_bytes_hex": relative.encode("ascii").hex(),
+        "new_relative_path_bytes_hex": (prefix + new_tail).encode("ascii").hex(),
+        "preserved_prefix_bytes_hex": prefix.encode("ascii").hex(),
+        "old_tail": old_tail,
+        "new_tail": new_tail,
+        "base_policy": "Relative prefix bytes preserved syntactically; relative base/resolution unverified.",
+    }
+
 
 def copy_with_device_ref(
     source: Path,
@@ -28,6 +85,7 @@ def copy_with_device_ref(
     new_amxd: Path,
     new_sha256: str,
     execute: bool = False,
+    diagnostic_sibling_bundle: bool = False,
 ) -> dict:
     """Copy a Set, changing only the uniquely selected old-device reference."""
     if any(
@@ -81,14 +139,20 @@ def copy_with_device_ref(
         )
     selected_index = selected_indexes[0]
     selected_ref = refs[selected_index]
-    if selected_ref != {
-        "raw_path": str(old),
-        "relative_path": os.path.relpath(old, resolved.parent),
-        "relative_path_type": "1",
-    }:
-        raise ValueError(
-            "selected FileRef requires a canonical path and supported type-1 relative path"
-        )
+    relative_transform = None
+    if diagnostic_sibling_bundle:
+        relative_transform = _sibling_bundle_relative_path(old, new, selected_ref)
+        new_relative = relative_transform["new_relative_path"]
+    else:
+        if selected_ref != {
+            "raw_path": str(old),
+            "relative_path": os.path.relpath(old, resolved.parent),
+            "relative_path_type": "1",
+        }:
+            raise ValueError(
+                "selected FileRef requires a canonical path and supported type-1 relative path"
+            )
+        new_relative = os.path.relpath(new, target.parent)
     # Reuse the inspector's bounded, stable file hashing without treating a new
     # filename or SDK handle as an artifact attestation.
     replacement = _local_file_report(str(new))
@@ -108,13 +172,21 @@ def copy_with_device_ref(
     edits = []
     for tag, value in (
         ("Path", str(new)),
-        ("RelativePath", os.path.relpath(new, target.parent)),
+        ("RelativePath", new_relative),
     ):
         pattern = re.compile(rb"<" + tag.encode() + rb'\s+Value="([^"<>]*)"\s*/>')
         found = list(pattern.finditer(block))
         if len(found) != 1:
             raise ValueError("unsupported reference attribute representation")
         attribute = found[0]
+        if (
+            diagnostic_sibling_bundle
+            and tag == "RelativePath"
+            and attribute.group(1) != selected_ref["relative_path"].encode("ascii")
+        ):
+            raise ValueError(
+                "diagnostic relative path requires literal safe ASCII attribute bytes"
+            )
         edits.append(
             (
                 match.start() + attribute.start(1),
@@ -128,7 +200,7 @@ def copy_with_device_ref(
     expected = list(refs)
     expected[selected_index] = {
         "raw_path": str(new),
-        "relative_path": os.path.relpath(new, target.parent),
+        "relative_path": new_relative,
         "relative_path_type": "1",
     }
     if _extract_file_refs(changed) != expected:
@@ -144,6 +216,9 @@ def copy_with_device_ref(
         "new_amxd": replacement,
         "output_sha256": sha256(output),
         "xml_attribute_edits": 2,
+        "relative_path_policy": "diagnostic_sibling_bundle"
+        if diagnostic_sibling_bundle
+        else "strict_set_directory",
         "selected_file_ref": {
             "index": selected_index,
             "old_path": str(old),
@@ -151,17 +226,25 @@ def copy_with_device_ref(
         },
         "evidence_limit": "Offline reference copy only; no Live load, dependency resolution or recall proof.",
     }
+    if relative_transform is not None:
+        result["relative_path_transform"] = relative_transform
+        result["evidence_limit"] += (
+            " Diagnostic only: relative base/resolution unverified; no Live load/dependency/recall proof; native exact component/manifest pins required before effects."
+        )
     if not execute:
         return result
     # Revalidate all pinned inputs after planning and immediately before creating
     # a fresh file. O_EXCL also rejects a concurrently created symlink/hardlink.
-    if _read_set(resolved)[1] != raw:
+    current_source, current_raw, _ = _read_set(resolved)
+    if current_source != resolved or current_raw != raw:
         raise ValueError("source Set changed before copy")
     inspect_set_device_refs(resolved)
     if _local_file_report(str(old)) != old_file:
         raise ValueError("selected old device changed before copy")
     if _local_file_report(str(new)) != replacement:
         raise ValueError("replacement device changed before copy")
+    if target.parent.resolve(strict=True) != resolved.parent:
+        raise ValueError("destination parent changed before copy")
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "wb") as stream:
         stream.write(output)
