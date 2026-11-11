@@ -124,9 +124,11 @@ def run_set_open(
     app_bundle: Path,
     save_owned_source: bool = False,
     backup_root: Path | None = None,
+    reconcile_pending_open: bool = False,
+    expected_generation: int | None = None,
     execute: bool = False,
 ) -> dict:
-    """Preflight is read-only. Explicit execute opens once and never answers prompts."""
+    """Inspect one exact open flow; reconciliation only saves its reviewed dialog."""
     if platform.system() != "Darwin":
         raise ValueError("native same-process Set open requires macOS")
     if type(pid) is not int or not 1 <= pid <= 2_147_483_647:
@@ -138,8 +140,26 @@ def run_set_open(
         for value in (source_sha256, destination_sha256)
     ):
         raise ValueError("reviewed source and destination SHA-256 required")
-    if type(save_owned_source) is not bool or type(execute) is not bool:
+    if (
+        type(save_owned_source) is not bool
+        or type(reconcile_pending_open) is not bool
+        or type(execute) is not bool
+    ):
         raise TypeError("explicit boolean operation flags required")
+    if reconcile_pending_open:
+        if not save_owned_source or backup_root is None:
+            raise ValueError(
+                "--reconcile-pending-open requires --save-owned-source and --backup-root"
+            )
+        if (
+            type(expected_generation) is not int
+            or not 0 < expected_generation <= 9_223_372_036_854_775_807
+        ):
+            raise ValueError(
+                "--reconcile-pending-open requires a positive inspected process generation"
+            )
+    elif expected_generation is not None:
+        raise ValueError("--expected-generation requires --reconcile-pending-open")
     source = _set_path(source_set, must_exist=True)
     destination = _set_path(destination_set, must_exist=True)
     for path in (source, destination):
@@ -199,6 +219,14 @@ def run_set_open(
     ]
     if save_owned_source:
         command.append("--save-owned-source")
+    if reconcile_pending_open:
+        command.extend(
+            (
+                "--reconcile-pending-open",
+                "--expected-generation",
+                str(expected_generation),
+            )
+        )
     if backup:
         command.extend(("--backup-receipt", backup["receipt_path"]))
     if execute:
@@ -286,7 +314,14 @@ def run_set_open(
             return report
         if (
             result.returncode != 0
-            or report.get("status") != ("opened" if execute else "ready")
+            or report.get("status")
+            != (
+                "reconciled"
+                if reconcile_pending_open and execute
+                else "ready"
+                if not execute
+                else "opened"
+            )
             or report.get("source_set_url") != source.as_uri()
             or report.get("destination_set_url") != destination.as_uri()
             or report.get("save_owned_source") is not save_owned_source
@@ -294,13 +329,34 @@ def run_set_open(
             raise ValueError(
                 "Set-open completion, selected URL or save permission mismatch"
             )
+        if reconcile_pending_open and (
+            report.get("reconcile_pending_open") is not True
+            or report.get("expected_generation") != expected_generation
+            or report.get("dialog_text")
+            != f'Save changes to "{source.stem}" before closing?'
+            or report.get("pending_destination_binding_pre_action") != "unverified"
+            or report.get("open_initiated_by_helper") is not False
+        ):
+            raise ValueError("exact dialog reconciliation receipt fields differ")
+        stopped_transport = {
+            "play": 0,
+            "link": 0,
+            "arrangement_record": 0,
+            "session_record": 0,
+        }
+        if (
+            reconcile_pending_open
+            and not execute
+            and report.get("transport") != stopped_transport
+        ):
+            raise ValueError("dialog preflight did not prove stopped transport")
         expected_actions = dict.fromkeys(ACTION_NAMES, "not_attempted")
         if execute:
             expected_actions.update(focus="verified", open="exact_set_window_observed")
             if save_owned_source:
-                expected_actions.update(
-                    menu_navigation="verified", save="source_observed"
-                )
+                expected_actions.update(save="source_observed")
+                if not reconcile_pending_open:
+                    expected_actions["menu_navigation"] = "verified"
         if actions != expected_actions or (
             execute and report.get("same_process") is not True
         ):
@@ -349,6 +405,19 @@ def run_set_open(
                 != backup["backup"]
             ):
                 raise ValueError("source backup identity changed after creation")
+        if (
+            reconcile_pending_open
+            and execute
+            and (
+                report.get("reconciled_pending_open") is not True
+                or report.get("source_file_before_save") != source_pin
+                or report.get("transport_before_save") != stopped_transport
+                or report.get("transport_after_open") != stopped_transport
+            )
+        ):
+            raise ValueError(
+                "source preimage, stopped transport or pending-open proof missing"
+            )
         report["source_backup"] = backup
         return report
     except (ValueError, TypeError, KeyError, AttributeError, OSError) as error:

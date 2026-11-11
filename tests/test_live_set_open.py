@@ -361,6 +361,267 @@ class SameProcessSetOpenTests(unittest.TestCase):
         self.assertFalse(call.call_args.kwargs["execute"])
         self.assertFalse(call.call_args.kwargs["save_owned_source"])
 
+    def test_cli_routes_reconciliation_as_separate_explicit_mode(self):
+        args = [
+            "ax",
+            "live-set-open",
+            "--pid",
+            str(PID),
+            "--expected-bundle-id",
+            BUNDLE,
+            "--source-set",
+            str(self.source),
+            "--destination-set",
+            str(self.destination),
+            "--source-sha256",
+            self.source_sha,
+            "--destination-sha256",
+            self.destination_sha,
+            "--app",
+            str(self.app),
+            "--save-owned-source",
+            "--backup-root",
+            str(self.backup_root),
+            "--reconcile-pending-open",
+            "--expected-generation",
+            "123456",
+        ]
+        with (
+            patch(
+                "codex_devtools.live_set_open.run_set_open",
+                return_value=self.report(),
+            ) as call,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(main(args), 0)
+        self.assertTrue(call.call_args.kwargs["reconcile_pending_open"])
+        self.assertEqual(call.call_args.kwargs["expected_generation"], 123456)
+        self.assertFalse(call.call_args.kwargs["execute"])
+
+    def test_reconcile_preflight_requires_generation_and_never_creates_backup(self):
+        before = self.source.read_bytes()
+        report = self.report()
+        report.update(
+            save_owned_source=True,
+            reconcile_pending_open=True,
+            expected_generation=123456,
+            dialog_text=f'Save changes to "{self.source.stem}" before closing?',
+            transport={
+                "play": 0,
+                "link": 0,
+                "arrangement_record": 0,
+                "session_record": 0,
+            },
+            pending_destination_binding_pre_action="unverified",
+            open_initiated_by_helper=False,
+        )
+        result = self.call(
+            report,
+            save_owned_source=True,
+            backup_root=self.backup_root,
+            reconcile_pending_open=True,
+            expected_generation=123456,
+        )
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(self.source.read_bytes(), before)
+        self.assertEqual(list(self.backup_root.iterdir()), [])
+        command = self.runner.call_args.args[0]
+        self.assertIn("--reconcile-pending-open", command)
+        self.assertEqual(command[command.index("--expected-generation") + 1], "123456")
+        self.assertNotIn("--execute", command)
+        self.assertNotIn("--backup-receipt", command)
+
+    def test_reconcile_execute_validates_original_pending_destination_without_second_open(
+        self,
+    ):
+        def native(command):
+            receipt_path = Path(command[command.index("--backup-receipt") + 1])
+            backup = json.loads(receipt_path.read_text())
+            self.source.write_bytes(b"saved-after-exact-dialog")
+            report = self.report(execute=True, save=False, command=command)
+            report["status"] = "reconciled"
+            report["save_owned_source"] = True
+            report["actions"]["save"] = "source_observed"
+            report["actions"]["menu_navigation"] = "not_attempted"
+            report.update(
+                reconcile_pending_open=True,
+                reconciled_pending_open=True,
+                expected_generation=123456,
+                dialog_text=f'Save changes to "{self.source.stem}" before closing?',
+                pending_destination_binding_pre_action="unverified",
+                open_initiated_by_helper=False,
+                transport_before_save={
+                    "play": 0,
+                    "link": 0,
+                    "arrangement_record": 0,
+                    "session_record": 0,
+                },
+                transport_after_open={
+                    "play": 0,
+                    "link": 0,
+                    "arrangement_record": 0,
+                    "session_record": 0,
+                },
+            )
+            report["source_file"] = _read_set(
+                self.source, sha256(self.source.read_bytes())
+            )[1]
+            report["source_file_before_save"] = backup["source"]
+            report["backup_receipt"] = str(receipt_path)
+            report["backup_file"] = backup["backup"]["path"]
+            return report
+
+        result = self.call(
+            native=native,
+            execute=True,
+            save_owned_source=True,
+            backup_root=self.backup_root,
+            reconcile_pending_open=True,
+            expected_generation=123456,
+        )
+        self.assertEqual(result["status"], "reconciled", result)
+        self.assertIs(result["open_initiated_by_helper"], False)
+        command = self.runner.call_args.args[0]
+        self.assertIn("--reconcile-pending-open", command)
+        self.assertEqual(self.runner.call_count, 1)
+
+    def test_reconcile_requires_exact_permission_generation_and_backup_root(self):
+        for changes in (
+            {"reconcile_pending_open": True},
+            {
+                "reconcile_pending_open": True,
+                "save_owned_source": True,
+                "expected_generation": 123,
+            },
+            {
+                "reconcile_pending_open": True,
+                "save_owned_source": True,
+                "backup_root": self.backup_root,
+            },
+        ):
+            with (
+                self.subTest(changes=changes),
+                patch(
+                    "codex_devtools.live_set_open.platform.system",
+                    return_value="Darwin",
+                ),
+                patch("codex_devtools.live_set_open.subprocess.run") as native,
+                self.assertRaises(ValueError),
+            ):
+                run_set_open(PID, **self.options(**changes))
+                native.assert_not_called()
+
+    def test_swift_reconcile_is_one_save_no_second_open_and_waits_for_same_dialog_close(
+        self,
+    ):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools/live_set_lifecycle.swift"
+        ).read_text()
+        body = source[
+            source.index("func runReconcilePendingOpen(") : source.index(
+                "func checkedSourceBackup("
+            )
+        ]
+        press = body.index("try press(saveButton)")
+        wait = body.index('phase = "observe-original-pending-open"')
+        self.assertLess(press, wait)
+        self.assertEqual(body.count("try press(saveButton)"), 1)
+        self.assertNotIn("NSWorkspace.shared.open", body)
+        self.assertIn("CFEqual(blockers[0], dialog)", body)
+        self.assertIn("continue", body)
+        self.assertIn("stable >= 3", body)
+        self.assertIn("pending_destination_binding_pre_action", body)
+        self.assertIn("open_initiated_by_helper", body)
+        self.assertIn("try saveCopyTransport(sourceWindow)", body)
+        self.assertIn("try exactDocumentWindow(app, url: source)", body)
+
+    @unittest.skipUnless(shutil.which("swiftc"), "Swift compiler")
+    def test_swift_reconciliation_wait_policy_accepts_only_same_dialog(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools/live_set_lifecycle.swift"
+        ).read_text()
+        start = source.index("func canWaitForReconciliationDialog(")
+        end = source.index("\nfunc isReconciliationBlockingWindow(", start)
+        function = source[start:end]
+        with tempfile.TemporaryDirectory() as temp:
+            program = Path(temp) / "dialog-policy.swift"
+            executable = Path(temp) / "dialog-policy"
+            program.write_text(
+                function
+                + """
+                precondition(canWaitForReconciliationDialog(blockerCount: 1, exactSameDialog: true))
+                precondition(!canWaitForReconciliationDialog(blockerCount: 1, exactSameDialog: false))
+                precondition(!canWaitForReconciliationDialog(blockerCount: 2, exactSameDialog: true))
+                print("same-dialog wait policy passed")
+                """
+            )
+            compiled = subprocess.run(
+                ["swiftc", str(program), "-o", str(executable)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(executable)], check=False, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("same-dialog wait policy passed", result.stdout)
+
+    @unittest.skipUnless(shutil.which("swiftc"), "Swift compiler")
+    def test_swift_save_changes_signature_requires_exact_text_and_three_controls(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "codex_devtools/live_set_lifecycle.swift"
+        ).read_text()
+        start = source.index("func saveChangesDialogSignature(")
+        end = source.index("\nfunc canWaitForReconciliationDialog(", start)
+        function = source[start:end]
+        with tempfile.TemporaryDirectory() as temp:
+            program = Path(temp) / "dialog-signature.swift"
+            executable = Path(temp) / "dialog-signature"
+            program.write_text(
+                "import Foundation\n"
+                + function
+                + """
+                let prompt = "Save changes to \\"Owned\\" before closing?"
+                var rows: [[String: Any]] = [
+                    ["role": "AXWindow", "subrole": "AXDialog", "title": ""],
+                    ["role": "AXGroup"],
+                    ["role": "AXStaticText", "identifier": "Other", "value": ""],
+                    ["role": "AXStaticText", "identifier": "DialogText", "value": prompt],
+                    ["role": "AXButton", "identifier": "Save", "description": "Save", "enabled": true, "press": true],
+                    ["role": "AXButton", "identifier": "Cancel", "description": "Cancel", "enabled": true, "press": true],
+                    ["role": "AXButton", "identifier": "Don’tSave", "description": "Don’t Save", "enabled": true, "press": true]
+                ]
+                precondition(saveChangesDialogSignature(rows, expectedText: prompt))
+                precondition(!saveChangesDialogSignature(rows, expectedText: "Save changes to \\"Other\\" before closing?"))
+                rows[4]["enabled"] = false
+                precondition(!saveChangesDialogSignature(rows, expectedText: prompt))
+                rows[4]["enabled"] = true
+                rows[6]["description"] = "Discard"
+                precondition(!saveChangesDialogSignature(rows, expectedText: prompt))
+                rows[6]["description"] = "Don’t Save"
+                rows.append(["role": "AXButton", "identifier": "Extra", "description": "Extra", "enabled": true, "press": true])
+                precondition(!saveChangesDialogSignature(rows, expectedText: prompt))
+                print("exact Save Changes signature passed")
+                """
+            )
+            compiled = subprocess.run(
+                ["swiftc", str(program), "-o", str(executable)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = subprocess.run(
+                [str(executable)], check=False, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("exact Save Changes signature passed", result.stdout)
+
     def test_swift_mode_reuses_guards_and_has_only_one_save_and_open(self):
         source = (
             Path(__file__).resolve().parents[1]
