@@ -190,6 +190,19 @@ struct PendingOpenPostCancelWaitEvidence {
     let readState: PendingOpenPostCancelReadState
 }
 
+struct PendingOpenBlockerScanFailureEvidence {
+    let transientUnavailable: Bool
+    let blockerAlreadyObserved: Bool
+}
+
+func pendingOpenBlockerScanAllowsWait(_ evidence: PendingOpenBlockerScanFailureEvidence) -> Bool {
+    evidence.transientUnavailable && !evidence.blockerAlreadyObserved
+}
+
+func pendingOpenRoleIsBlocking(_ role: String) -> Bool {
+    ["AXDialog", "AXSheet"].contains(role)
+}
+
 func pendingOpenPostCancelWaitAllows(_ evidence: PendingOpenPostCancelWaitEvidence) -> Bool {
     evidence.withinDeadline && evidence.exactProcess && evidence.expectedGeneration &&
         evidence.noObservedBlockers &&
@@ -240,7 +253,9 @@ func isBlockingWindow(_ element: AXUIElement, except allowedTitle: String? = nil
 
 func isBlockingWindowStrict(_ element: AXUIElement) throws -> Bool {
     let elementRole = try role(element)
+    if pendingOpenRoleIsBlocking(elementRole) { return true }
     let elementIdentifier = try optionalAXThrowing(element, "AXIdentifier") as? String
+    if elementRole == (kAXWindowRole as String) && elementIdentifier == "open-panel" { return true }
     let modalValue = try optionalAXThrowing(element, "AXModal")
     let modal: Bool
     if let number = modalValue as? NSNumber {
@@ -250,8 +265,7 @@ func isBlockingWindowStrict(_ element: AXUIElement) throws -> Bool {
     } else {
         throw LifecycleFailure(phase: phase, message: "AXModal state is not boolean")
     }
-    return ["AXDialog", "AXSheet"].contains(elementRole) || modal ||
-        (elementRole == (kAXWindowRole as String) && elementIdentifier == "open-panel")
+    return modal
 }
 
 func elementSummary(_ element: AXUIElement?, blocking: Bool = false) -> [String: Any]? {
@@ -1694,7 +1708,9 @@ func isTransientPostCancelAXReadFailure(_ error: Error) -> Bool {
 func canWaitAfterTransientPostCancelRead(_ error: Error, process: NSRunningApplication,
                                          generation: Int64, deadline: TimeInterval,
                                          noObservedBlockers: Bool) -> Bool {
-    guard isTransientPostCancelAXReadFailure(error) else { return false }
+    guard pendingOpenBlockerScanAllowsWait(PendingOpenBlockerScanFailureEvidence(
+        transientUnavailable: isTransientPostCancelAXReadFailure(error),
+        blockerAlreadyObserved: !noObservedBlockers)) else { return false }
     return pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
         withinDeadline: ProcessInfo.processInfo.systemUptime < deadline,
         exactProcess: !process.isTerminated,
@@ -2098,14 +2114,14 @@ func runFileMenuCancelObserve(_ options: Options) throws -> [String: Any] {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
             continue
         }
+        var observedBlockers: [AXUIElement] = []
         let blockers: [AXUIElement]
         do {
-            var found: [AXUIElement] = []
-            for window in currentWindows where try isBlockingWindowStrict(window) { found.append(window) }
-            blockers = found
+            for window in currentWindows where try isBlockingWindowStrict(window) { observedBlockers.append(window) }
+            blockers = observedBlockers
         } catch {
             guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
-                                                       deadline: deadline, noObservedBlockers: true) else { throw error }
+                                                       deadline: deadline, noObservedBlockers: observedBlockers.isEmpty) else { throw error }
             stable = 0
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
             continue
@@ -2208,6 +2224,7 @@ func runFileMenuCancelObserve(_ options: Options) throws -> [String: Any] {
                         "Set bytes/identity changed during stable destination observation")
             stable += 1
             if stable >= 3 {
+                var finalBlockerObserved = false
                 do {
                     try require(ProcessInfo.processInfo.systemUptime < deadline,
                                 "original Open observation deadline expired before final readback")
@@ -2215,7 +2232,12 @@ func runFileMenuCancelObserve(_ options: Options) throws -> [String: Any] {
                     try requireExpectedGeneration(process, options: options)
                     let finalWindows = try windows(app)
                     var finalBlockers: [AXUIElement] = []
-                    for window in finalWindows where try isBlockingWindowStrict(window) { finalBlockers.append(window) }
+                    for window in finalWindows {
+                        if try isBlockingWindowStrict(window) {
+                            finalBlockerObserved = true
+                            finalBlockers.append(window)
+                        }
+                    }
                     try require(finalBlockers.isEmpty, "blocking window appeared before final destination acceptance")
                     let (finalMenu, finalMenuSignature, finalSelectedMenus) = try exactFileMenuSnapshot(app)
                     try require(CFEqual(finalMenu, lastMenu) && finalSelectedMenus == 0 &&
@@ -2275,7 +2297,9 @@ func runFileMenuCancelObserve(_ options: Options) throws -> [String: Any] {
                     report["manual_inspection_required"] = false
                     return report
                 } catch {
-                    guard isTransientPostCancelAXReadFailure(error) else { throw error }
+                    guard pendingOpenBlockerScanAllowsWait(PendingOpenBlockerScanFailureEvidence(
+                        transientUnavailable: isTransientPostCancelAXReadFailure(error),
+                        blockerAlreadyObserved: finalBlockerObserved)) else { throw error }
                     stable = 0
                     try require(pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
                         withinDeadline: ProcessInfo.processInfo.systemUptime < deadline,

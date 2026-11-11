@@ -907,6 +907,18 @@ class SameProcessSetOpenTests(unittest.TestCase):
         self.assertIn("samePin(currentSource, sourcePin)", body)
         self.assertIn("selectedMenus == 0", body)
         self.assertIn("pendingOpenPostCancelWaitAllows", body)
+        self.assertIn("observedBlockers.isEmpty", body)
+        self.assertIn("finalBlockerObserved", body)
+        strict_blocker = source[
+            source.index("func isBlockingWindowStrict(") : source.index(
+                "func elementSummary("
+            )
+        ]
+        self.assertLess(
+            strict_blocker.index("pendingOpenRoleIsBlocking(elementRole)"),
+            strict_blocker.index('optionalAXThrowing(element, "AXIdentifier")'),
+        )
+        self.assertIn("pendingOpenBlockerScanAllowsWait", source)
         self.assertIn(
             "sameFileMenuIdentity(lastMenuSignature, currentMenuSignature)", body
         )
@@ -1015,6 +1027,15 @@ class SameProcessSetOpenTests(unittest.TestCase):
                 precondition(!pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
                     withinDeadline: false, exactProcess: true, expectedGeneration: true,
                     noObservedBlockers: true, readState: .originalMenuStillSelected)))
+                precondition(pendingOpenRoleIsBlocking("AXDialog"))
+                precondition(pendingOpenRoleIsBlocking("AXSheet"))
+                precondition(!pendingOpenRoleIsBlocking("AXWindow"))
+                precondition(pendingOpenBlockerScanAllowsWait(PendingOpenBlockerScanFailureEvidence(
+                    transientUnavailable: true, blockerAlreadyObserved: false)))
+                precondition(!pendingOpenBlockerScanAllowsWait(PendingOpenBlockerScanFailureEvidence(
+                    transientUnavailable: true, blockerAlreadyObserved: true)))
+                precondition(!pendingOpenBlockerScanAllowsWait(PendingOpenBlockerScanFailureEvidence(
+                    transientUnavailable: false, blockerAlreadyObserved: false)))
                 print("File-menu cancellation guards passed")
                 """
             )
