@@ -208,6 +208,114 @@ class ReferenceCopyTests(unittest.TestCase):
         )
         self.assertEqual(gzip.decompress(self.destination.read_bytes()), expected)
 
+    def test_cli_replaces_only_explicitly_declared_identical_references(self):
+        product = self.root / "Product.amxd"
+        product.write_bytes(b"product")
+
+        def file_ref(path, relative, identifier):
+            return (
+                f'<FileRef Id="{identifier}"><RelativePathType Value="1"/>'
+                f'<RelativePath Value="{html.escape(relative, quote=True)}"/>'
+                f'<Path Value="{html.escape(str(path), quote=True)}"/>'
+                "</FileRef>"
+            ).encode()
+
+        first = file_ref(self.old, self.old.name, "first")
+        repeated_product = file_ref(product, product.name, "product")
+        second = file_ref(self.old, self.old.name, "second")
+        xml = (
+            b'<?xml version="1.0"?><Ableton><LiveSet><Unrelated Value="keep"/>'
+            + first
+            + repeated_product
+            + second
+            + repeated_product
+            + b"</LiveSet></Ableton>"
+        )
+        self.source.write_bytes(gzip.compress(xml, mtime=0))
+        args = [
+            "ableton",
+            "copy-with-device-ref",
+            str(self.source),
+            str(self.destination),
+            "--source-sha256",
+            self.digest(self.source),
+            "--old-amxd",
+            str(self.old),
+            "--old-sha256",
+            self.digest(self.old),
+            "--new-amxd",
+            str(self.new),
+            "--new-sha256",
+            self.digest(self.new),
+            "--expected-occurrences",
+            "2",
+        ]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(args), 0)
+        preview = json.loads(output.getvalue())
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(preview["expected_file_ref_occurrences"], 2)
+        self.assertEqual(preview["actual_file_ref_occurrences"], 2)
+        self.assertEqual(preview["xml_attribute_edits"], 4)
+        self.assertEqual(
+            [ref["index"] for ref in preview["selected_file_refs"]], [0, 2]
+        )
+        self.assertNotIn("selected_file_ref", preview)
+        for ref in preview["selected_file_refs"]:
+            self.assertEqual(ref["old_path"], str(self.old))
+            self.assertEqual(ref["new_path"], str(self.new))
+            self.assertEqual(ref["old_relative_path"], self.old.name)
+            self.assertEqual(ref["new_relative_path"], self.new.name)
+            self.assertEqual(
+                bytes.fromhex(ref["old_relative_path_attribute_bytes_hex"]),
+                self.old.name.encode(),
+            )
+            self.assertEqual(
+                bytes.fromhex(ref["new_relative_path_attribute_bytes_hex"]),
+                self.new.name.replace("&", "&amp;").encode(),
+            )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(main(args + ["--execute"]), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["selected_file_refs"], preview["selected_file_refs"])
+        expected = xml
+        for _ in range(2):
+            expected = expected.replace(
+                f'<RelativePath Value="{self.old.name}"/>'.encode(),
+                f'<RelativePath Value="{self.new.name.replace("&", "&amp;")}"/>'.encode(),
+                1,
+            )
+            expected = expected.replace(
+                f'<Path Value="{self.old}"/>'.encode(),
+                f'<Path Value="{html.escape(str(self.new), quote=True)}"/>'.encode(),
+                1,
+            )
+        self.assertEqual(gzip.decompress(self.destination.read_bytes()), expected)
+        self.assertEqual(expected.count(repeated_product), 2)
+
+    def test_declared_occurrence_count_must_match_exactly_before_write(self):
+        for expected_occurrences in (0, 2, 17, True):
+            with self.subTest(expected_occurrences=expected_occurrences):
+                with self.assertRaises(ValueError):
+                    self.call(execute=True, expected_occurrences=expected_occurrences)
+                self.assertFalse(self.destination.exists())
+
+        twice = self.xml.replace(
+            b"</LiveSet>",
+            self.xml[
+                self.xml.index(b"<FileRef") : self.xml.index(b"</FileRef>")
+                + len(b"</FileRef>")
+            ]
+            + b"</LiveSet>",
+        )
+        self.source.write_bytes(gzip.compress(twice, mtime=0))
+        with self.assertRaisesRegex(ValueError, "declared 1, found 2"):
+            self.call(source_sha256=self.digest(self.source), execute=True)
+        self.assertFalse(self.destination.exists())
+
     def test_exact_old_path_must_match_once(self):
         wrong_path = self.xml.replace(
             f'Path Value="{self.old}"'.encode(), b'Path Value="/other/wrong.amxd"'
@@ -285,6 +393,27 @@ class DiagnosticSiblingBundleTests(unittest.TestCase):
     def pin_source(self):
         self.kwargs["source_sha256"] = ReferenceCopyTests.digest(self.source)
 
+    def write_duplicate_source(self, first_relative, second_relative):
+        def harness_ref(relative, identifier):
+            return (
+                f'<FileRef Id="{identifier}"><RelativePathType Value="1"/>'
+                f'<RelativePath Value="{relative}"/><Path Value="{self.old}"/>'
+                '<Type Value="2"/></FileRef>'
+            ).encode()
+
+        self.first_harness_ref = harness_ref(first_relative, "first")
+        self.second_harness_ref = harness_ref(second_relative, "second")
+        self.xml = (
+            b'<?xml version="1.0"?><Ableton><LiveSet><Unrelated Value="keep"/>'
+            + self.first_harness_ref
+            + self.product_ref
+            + self.second_harness_ref
+            + self.product_ref
+            + b"</LiveSet></Ableton>"
+        )
+        self.source.write_bytes(gzip.compress(self.xml, mtime=0))
+        self.pin_source()
+
     def assert_refused(self, **changes):
         with self.assertRaises((ValueError, OSError)):
             self.call(execute=True, **changes)
@@ -332,6 +461,75 @@ class DiagnosticSiblingBundleTests(unittest.TestCase):
             result["evidence_limit"],
         )
         self.assertIn("no Live load/dependency/recall proof", result["evidence_limit"])
+
+    def test_duplicate_refs_validate_and_preserve_each_diagnostic_prefix(self):
+        first_prefix = "../../../private/tmp/"
+        second_prefix = "folder with spaces/v1.2/"
+        first_relative = first_prefix + "old-bundle/Harness.amxd"
+        second_relative = second_prefix + "old-bundle/Harness.amxd"
+        self.write_duplicate_source(first_relative, second_relative)
+
+        preview = self.call(expected_occurrences=2)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(preview["expected_file_ref_occurrences"], 2)
+        self.assertEqual(preview["actual_file_ref_occurrences"], 2)
+        self.assertEqual(preview["xml_attribute_edits"], 4)
+        self.assertEqual(
+            [row["index"] for row in preview["selected_file_refs"]], [0, 2]
+        )
+        self.assertEqual(len(preview["relative_path_transforms"]), 2)
+        for ref, transform, old_relative, prefix in zip(
+            preview["selected_file_refs"],
+            preview["relative_path_transforms"],
+            (first_relative, second_relative),
+            (first_prefix, second_prefix),
+            strict=True,
+        ):
+            expected_relative = prefix + "new-bundle/Harness.amxd"
+            self.assertEqual(ref["old_relative_path"], old_relative)
+            self.assertEqual(ref["new_relative_path"], expected_relative)
+            self.assertEqual(transform["index"], ref["index"])
+            self.assertEqual(transform["preserved_prefix"], prefix)
+            self.assertEqual(
+                bytes.fromhex(ref["old_relative_path_attribute_bytes_hex"]),
+                old_relative.encode(),
+            )
+            self.assertEqual(
+                bytes.fromhex(ref["new_relative_path_attribute_bytes_hex"]),
+                expected_relative.encode(),
+            )
+            self.assertEqual(
+                bytes.fromhex(transform["preserved_prefix_bytes_hex"]), prefix.encode()
+            )
+
+        result = self.call(execute=True, expected_occurrences=2)
+        expected = self.xml
+        for old_relative, prefix in (
+            (first_relative, first_prefix),
+            (second_relative, second_prefix),
+        ):
+            new_relative = prefix + "new-bundle/Harness.amxd"
+            expected = expected.replace(
+                f'<RelativePath Value="{old_relative}"/>'.encode(),
+                f'<RelativePath Value="{new_relative}"/>'.encode(),
+                1,
+            ).replace(
+                f'<Path Value="{self.old}"/>'.encode(),
+                f'<Path Value="{self.new}"/>'.encode(),
+                1,
+            )
+        self.assertEqual(gzip.decompress(self.destination.read_bytes()), expected)
+        self.assertEqual(result["output_sha256"], preview["output_sha256"])
+        self.assertEqual(expected.count(self.product_ref), 2)
+
+    def test_mixed_unsupported_duplicate_relative_path_refuses_before_write(self):
+        self.write_duplicate_source(
+            "../../../private/tmp/old-bundle/Harness.amxd",
+            "../../../private/tmp/other-bundle/Harness.amxd",
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported diagnostic relative path"):
+            self.call(execute=True, expected_occurrences=2)
+        self.assertFalse(self.destination.exists())
 
     def test_literal_zero_or_bounded_parent_prefix_is_preserved(self):
         for prefix in ("", "../", "../" * 32, "folder with spaces/v1.2/"):

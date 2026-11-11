@@ -495,6 +495,13 @@ def build_parser() -> argparse.ArgumentParser:
     copy_ref.add_argument("--new-amxd", type=Path, required=True)
     copy_ref.add_argument("--new-sha256", required=True)
     copy_ref.add_argument(
+        "--expected-occurrences",
+        type=int,
+        choices=range(1, 17),
+        default=1,
+        help="exact number of FileRefs matching --old-amxd to replace (1–16; default 1)",
+    )
+    copy_ref.add_argument(
         "--diagnostic-sibling-bundle",
         action="store_true",
         help="diagnostic only: preserve raw relative prefix and replace safe sibling-bundle tail; relative base/resolution unverified",
@@ -731,6 +738,7 @@ def main(argv: list[str] | None = None) -> int:
                     new_sha256=args.new_sha256,
                     execute=args.execute,
                     diagnostic_sibling_bundle=args.diagnostic_sibling_bundle,
+                    expected_occurrences=args.expected_occurrences,
                 )
             )
             return 0

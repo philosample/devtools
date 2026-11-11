@@ -19,6 +19,7 @@ from .maxfiles import sha256
 
 # This opt-in diagnostic subset deliberately does not decode or normalize paths.
 _SAFE_COMPONENT = re.compile(r"[A-Za-z0-9_-](?:[A-Za-z0-9._ -]*[A-Za-z0-9_-])?\Z")
+MAX_EXPECTED_OCCURRENCES = 16
 
 
 def _sibling_bundle_relative_path(old: Path, new: Path, reference: dict) -> dict:
@@ -86,8 +87,16 @@ def copy_with_device_ref(
     new_sha256: str,
     execute: bool = False,
     diagnostic_sibling_bundle: bool = False,
+    expected_occurrences: int = 1,
 ) -> dict:
-    """Copy a Set, changing only the uniquely selected old-device reference."""
+    """Copy a Set, changing only the explicitly selected old-device references."""
+    if (
+        type(expected_occurrences) is not int
+        or not 1 <= expected_occurrences <= MAX_EXPECTED_OCCURRENCES
+    ):
+        raise ValueError(
+            f"expected FileRef occurrences must be an integer from 1 to {MAX_EXPECTED_OCCURRENCES}"
+        )
     if any(
         not SHA256_RE.fullmatch(value)
         for value in (source_sha256, old_sha256, new_sha256)
@@ -132,27 +141,38 @@ def copy_with_device_ref(
         for index, reference in enumerate(refs)
         if reference["raw_path"] == str(old)
     ]
-    if len(selected_indexes) != 1:
+    if len(selected_indexes) != expected_occurrences:
         raise ValueError(
-            "expected exactly one FileRef matching the exact old AMXD path; "
-            f"found {len(selected_indexes)}"
+            "exact old AMXD path match count differs from --expected-occurrences; "
+            f"declared {expected_occurrences}, found {len(selected_indexes)}"
         )
-    selected_index = selected_indexes[0]
-    selected_ref = refs[selected_index]
-    relative_transform = None
-    if diagnostic_sibling_bundle:
-        relative_transform = _sibling_bundle_relative_path(old, new, selected_ref)
-        new_relative = relative_transform["new_relative_path"]
-    else:
-        if selected_ref != {
-            "raw_path": str(old),
-            "relative_path": os.path.relpath(old, resolved.parent),
-            "relative_path_type": "1",
-        }:
-            raise ValueError(
-                "selected FileRef requires a canonical path and supported type-1 relative path"
-            )
-        new_relative = os.path.relpath(new, target.parent)
+    selected_file_refs = []
+    relative_transforms = []
+    for selected_index in selected_indexes:
+        selected_ref = refs[selected_index]
+        if diagnostic_sibling_bundle:
+            relative_transform = _sibling_bundle_relative_path(old, new, selected_ref)
+            new_relative = relative_transform["new_relative_path"]
+            relative_transforms.append(relative_transform)
+        else:
+            if selected_ref != {
+                "raw_path": str(old),
+                "relative_path": os.path.relpath(old, resolved.parent),
+                "relative_path_type": "1",
+            }:
+                raise ValueError(
+                    "each selected FileRef requires a canonical path and supported type-1 relative path"
+                )
+            new_relative = os.path.relpath(new, target.parent)
+        selected_file_refs.append(
+            {
+                "index": selected_index,
+                "old_path": str(old),
+                "new_path": str(new),
+                "old_relative_path": selected_ref["relative_path"],
+                "new_relative_path": new_relative,
+            }
+        )
     # Reuse the inspector's bounded, stable file hashing without treating a new
     # filename or SDK handle as an artifact attestation.
     replacement = _local_file_report(str(new))
@@ -167,42 +187,53 @@ def copy_with_device_ref(
     )
     if len(matches) != len(refs):
         raise ValueError("unsupported FileRef byte representation")
-    match = matches[selected_index]
-    block = match.group()
     edits = []
-    for tag, value in (
-        ("Path", str(new)),
-        ("RelativePath", new_relative),
-    ):
-        pattern = re.compile(rb"<" + tag.encode() + rb'\s+Value="([^"<>]*)"\s*/>')
-        found = list(pattern.finditer(block))
-        if len(found) != 1:
-            raise ValueError("unsupported reference attribute representation")
-        attribute = found[0]
-        if (
-            diagnostic_sibling_bundle
-            and tag == "RelativePath"
-            and attribute.group(1) != selected_ref["relative_path"].encode("ascii")
+    expected = list(refs)
+    for selected_file_ref in selected_file_refs:
+        selected_index = selected_file_ref["index"]
+        selected_ref = refs[selected_index]
+        match = matches[selected_index]
+        block = match.group()
+        for tag, value in (
+            ("Path", str(new)),
+            ("RelativePath", selected_file_ref["new_relative_path"]),
         ):
-            raise ValueError(
-                "diagnostic relative path requires literal safe ASCII attribute bytes"
+            pattern = re.compile(rb"<" + tag.encode() + rb'\s+Value="([^"<>]*)"\s*/>')
+            found = list(pattern.finditer(block))
+            if len(found) != 1:
+                raise ValueError("unsupported reference attribute representation")
+            attribute = found[0]
+            if (
+                diagnostic_sibling_bundle
+                and tag == "RelativePath"
+                and attribute.group(1) != selected_ref["relative_path"].encode("ascii")
+            ):
+                raise ValueError(
+                    "diagnostic relative path requires literal safe ASCII attribute bytes"
+                )
+            replacement_bytes = html.escape(value, quote=True).encode()
+            if tag == "RelativePath":
+                selected_file_ref["old_relative_path_attribute_bytes_hex"] = (
+                    attribute.group(1).hex()
+                )
+                selected_file_ref["new_relative_path_attribute_bytes_hex"] = (
+                    replacement_bytes.hex()
+                )
+            edits.append(
+                (
+                    match.start() + attribute.start(1),
+                    match.start() + attribute.end(1),
+                    replacement_bytes,
+                )
             )
-        edits.append(
-            (
-                match.start() + attribute.start(1),
-                match.start() + attribute.end(1),
-                html.escape(value, quote=True).encode(),
-            )
-        )
+        expected[selected_index] = {
+            "raw_path": str(new),
+            "relative_path": selected_file_ref["new_relative_path"],
+            "relative_path_type": "1",
+        }
     changed = xml
     for start, end, value in sorted(edits, reverse=True):
         changed = changed[:start] + value + changed[end:]
-    expected = list(refs)
-    expected[selected_index] = {
-        "raw_path": str(new),
-        "relative_path": new_relative,
-        "relative_path_type": "1",
-    }
     if _extract_file_refs(changed) != expected:
         raise ValueError("replacement reference verification failed")
     output = gzip.compress(changed, mtime=0)
@@ -215,19 +246,28 @@ def copy_with_device_ref(
         "old_amxd_sha256": old_sha256.lower(),
         "new_amxd": replacement,
         "output_sha256": sha256(output),
-        "xml_attribute_edits": 2,
+        "xml_attribute_edits": 2 * expected_occurrences,
+        "expected_file_ref_occurrences": expected_occurrences,
+        "actual_file_ref_occurrences": len(selected_indexes),
         "relative_path_policy": "diagnostic_sibling_bundle"
         if diagnostic_sibling_bundle
         else "strict_set_directory",
-        "selected_file_ref": {
-            "index": selected_index,
-            "old_path": str(old),
-            "new_path": str(new),
-        },
+        "selected_file_refs": selected_file_refs,
         "evidence_limit": "Offline reference copy only; no Live load, dependency resolution or recall proof.",
     }
-    if relative_transform is not None:
-        result["relative_path_transform"] = relative_transform
+    if len(selected_file_refs) == 1:
+        result["selected_file_ref"] = {
+            key: selected_file_refs[0][key] for key in ("index", "old_path", "new_path")
+        }
+    if diagnostic_sibling_bundle:
+        result["relative_path_transforms"] = [
+            {"index": selected["index"], **transform}
+            for selected, transform in zip(
+                selected_file_refs, relative_transforms, strict=True
+            )
+        ]
+        if len(relative_transforms) == 1:
+            result["relative_path_transform"] = relative_transforms[0]
         result["evidence_limit"] += (
             " Diagnostic only: relative base/resolution unverified; no Live load/dependency/recall proof; native exact component/manifest pins required before effects."
         )
