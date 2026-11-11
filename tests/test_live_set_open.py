@@ -751,6 +751,87 @@ class SameProcessSetOpenTests(unittest.TestCase):
             run_set_open(PID, **self.options(**common))
         native.assert_not_called()
 
+    def test_consumed_marker_with_post_marker_guard_refusal_stays_not_attempted(self):
+        common, preflight, preflight_path, preflight_sha, marker = (
+            self._cancel_receipts()
+        )
+        source_pin = preflight["source_file"]
+        destination_pin = preflight["destination_file"]
+
+        def native(command, **kwargs):
+            marker.write_text("consumed before guard\n")
+            receipt = {
+                "format": FORMAT,
+                "status": "stopped",
+                "phase": "file-menu-cancel-post-marker-guard",
+                "error": "source focus changed after marker creation",
+                "read_only": False,
+                "target": {
+                    "pid": PID,
+                    "bundle_identifier": BUNDLE,
+                    "process_generation": 123456789,
+                },
+                "source_set_url": self.source.as_uri(),
+                "destination_set_url": self.destination.as_uri(),
+                "source_file": source_pin,
+                "destination_file": destination_pin,
+                "original_open_receipt_sha256": common["original_open_receipt_sha256"],
+                "pending_destination_binding_pre_action": "unverified",
+                "open_initiated_by_helper": False,
+                "attempt_marker": str(marker),
+                "actions": {
+                    "focus": "verified",
+                    "file_menu_cancel": "not_attempted",
+                    "open": "outcome_unknown",
+                },
+                "manual_inspection_required": True,
+            }
+            return subprocess.CompletedProcess(command, 1, json.dumps(receipt), "")
+
+        with (
+            patch(
+                "codex_devtools.live_set_open.platform.system", return_value="Darwin"
+            ),
+            patch("codex_devtools.live_set_open.subprocess.run", side_effect=native),
+        ):
+            result = run_set_open(
+                PID,
+                **self.options(
+                    **common,
+                    preflight_receipt=preflight_path,
+                    preflight_receipt_sha256=preflight_sha,
+                    execute=True,
+                ),
+            )
+        self.assertEqual(result["status"], "stopped")
+        self.assertEqual(result["actions"]["file_menu_cancel"], "not_attempted")
+        self.assertTrue(result["manual_inspection_required"])
+        self.assertTrue(marker.exists())
+
+    def test_execute_timeout_without_marker_keeps_cancel_outcome_unknown(self):
+        common, _, preflight_path, preflight_sha, marker = self._cancel_receipts()
+        with (
+            patch(
+                "codex_devtools.live_set_open.platform.system", return_value="Darwin"
+            ),
+            patch(
+                "codex_devtools.live_set_open.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("swift", 150),
+            ),
+        ):
+            result = run_set_open(
+                PID,
+                **self.options(
+                    **common,
+                    preflight_receipt=preflight_path,
+                    preflight_receipt_sha256=preflight_sha,
+                    execute=True,
+                ),
+            )
+        self.assertFalse(marker.exists())
+        self.assertEqual(result["actions"]["file_menu_cancel"], "outcome_unknown")
+        self.assertTrue(result["manual_inspection_required"])
+
     def test_original_and_preflight_cancel_receipts_have_closed_contracts(self):
         from codex_devtools.live_set_open import (
             _validate_cancel_preflight,
@@ -793,12 +874,30 @@ class SameProcessSetOpenTests(unittest.TestCase):
             )
         ]
         marker = body.index("try createFileMenuCancelAttemptMarker")
-        cancel = body.index("AXUIElementPerformAction(finalMenu, kAXCancelAction")
+        post_marker_guard = body.index('phase = "file-menu-cancel-post-marker-guard"')
+        post_marker_focus = body.index("let postMarkerSource = try exactDocumentWindow")
+        post_marker_pins = body.index("let postMarkerSourcePin = try setPin")
+        post_marker_transport = body.index(
+            "let postMarkerTransport = try saveCopyTransportStrict"
+        )
+        final_menu_check = body.index(
+            "let (lastMenu, lastMenuSignature, lastSelectedCount)"
+        )
+        attempt = body.index("fileMenuCancelAttempted = true")
+        cancel = body.index("AXUIElementPerformAction(lastMenu, kAXCancelAction")
         observe = body.index('phase = "observe-original-pending-open"')
         self.assertLess(marker, cancel)
+        self.assertLess(marker, post_marker_guard)
+        self.assertLess(post_marker_guard, post_marker_focus)
+        self.assertLess(post_marker_focus, post_marker_pins)
+        self.assertLess(post_marker_pins, post_marker_transport)
+        self.assertLess(post_marker_transport, final_menu_check)
+        self.assertLess(post_marker_guard, final_menu_check)
+        self.assertLess(final_menu_check, attempt)
+        self.assertLess(attempt, cancel)
         self.assertLess(cancel, observe)
         self.assertEqual(
-            body.count("AXUIElementPerformAction(finalMenu, kAXCancelAction"), 1
+            body.count("AXUIElementPerformAction(lastMenu, kAXCancelAction"), 1
         )
         self.assertNotIn("try press(", body)
         self.assertNotIn("NSWorkspace.shared.open", body)
@@ -807,6 +906,32 @@ class SameProcessSetOpenTests(unittest.TestCase):
         self.assertIn("try requireSameProcess(process, options: options)", body)
         self.assertIn("samePin(currentSource, sourcePin)", body)
         self.assertIn("selectedMenus == 0", body)
+        self.assertIn("pendingOpenPostCancelWaitAllows", body)
+        self.assertIn(
+            "sameFileMenuIdentity(lastMenuSignature, currentMenuSignature)", body
+        )
+        self.assertIn("saveCopyTransportStrict(finalDestinationWindows[0])", body)
+        self.assertIn("ProcessInfo.processInfo.systemUptime < deadline", body)
+        self.assertIn("failed (-25204)", source)
+        stopped = source[
+            source.index("func stoppedFileMenuCancel(") : source.index(
+                "func runFileMenuCancelObserve("
+            )
+        ]
+        self.assertIn(
+            '"file_menu_cancel": fileMenuCancelAttempted ? "outcome_unknown" : "not_attempted"',
+            stopped,
+        )
+        self.assertIn(
+            'report["manual_inspection_required"] = attemptMarkerCreated', stopped
+        )
+        marker_creator = source[
+            source.index("func createFileMenuCancelAttemptMarker(") : source.index(
+                "func fileMenuCancelReceiptBase("
+            )
+        ]
+        self.assertIn("O_EXCL", marker_creator)
+        self.assertIn("fsync(fd)", marker_creator)
 
     @unittest.skipUnless(shutil.which("swiftc"), "Swift compiler")
     def test_swift_cancel_preflight_wait_and_success_predicates_fail_closed(self):
@@ -852,16 +977,44 @@ class SameProcessSetOpenTests(unittest.TestCase):
                     onlyOwnedSourceWindow: true, sourcePinMatches: true,
                     sourceTransportStopped: true, fileMenuClosed: false)))
                 let success = PendingOpenSuccessEvidence(
-                    exactProcess: true, expectedGeneration: true, exactDestinationFocused: true,
+                    withinDeadline: true, exactProcess: true, expectedGeneration: true, exactDestinationFocused: true,
                     destinationPinStable: true, sourcePinUnchanged: true,
                     sourceAndDestinationTransportStopped: true, noBlockingWindows: true,
                     fileMenuClosed: true)
                 precondition(pendingOpenSuccessAllows(success))
                 precondition(!pendingOpenSuccessAllows(PendingOpenSuccessEvidence(
-                    exactProcess: false, expectedGeneration: true, exactDestinationFocused: true,
+                    withinDeadline: true, exactProcess: false, expectedGeneration: true, exactDestinationFocused: true,
                     destinationPinStable: true, sourcePinUnchanged: true,
                     sourceAndDestinationTransportStopped: true, noBlockingWindows: true,
                     fileMenuClosed: true)))
+                precondition(!pendingOpenSuccessAllows(PendingOpenSuccessEvidence(
+                    withinDeadline: false, exactProcess: true, expectedGeneration: true, exactDestinationFocused: true,
+                    destinationPinStable: true, sourcePinUnchanged: true,
+                    sourceAndDestinationTransportStopped: true, noBlockingWindows: true,
+                    fileMenuClosed: true)))
+                let waitForSameMenu = PendingOpenPostCancelWaitEvidence(
+                    withinDeadline: true, exactProcess: true, expectedGeneration: true,
+                    noObservedBlockers: true, readState: .originalMenuStillSelected)
+                precondition(pendingOpenPostCancelWaitAllows(waitForSameMenu))
+                let waitForUnavailableAX = PendingOpenPostCancelWaitEvidence(
+                    withinDeadline: true, exactProcess: true, expectedGeneration: true,
+                    noObservedBlockers: true, readState: .transientUnavailable)
+                precondition(pendingOpenPostCancelWaitAllows(waitForUnavailableAX))
+                precondition(!pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
+                    withinDeadline: true, exactProcess: true, expectedGeneration: true,
+                    noObservedBlockers: false, readState: .transientUnavailable)))
+                precondition(!pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
+                    withinDeadline: true, exactProcess: true, expectedGeneration: true,
+                    noObservedBlockers: true, readState: .changed)))
+                precondition(!pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
+                    withinDeadline: true, exactProcess: true, expectedGeneration: true,
+                    noObservedBlockers: true, readState: .closed)))
+                precondition(!pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
+                    withinDeadline: true, exactProcess: true, expectedGeneration: false,
+                    noObservedBlockers: true, readState: .transientUnavailable)))
+                precondition(!pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
+                    withinDeadline: false, exactProcess: true, expectedGeneration: true,
+                    noObservedBlockers: true, readState: .originalMenuStillSelected)))
                 print("File-menu cancellation guards passed")
                 """
             )

@@ -843,11 +843,11 @@ def _run_cancel_selected_file_menu(
             "actions": {
                 "focus": "outcome_unknown" if execute else "not_attempted",
                 "file_menu_cancel": "outcome_unknown"
-                if marker_exists
+                if execute or marker_exists
                 else "not_attempted",
                 "open": "outcome_unknown",
             },
-            "manual_inspection_required": marker_exists,
+            "manual_inspection_required": execute or marker_exists,
         }
 
     try:
@@ -962,12 +962,17 @@ def _run_cancel_selected_file_menu(
                 or actions["open"] != "outcome_unknown"
                 or actions["focus"] not in {"verified", "not_attempted"}
                 or actions["file_menu_cancel"]
-                != ("outcome_unknown" if marker_exists else "not_attempted")
+                not in (
+                    {"not_attempted", "outcome_unknown"}
+                    if marker_exists
+                    else {"not_attempted"}
+                )
                 or report.get("manual_inspection_required") is not marker_exists
                 or report.get("phase")
                 not in {
                     "file-menu-cancel-preflight",
                     "file-menu-cancel-review",
+                    "file-menu-cancel-post-marker-guard",
                     "cancel-selected-file-menu",
                     "observe-original-pending-open",
                 }

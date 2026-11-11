@@ -120,21 +120,30 @@ python3 -m codex_devtools ax live-set-open \
 Review the exact `ready` receipt and its SHA-256. Execute once with the same
 inputs plus `--preflight-receipt` and `--preflight-receipt-sha256`, then
 `--execute`. The helper rechecks all process, file, focus, menu and transport
-guards at the action boundary, creates the private marker exclusively, and
-performs one `AXCancel` on that exact selected `File` menu item. It never calls
-AXPress, Save, Quit, or another Open. The marker is consumed before the sole
-cancel attempt; an existing marker refuses any retry.
+guards, creates the private marker exclusively, and repeats the guards after
+the marker is flushed immediately before one `AXCancel` on that exact selected
+`File` menu item. If the post-marker guard refuses, the receipt says
+`file_menu_cancel=not_attempted`; the marker remains consumed, so the attempt
+cannot be retried. If the AXCancel call began and its result is uncertain, the
+receipt says `outcome_unknown`. It never calls AXPress, Save, Quit, or another
+Open. An existing marker refuses any retry.
 
-After cancellation, the helper only observes the already-pending Open. It waits
-up to 90 seconds while the source remains the sole focused document, the File
-menu stays closed, the source pin stays unchanged and transport stays stopped.
+After cancellation, the helper only observes the already-pending Open. If the
+same selected File menu remains visible briefly, it waits for that exact menu to
+close without cancelling again. A changed/ambiguous menu or a blocking dialog
+stops the operation. Transient unavailable AX reads can wait only within the
+90-second monotonic bound; they never count as success. If no destination is
+visible, the helper waits only while the source remains the sole focused
+document, its pin stays unchanged, and transport stays stopped.
 Success requires three stable observations of the exact destination AX URL in
 the same Live process, destination focus, unchanged source bytes/identity,
 destination bytes/identity matching the approved pin (allowing only ctime),
 stopped transport and no blocking windows. If cancellation or completion is
 uncertain, the result is `stopped`/unknown and the marker prevents another
-attempt. This proves only the same-process AX URL and file observations; it does
-not prove M4L recall, runtime, wire, or hardware behavior.
+attempt. Final success rereads the process generation, deadline, closed menu,
+destination URL/file identity and stopped transport. This proves only the
+same-process AX URL and file observations; it does not prove M4L recall, runtime,
+wire, or hardware behavior.
 
 ## Explicitly preserve an owned source before opening
 
