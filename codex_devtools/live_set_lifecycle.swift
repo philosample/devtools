@@ -17,6 +17,13 @@ struct Options {
     var receiptSHA256: String?
     var openExisting = false
     var reconcilePendingOpen = false
+    var cancelSelectedFileMenu = false
+    var observeOriginalPendingOpen = false
+    var originalOpenReceipt: String?
+    var originalOpenReceiptSHA256: String?
+    var preflightReceipt: String?
+    var preflightReceiptSHA256: String?
+    var attemptMarker: String?
     var expectedGeneration: Int64?
     var sourceSHA256: String?
     var destinationSHA256: String?
@@ -50,6 +57,15 @@ var sourceSaveVerified = false
 var projectPromptAttempted = false
 var projectPromptVerified = false
 var saveCopyDeadline: TimeInterval?
+var fileMenuCancelAttempted = false
+var attemptMarkerCreated = false
+var cancelFocusVerified = false
+var cancelOriginalReceiptSHA256 = ""
+var cancelSourcePin: [String: Any]?
+var cancelDestinationPin: [String: Any]?
+var cancelSourceURL: URL?
+var cancelDestinationURL: URL?
+var cancelAttemptMarkerURL: URL?
 
 func checkSaveCopyDeadline() throws {
     if let deadline = saveCopyDeadline { try require(ProcessInfo.processInfo.systemUptime < deadline, "same-process Save As deadline expired; no retry") }
@@ -98,6 +114,101 @@ struct SaveCopyWindowAssessment {
     let sharingOverlay: WindowSharingOverlaySignature?
 }
 
+struct FileMenuCancelPreflightEvidence {
+    let exactProcess: Bool
+    let expectedGeneration: Bool
+    let currentDesktop: Bool
+    let exactSourceWindowFocused: Bool
+    let sourcePinMatches: Bool
+    let destinationPinMatches: Bool
+    let transportStopped: Bool
+    let noBlockingWindows: Bool
+    let uniqueFileMenuCount: Int
+    let selectedMenuCount: Int
+    let fileMenuSelected: Bool
+    let fileMenuEnabled: Bool
+    let cancelActionAvailable: Bool
+}
+
+func fileMenuCancelPreflightAllows(_ evidence: FileMenuCancelPreflightEvidence) -> Bool {
+    evidence.exactProcess && evidence.expectedGeneration && evidence.currentDesktop &&
+        evidence.exactSourceWindowFocused && evidence.sourcePinMatches &&
+        evidence.destinationPinMatches && evidence.transportStopped &&
+        evidence.noBlockingWindows && evidence.uniqueFileMenuCount == 1 &&
+        evidence.selectedMenuCount == 1 && evidence.fileMenuSelected &&
+        evidence.fileMenuEnabled && evidence.cancelActionAvailable
+}
+
+struct PendingOpenWaitEvidence {
+    let exactProcess: Bool
+    let expectedGeneration: Bool
+    let noBlockingWindows: Bool
+    let onlyOwnedSourceWindow: Bool
+    let sourcePinMatches: Bool
+    let sourceTransportStopped: Bool
+    let fileMenuClosed: Bool
+}
+
+func pendingOpenWaitAllows(_ evidence: PendingOpenWaitEvidence) -> Bool {
+    evidence.exactProcess && evidence.expectedGeneration &&
+        evidence.noBlockingWindows && evidence.onlyOwnedSourceWindow &&
+        evidence.sourcePinMatches && evidence.sourceTransportStopped &&
+        evidence.fileMenuClosed
+}
+
+struct PendingOpenSuccessEvidence {
+    let withinDeadline: Bool
+    let exactProcess: Bool
+    let expectedGeneration: Bool
+    let exactDestinationFocused: Bool
+    let destinationPinStable: Bool
+    let sourcePinUnchanged: Bool
+    let sourceAndDestinationTransportStopped: Bool
+    let noBlockingWindows: Bool
+    let fileMenuClosed: Bool
+}
+
+func pendingOpenSuccessAllows(_ evidence: PendingOpenSuccessEvidence) -> Bool {
+    evidence.withinDeadline && evidence.exactProcess && evidence.expectedGeneration &&
+        evidence.exactDestinationFocused && evidence.destinationPinStable &&
+        evidence.sourcePinUnchanged && evidence.sourceAndDestinationTransportStopped &&
+        evidence.noBlockingWindows && evidence.fileMenuClosed
+}
+
+enum PendingOpenPostCancelReadState: Equatable {
+    case originalMenuStillSelected
+    case closed
+    case transientUnavailable
+    case changed
+}
+
+struct PendingOpenPostCancelWaitEvidence {
+    let withinDeadline: Bool
+    let exactProcess: Bool
+    let expectedGeneration: Bool
+    let noObservedBlockers: Bool
+    let readState: PendingOpenPostCancelReadState
+}
+
+struct PendingOpenBlockerScanFailureEvidence {
+    let transientUnavailable: Bool
+    let blockerAlreadyObserved: Bool
+}
+
+func pendingOpenBlockerScanAllowsWait(_ evidence: PendingOpenBlockerScanFailureEvidence) -> Bool {
+    evidence.transientUnavailable && !evidence.blockerAlreadyObserved
+}
+
+func pendingOpenRoleIsBlocking(_ role: String) -> Bool {
+    ["AXDialog", "AXSheet"].contains(role)
+}
+
+func pendingOpenPostCancelWaitAllows(_ evidence: PendingOpenPostCancelWaitEvidence) -> Bool {
+    evidence.withinDeadline && evidence.exactProcess && evidence.expectedGeneration &&
+        evidence.noObservedBlockers &&
+        (evidence.readState == .originalMenuStillSelected || evidence.readState == .transientUnavailable)
+}
+
 func saveCopyWindowBlocks(_ window: SaveCopyWindowAssessment) -> Bool {
     if window.modal == true { return true }
     if let sharingOverlay = window.sharingOverlay,
@@ -138,6 +249,23 @@ func isBlockingWindow(_ element: AXUIElement, except allowedTitle: String? = nil
     }
     return elementRole == (kAXWindowRole as String) &&
         elementIdentifier == "open-panel"
+}
+
+func isBlockingWindowStrict(_ element: AXUIElement) throws -> Bool {
+    let elementRole = try role(element)
+    if pendingOpenRoleIsBlocking(elementRole) { return true }
+    let elementIdentifier = try optionalAXThrowing(element, "AXIdentifier") as? String
+    if elementRole == (kAXWindowRole as String) && elementIdentifier == "open-panel" { return true }
+    let modalValue = try optionalAXThrowing(element, "AXModal")
+    let modal: Bool
+    if let number = modalValue as? NSNumber {
+        modal = number.boolValue
+    } else if modalValue == nil {
+        modal = false
+    } else {
+        throw LifecycleFailure(phase: phase, message: "AXModal state is not boolean")
+    }
+    return modal
 }
 
 func elementSummary(_ element: AXUIElement?, blocking: Bool = false) -> [String: Any]? {
@@ -228,12 +356,19 @@ func parseOptions() -> Options {
         if key == "--project-required-dialog" { result.projectRequiredDialog = true; index += 1; continue }
         if key == "--open-existing" { result.openExisting = true; index += 1; continue }
         if key == "--reconcile-pending-open" { result.reconcilePendingOpen = true; index += 1; continue }
+        if key == "--cancel-selected-file-menu" { result.cancelSelectedFileMenu = true; index += 1; continue }
+        if key == "--observe-original-pending-open" { result.observeOriginalPendingOpen = true; index += 1; continue }
         if key == "--save-owned-source" { result.saveOwnedSource = true; index += 1; continue }
         guard index + 1 < args.count else { fail("missing value for \(key)") }
         let value = args[index + 1]
         switch key {
         case "--resume-receipt": result.resumeReceipt = value
         case "--receipt-sha256": result.receiptSHA256 = value
+        case "--original-open-receipt": result.originalOpenReceipt = value
+        case "--original-open-receipt-sha256": result.originalOpenReceiptSHA256 = value
+        case "--preflight-receipt": result.preflightReceipt = value
+        case "--preflight-receipt-sha256": result.preflightReceiptSHA256 = value
+        case "--attempt-marker": result.attemptMarker = value
         case "--pid":
             guard let parsed = Int32(value), parsed > 0 else { fail("PID must be positive") }
             result.pid = pid_t(parsed)
@@ -257,7 +392,11 @@ func parseOptions() -> Options {
               result.destinationSet == nil && result.appPath == nil && !result.stopBeforeReopen && !result.openExisting &&
               !result.saveCopyOnly && !result.saveOwnedSource && result.sourceSHA256 == nil && result.destinationSHA256 == nil &&
               result.backupReceipt == nil && result.expectedFinalSet == nil && !result.projectRequiredDialog &&
-              !result.reconcilePendingOpen && result.expectedGeneration == nil else {
+              !result.reconcilePendingOpen && !result.cancelSelectedFileMenu &&
+              !result.observeOriginalPendingOpen && result.expectedGeneration == nil &&
+              result.originalOpenReceipt == nil && result.originalOpenReceiptSHA256 == nil &&
+              result.preflightReceipt == nil && result.preflightReceiptSHA256 == nil &&
+              result.attemptMarker == nil else {
             fail("resume requires only a receipt path, SHA-256 and optional --execute")
         }
         return result
@@ -274,11 +413,29 @@ func parseOptions() -> Options {
     if result.openExisting && (result.destinationSet == nil || result.appPath == nil || result.sourceSHA256 == nil || result.destinationSHA256 == nil) {
         fail("--open-existing requires exact source/destination hashes, destination and app")
     }
+    if result.cancelSelectedFileMenu || result.observeOriginalPendingOpen {
+        guard result.openExisting && result.cancelSelectedFileMenu && result.observeOriginalPendingOpen &&
+              !result.reconcilePendingOpen && !result.saveOwnedSource && result.backupReceipt == nil &&
+              result.expectedGeneration != nil && result.originalOpenReceipt != nil &&
+              result.originalOpenReceiptSHA256 != nil && result.attemptMarker != nil else {
+            fail("File-menu cancellation requires its paired observe mode, exact original receipt/hash, generation and marker; Save and reconcile modes are forbidden")
+        }
+        if result.execute {
+            guard result.preflightReceipt != nil && result.preflightReceiptSHA256 != nil else {
+                fail("File-menu cancellation execute requires the reviewed preflight receipt/hash")
+            }
+        } else if result.preflightReceipt != nil || result.preflightReceiptSHA256 != nil {
+            fail("File-menu cancellation preflight receipt/hash are execute-only")
+        }
+    } else if result.originalOpenReceipt != nil || result.originalOpenReceiptSHA256 != nil ||
+                result.preflightReceipt != nil || result.preflightReceiptSHA256 != nil || result.attemptMarker != nil {
+        fail("File-menu cancellation receipts/marker require both explicit cancel/observe mode flags")
+    }
     if result.reconcilePendingOpen {
         guard result.openExisting && result.saveOwnedSource && result.expectedGeneration != nil else {
             fail("--reconcile-pending-open requires --open-existing, --save-owned-source and --expected-generation")
         }
-    } else if result.expectedGeneration != nil {
+    } else if !result.cancelSelectedFileMenu && result.expectedGeneration != nil {
         fail("--expected-generation requires --reconcile-pending-open")
     }
     if !result.openExisting && !result.saveCopyOnly && (result.sourceSHA256 != nil || result.destinationSHA256 != nil || result.saveOwnedSource || result.backupReceipt != nil) {
@@ -307,6 +464,17 @@ func ax(_ element: AXUIElement, _ name: String) throws -> CFTypeRef {
 
 func optionalAX(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     try? ax(element, name)
+}
+
+func optionalAXThrowing(_ element: AXUIElement, _ name: String) throws -> CFTypeRef? {
+    var value: CFTypeRef?
+    AXUIElementSetMessagingTimeout(element, 2)
+    let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+    if error == .noValue { return nil }
+    guard error == .success, let value else {
+        throw LifecycleFailure(phase: phase, message: "AX read \(name) failed (\(error.rawValue))")
+    }
+    return value
 }
 
 func stringAttribute(_ element: AXUIElement, _ name: String) throws -> String {
@@ -810,6 +978,14 @@ func focusedWindowIs(_ app: AXUIElement, _ expected: AXUIElement) -> Bool {
     return CFEqual(focused, expected)
 }
 
+func focusedWindowIsThrowing(_ app: AXUIElement, _ expected: AXUIElement) throws -> Bool {
+    guard let value = try optionalAXThrowing(app, kAXFocusedWindowAttribute as String) else { return false }
+    guard CFGetTypeID(value) == AXUIElementGetTypeID() else {
+        throw LifecycleFailure(phase: phase, message: "focused window is not an AX element")
+    }
+    return CFEqual(value as! AXUIElement, expected)
+}
+
 func waitForFrontmost(pid: pid_t, seconds: TimeInterval = 5) throws {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
@@ -985,6 +1161,30 @@ func saveCopyTransport(_ sourceWindow: AXUIElement) throws -> [String: Int] {
             throw LifecycleFailure(phase: phase, message: "source transport value unavailable")
         }
         try require(value.doubleValue == 0, "Save As requires Play, Link and both recording flags off")
+        values[key] = 0
+    }
+    return values
+}
+
+func saveCopyTransportStrict(_ sourceWindow: AXUIElement) throws -> [String: Int] {
+    let elements = try allElements([sourceWindow])
+    var values: [String: Int] = [:]
+    for (key, name, id) in [("play", "Play", "Transport.Play"), ("link", "Link", "Transport.AbletonLink"),
+                             ("arrangement_record", "Arrangement Record", "Transport.GlobalRecord"),
+                             ("session_record", "Session Record", "Transport.SessionRecord")] {
+        var matches: [AXUIElement] = []
+        for element in elements {
+            if try optionalAXThrowing(element, "AXIdentifier") as? String == id { matches.append(element) }
+        }
+        try require(matches.count == 1, "exact source transport checkbox missing/ambiguous")
+        let controlRole = try role(matches[0])
+        let controlName = try optionalAXThrowing(matches[0], kAXDescriptionAttribute as String) as? String
+        try require(controlRole == "AXCheckBox" && controlName == name,
+                    "exact source transport checkbox missing/ambiguous")
+        guard let value = try ax(matches[0], kAXValueAttribute as String) as? NSNumber else {
+            throw LifecycleFailure(phase: phase, message: "source transport value unavailable")
+        }
+        try require(value.doubleValue == 0, "source transport is not stopped")
         values[key] = 0
     }
     return values
@@ -1490,6 +1690,673 @@ func sameOpenedDestination(_ before: [String: Any], _ after: [String: Any]) -> B
         left.removeValue(forKey: key); right.removeValue(forKey: key)
     }
     return samePin(left, right)
+}
+
+func sameFileMenuIdentity(_ before: [String: Any], _ after: [String: Any]) -> Bool {
+    var left = before, right = after
+    left.removeValue(forKey: "selected"); right.removeValue(forKey: "selected")
+    return NSDictionary(dictionary: left).isEqual(to: right)
+}
+
+func isTransientPostCancelAXReadFailure(_ error: Error) -> Bool {
+    guard let failure = error as? LifecycleFailure else { return false }
+    if failure.message == "target has no readable AX windows" { return true }
+    return failure.message.contains("failed (-25204)") ||
+        failure.message.contains("unavailable (-25204)")
+}
+
+func canWaitAfterTransientPostCancelRead(_ error: Error, process: NSRunningApplication,
+                                         generation: Int64, deadline: TimeInterval,
+                                         noObservedBlockers: Bool) -> Bool {
+    guard pendingOpenBlockerScanAllowsWait(PendingOpenBlockerScanFailureEvidence(
+        transientUnavailable: isTransientPostCancelAXReadFailure(error),
+        blockerAlreadyObserved: !noObservedBlockers)) else { return false }
+    return pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
+        withinDeadline: ProcessInfo.processInfo.systemUptime < deadline,
+        exactProcess: !process.isTerminated,
+        expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+        noObservedBlockers: noObservedBlockers,
+        readState: .transientUnavailable))
+}
+
+func readPinnedJSONReceipt(_ path: String, expectedSHA256: String) throws -> [String: Any] {
+    try require(expectedSHA256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+                "reviewed receipt SHA-256 is malformed")
+    let url = URL(fileURLWithPath: try lexicalPath(path))
+    try ensureNoSymlinkChain(url, mustExist: true, outsideGit: true)
+    let before = try fileIdentity(url)
+    try require((before[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() &&
+                (before[.type] as? FileAttributeType) == .typeRegular &&
+                ((before[.size] as? NSNumber)?.intValue ?? 65537) <= 65536,
+                "reviewed receipt must be a bounded current-user regular file")
+    let data = try Data(contentsOf: url, options: .mappedIfSafe)
+    let after = try fileIdentity(url)
+    try require(sameFileIdentity(before, after) && data.count > 0 && data.count <= 65536,
+                "reviewed receipt changed or exceeded its bound")
+    let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    try require(digest == expectedSHA256, "reviewed receipt SHA-256 mismatch")
+    guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        throw LifecycleFailure(phase: phase, message: "reviewed receipt must be a JSON object")
+    }
+    return result
+}
+
+func originalUnknownOpenReceiptIsExact(_ receipt: [String: Any], pid: pid_t, bundleID: String) -> Bool {
+    let expectedKeys: Set<String> = [
+        "actions", "backup_receipt", "error", "format", "manual_inspection_required",
+        "phase", "read_only", "source_backup", "status", "target"
+    ]
+    guard Set(receipt.keys) == expectedKeys,
+          receipt["format"] as? String == "codex-devtools-live-set-open-v1",
+          receipt["status"] as? String == "stopped",
+          receipt["phase"] as? String == "verify-opened-existing-set",
+          receipt["read_only"] as? Bool == false,
+          receipt["manual_inspection_required"] as? Bool == true,
+          let error = receipt["error"] as? String,
+          !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+          receipt["backup_receipt"] is NSNull,
+          receipt["source_backup"] is NSNull,
+          let target = receipt["target"] as? [String: Any],
+          Set(target.keys) == ["pid", "bundle_identifier"],
+          (target["pid"] as? NSNumber)?.intValue == Int(pid),
+          target["bundle_identifier"] as? String == bundleID,
+          let actions = receipt["actions"] as? [String: String],
+          Set(actions.keys) == Set(["focus", "menu_navigation", "save_as_menu", "save", "quit", "open"]) else {
+        return false
+    }
+    return actions["focus"] == "verified" && actions["menu_navigation"] == "not_attempted" &&
+        actions["save_as_menu"] == "not_attempted" && actions["save"] == "not_attempted" &&
+        actions["quit"] == "not_attempted" && actions["open"] == "outcome_unknown"
+}
+
+func fileMenuCancelPreflightReceiptIsExact(
+    _ receipt: [String: Any], options: Options, source: URL, destination: URL,
+    sourcePin: [String: Any], destinationPin: [String: Any], originalReceiptSHA256: String,
+    marker: URL
+) -> Bool {
+    let expectedKeys: Set<String> = [
+        "actions", "attempt_marker", "blocking_windows", "destination_file", "destination_set_url",
+        "file_menu", "focused_window_matches_source", "format", "open_initiated_by_helper",
+        "original_open_receipt_sha256", "pending_destination_binding_pre_action", "phase",
+        "read_only", "selected_menu_count", "source_file", "source_set_url", "source_transport",
+        "status", "target"
+    ]
+    guard Set(receipt.keys) == expectedKeys,
+          receipt["format"] as? String == "codex-devtools-live-set-open-v1",
+          receipt["status"] as? String == "ready",
+          receipt["phase"] as? String == "file-menu-cancel-preflight",
+          receipt["read_only"] as? Bool == true,
+          let target = receipt["target"] as? [String: Any],
+          Set(target.keys) == ["pid", "bundle_identifier", "process_generation"],
+          (target["pid"] as? NSNumber)?.intValue == Int(options.pid),
+          target["bundle_identifier"] as? String == options.bundleID,
+          (target["process_generation"] as? NSNumber)?.int64Value == options.expectedGeneration,
+          receipt["source_set_url"] as? String == source.absoluteString,
+          receipt["destination_set_url"] as? String == destination.absoluteString,
+          let observedSource = receipt["source_file"] as? [String: Any], samePin(observedSource, sourcePin),
+          let observedDestination = receipt["destination_file"] as? [String: Any], samePin(observedDestination, destinationPin),
+          receipt["original_open_receipt_sha256"] as? String == originalReceiptSHA256,
+          receipt["pending_destination_binding_pre_action"] as? String == "unverified",
+          receipt["open_initiated_by_helper"] as? Bool == false,
+          receipt["attempt_marker"] as? String == marker.path,
+          receipt["focused_window_matches_source"] as? Bool == true,
+          (receipt["blocking_windows"] as? [Any])?.isEmpty == true,
+          (receipt["selected_menu_count"] as? NSNumber)?.intValue == 1,
+          let transport = receipt["source_transport"] as? [String: Int],
+          transport == ["play": 0, "link": 0, "arrangement_record": 0, "session_record": 0],
+          let menu = receipt["file_menu"] as? [String: Any],
+          Set(menu.keys) == ["actions", "cancel_action", "enabled", "role", "selected", "title"],
+          menu["role"] as? String == "AXMenuBarItem", menu["title"] as? String == "File",
+          menu["selected"] as? Bool == true, menu["enabled"] as? Bool == true,
+          menu["cancel_action"] as? Bool == true,
+          menu["actions"] as? [String] == [kAXCancelAction as String],
+          let actions = receipt["actions"] as? [String: String],
+          actions == ["focus": "verified", "file_menu_cancel": "not_attempted", "open": "outcome_unknown"] else {
+        return false
+    }
+    return true
+}
+
+func exactFileMenuSnapshot(_ app: AXUIElement) throws -> (AXUIElement, [String: Any], Int) {
+    let menuBar = try ax(app, kAXMenuBarAttribute as String) as! AXUIElement
+    let top = try children(menuBar)
+    let menuItems = try top.filter { try role($0) == (kAXMenuBarItemRole as String) }
+    let titles = try menuItems.map { try stringAttribute($0, kAXTitleAttribute as String) }
+    let fileMenus = zip(menuItems, titles).filter { $0.1 == "File" }.map { $0.0 }
+    try require(fileMenus.count == 1, "exact File AXMenuBarItem is absent or ambiguous")
+    let selectionValues = try menuItems.map { item -> Bool in
+        guard let number = try ax(item, kAXSelectedAttribute as String) as? NSNumber else {
+            throw LifecycleFailure(phase: phase, message: "top-level menu selected state is not boolean")
+        }
+        return number.boolValue
+    }
+    let selected = menuItems.enumerated().filter { selectionValues[$0.offset] }.map { $0.element }
+    let fileMenu = fileMenus[0]
+    guard let fileMenuIndex = menuItems.firstIndex(where: { CFEqual($0, fileMenu) }) else {
+        throw LifecycleFailure(phase: phase, message: "File menu was lost while reading its selected state")
+    }
+    let actions = try actionNames(fileMenu)
+    let selectedValue = selectionValues[fileMenuIndex]
+    guard let enabledValue = try ax(fileMenu, kAXEnabledAttribute as String) as? NSNumber else {
+        throw LifecycleFailure(phase: phase, message: "File menu enabled state is not boolean")
+    }
+    let snapshot: [String: Any] = [
+        "role": try role(fileMenu), "title": titles[fileMenuIndex],
+        "selected": selectedValue,
+        "enabled": enabledValue.boolValue,
+        "actions": actions.filter { $0 == (kAXCancelAction as String) },
+        "cancel_action": actions.contains(kAXCancelAction as String)
+    ]
+    return (fileMenu, snapshot, selected.count)
+}
+
+func createFileMenuCancelAttemptMarker(_ marker: URL, options: Options, receiptSHA256: String,
+                                       preflightSHA256: String, sourcePin: [String: Any],
+                                       destinationPin: [String: Any]) throws {
+    try ensureNoSymlinkChain(marker, mustExist: false, outsideGit: true)
+    try requireAbsentLeaf(marker.path, "one-use File-menu cancellation marker already exists; never retry")
+    let directory = try fileIdentity(marker.deletingLastPathComponent())
+    try require((directory[.type] as? FileAttributeType) == .typeDirectory &&
+                (directory[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() &&
+                ((directory[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0,
+                "one-use cancellation marker directory must be private and owned")
+    let value: [String: Any] = [
+        "format": "codex-devtools-live-file-menu-cancel-attempt-v1",
+        "pid": options.pid, "bundle_identifier": options.bundleID,
+        "process_generation": options.expectedGeneration!,
+        "original_open_receipt_sha256": receiptSHA256,
+        "preflight_receipt_sha256": preflightSHA256,
+        "source_file": sourcePin, "destination_file": destinationPin,
+        "pending_destination_binding_pre_action": "unverified",
+        "native_action": "one exact File AXCancel only; no Open/Save/Quit",
+        "attempt_admitted_at_utc": ISO8601DateFormatter().string(from: Date())
+    ]
+    let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .prettyPrinted])
+    let fd = Darwin.open(marker.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+    if fd >= 0 { attemptMarkerCreated = true }
+    try require(fd >= 0, "could not exclusively create the one-use cancellation marker")
+    defer { Darwin.close(fd) }
+    var written = 0
+    while written < data.count {
+        let amount = data.withUnsafeBytes { bytes in
+            Darwin.write(fd, bytes.baseAddress!.advanced(by: written), data.count - written)
+        }
+        try require(amount > 0, "could not write complete one-use cancellation marker")
+        written += amount
+    }
+    try require(fsync(fd) == 0, "could not fsync one-use cancellation marker")
+}
+
+func fileMenuCancelReceiptBase(_ options: Options) -> [String: Any] {
+    ["format": "codex-devtools-live-set-open-v1",
+     "target": ["pid": options.pid, "bundle_identifier": options.bundleID,
+                "process_generation": options.expectedGeneration as Any? ?? NSNull()],
+     "source_set_url": cancelSourceURL?.absoluteString ?? "",
+     "destination_set_url": cancelDestinationURL?.absoluteString ?? "",
+     "source_file": cancelSourcePin as Any? ?? NSNull(),
+     "destination_file": cancelDestinationPin as Any? ?? NSNull(),
+     "original_open_receipt_sha256": cancelOriginalReceiptSHA256,
+     "pending_destination_binding_pre_action": "unverified",
+     "open_initiated_by_helper": false,
+     "attempt_marker": cancelAttemptMarkerURL?.path ?? ""]
+}
+
+func stoppedFileMenuCancel(_ options: Options, error: String) -> [String: Any] {
+    var report = fileMenuCancelReceiptBase(options)
+    report["status"] = "stopped"
+    report["phase"] = phase
+    report["error"] = error
+    report["read_only"] = !options.execute
+    report["actions"] = [
+        "focus": cancelFocusVerified ? "verified" : (focusAttempted ? "outcome_unknown" : "not_attempted"),
+        "file_menu_cancel": fileMenuCancelAttempted ? "outcome_unknown" : "not_attempted",
+        "open": "outcome_unknown"
+    ]
+    report["manual_inspection_required"] = attemptMarkerCreated
+    return report
+}
+
+func runFileMenuCancelObserve(_ options: Options) throws -> [String: Any] {
+    phase = "file-menu-cancel-preflight"
+    initialPID = Int(options.pid); initialBundleID = options.bundleID
+    guard let generation = options.expectedGeneration,
+          let originalPath = options.originalOpenReceipt,
+          let originalSHA = options.originalOpenReceiptSHA256,
+          let markerPath = options.attemptMarker else {
+        throw LifecycleFailure(phase: phase, message: "exact generation, original receipt and one-use marker required")
+    }
+    cancelOriginalReceiptSHA256 = originalSHA
+    let source = try canonicalURL(options.sourceSet)
+    let destination = try canonicalURL(options.destinationSet!)
+    let marker = URL(fileURLWithPath: try lexicalPath(markerPath))
+    cancelSourceURL = source; cancelDestinationURL = destination; cancelAttemptMarkerURL = marker
+    guard let appPath = options.appPath else {
+        throw LifecycleFailure(phase: phase, message: "exact Live app path required")
+    }
+    let appURL = URL(fileURLWithPath: try lexicalPath(appPath))
+    try require(appURL.pathExtension == "app" && appURL.path == appPath &&
+                appURL.resolvingSymlinksInPath().path == appURL.path,
+                "exact canonical Live app path required")
+    let originalReceiptURL = URL(fileURLWithPath: try lexicalPath(originalPath))
+    let originalReceipt = try readPinnedJSONReceipt(originalReceiptURL.path, expectedSHA256: originalSHA)
+    try require(originalUnknownOpenReceiptIsExact(originalReceipt, pid: options.pid, bundleID: options.bundleID),
+                "receipt does not bind the exact original unknown Open attempt")
+    try require(AXIsProcessTrusted(), "Accessibility permission is not already trusted")
+    guard let process = NSRunningApplication(processIdentifier: options.pid) else {
+        throw LifecycleFailure(phase: phase, message: "exact target Live PID is unavailable")
+    }
+    try require(process.bundleIdentifier == options.bundleID, "exact PID bundle identifier mismatch")
+    try requireExpectedGeneration(process, options: options)
+    let running = NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier == options.bundleID }
+    try require(running.count == 1 && running[0].processIdentifier == options.pid,
+                "ambiguous running Live applications")
+    try require(process.bundleURL?.path == appURL.path &&
+                Bundle(url: appURL)?.bundleIdentifier == options.bundleID,
+                "running Live app identity differs from the exact app bundle")
+    let sourcePin = try setPin(source), destinationPin = try setPin(destination)
+    cancelSourcePin = sourcePin; cancelDestinationPin = destinationPin
+    try require(source != destination &&
+                !(sourcePin["device"] as? String == destinationPin["device"] as? String &&
+                  sourcePin["inode"] as? String == destinationPin["inode"] as? String),
+                "source/destination aliases are forbidden")
+    try require(sourcePin["sha256"] as? String == options.sourceSHA256 &&
+                destinationPin["sha256"] as? String == options.destinationSHA256,
+                "reviewed source/destination SHA-256 mismatch")
+    try ensureNoSymlinkChain(marker, mustExist: false, outsideGit: true)
+    try requireAbsentLeaf(marker.path, "one-use File-menu cancellation marker already exists; never retry")
+    let app = AXUIElementCreateApplication(options.pid)
+    try ensureNoDialogs(app)
+    let sourceWindow = try exactDocumentWindow(app, url: source)
+    try require(focusedWindowIs(app, sourceWindow), "exact source Set is not the focused window")
+    cancelFocusVerified = true
+    let sourceTransport = try saveCopyTransport(sourceWindow)
+    try require(sourceTransport == ["play": 0, "link": 0, "arrangement_record": 0, "session_record": 0],
+                "source transport is not stopped")
+    let (menu, menuSignature, selectedCount) = try exactFileMenuSnapshot(app)
+    try require(selectedCount == 1 && menuSignature["selected"] as? Bool == true &&
+                menuSignature["enabled"] as? Bool == true &&
+                menuSignature["cancel_action"] as? Bool == true &&
+                menuSignature["actions"] as? [String] == [kAXCancelAction as String],
+                "unique selected enabled File menu with AXCancel is not observed")
+    let evidence = FileMenuCancelPreflightEvidence(
+        exactProcess: !process.isTerminated && process.bundleIdentifier == options.bundleID,
+        expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+        currentDesktop: NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
+        exactSourceWindowFocused: focusedWindowIs(app, sourceWindow),
+        sourcePinMatches: samePin(try setPin(source), sourcePin),
+        destinationPinMatches: samePin(try setPin(destination), destinationPin),
+        transportStopped: sourceTransport.values.allSatisfy { $0 == 0 },
+        noBlockingWindows: try windows(app).allSatisfy { !isBlockingWindow($0) },
+        uniqueFileMenuCount: 1, selectedMenuCount: selectedCount,
+        fileMenuSelected: menuSignature["selected"] as? Bool == true,
+        fileMenuEnabled: menuSignature["enabled"] as? Bool == true,
+        cancelActionAvailable: menuSignature["cancel_action"] as? Bool == true)
+    try require(fileMenuCancelPreflightAllows(evidence), "File-menu cancellation preflight changed")
+
+    if !options.execute {
+        var report = fileMenuCancelReceiptBase(options)
+        report["status"] = "ready"
+        report["phase"] = "file-menu-cancel-preflight"
+        report["read_only"] = true
+        report["source_transport"] = sourceTransport
+        report["focused_window_matches_source"] = true
+        report["blocking_windows"] = []
+        report["selected_menu_count"] = selectedCount
+        report["file_menu"] = menuSignature
+        report["actions"] = ["focus": "verified", "file_menu_cancel": "not_attempted", "open": "outcome_unknown"]
+        return report
+    }
+
+    phase = "file-menu-cancel-review"
+    guard let preflightPath = options.preflightReceipt,
+          let preflightSHA = options.preflightReceiptSHA256 else {
+        throw LifecycleFailure(phase: phase, message: "execute requires reviewed preflight receipt and SHA-256")
+    }
+    let preflightURL = URL(fileURLWithPath: try lexicalPath(preflightPath))
+    let reviewedPreflight = try readPinnedJSONReceipt(preflightURL.path, expectedSHA256: preflightSHA)
+    try require(fileMenuCancelPreflightReceiptIsExact(
+        reviewedPreflight, options: options, source: source, destination: destination,
+        sourcePin: sourcePin, destinationPin: destinationPin, originalReceiptSHA256: originalSHA,
+        marker: marker), "reviewed File-menu preflight receipt differs from current evidence")
+    try requireSameProcess(process, options: options)
+    try ensureNoDialogs(app)
+    let finalSource = try exactDocumentWindow(app, url: source)
+    try require(focusedWindowIs(app, finalSource), "source focus changed before cancellation")
+    let sourceBeforeCancel = try setPin(source), destinationBeforeCancel = try setPin(destination)
+    try require(samePin(sourceBeforeCancel, sourcePin) && samePin(destinationBeforeCancel, destinationPin),
+                "source/destination pin changed before cancellation")
+    let finalTransport = try saveCopyTransport(finalSource)
+    try require(finalTransport == sourceTransport, "source transport changed before cancellation")
+    let (finalMenu, finalMenuSignature, finalSelectedCount) = try exactFileMenuSnapshot(app)
+    try require(finalSelectedCount == 1 && NSDictionary(dictionary: finalMenuSignature).isEqual(to: menuSignature) &&
+                CFEqual(finalMenu, menu), "selected File menu changed before cancellation")
+    let sourceAtAction = try setPin(source), destinationAtAction = try setPin(destination)
+    let windowsAtAction = try windows(app)
+    let actionEvidence = FileMenuCancelPreflightEvidence(
+        exactProcess: !process.isTerminated, expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+        currentDesktop: NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
+        exactSourceWindowFocused: focusedWindowIs(app, finalSource),
+        sourcePinMatches: samePin(sourceAtAction, sourcePin),
+        destinationPinMatches: samePin(destinationAtAction, destinationPin),
+        transportStopped: finalTransport.values.allSatisfy { $0 == 0 },
+        noBlockingWindows: windowsAtAction.allSatisfy { !isBlockingWindow($0) },
+        uniqueFileMenuCount: 1, selectedMenuCount: finalSelectedCount,
+        fileMenuSelected: finalMenuSignature["selected"] as? Bool == true,
+        fileMenuEnabled: finalMenuSignature["enabled"] as? Bool == true,
+        cancelActionAvailable: finalMenuSignature["cancel_action"] as? Bool == true)
+    try require(fileMenuCancelPreflightAllows(actionEvidence),
+        "File-menu cancellation conditions changed at the action boundary")
+
+    try createFileMenuCancelAttemptMarker(marker, options: options, receiptSHA256: originalSHA,
+                                           preflightSHA256: preflightSHA, sourcePin: sourcePin,
+                                           destinationPin: destinationPin)
+    phase = "file-menu-cancel-post-marker-guard"
+    try requireSameProcess(process, options: options)
+    try requireExpectedGeneration(process, options: options)
+    try ensureNoDialogs(app)
+    let postMarkerSource = try exactDocumentWindow(app, url: source)
+    try require(CFEqual(postMarkerSource, sourceWindow) && focusedWindowIs(app, postMarkerSource),
+                "source focus/window changed after marker creation")
+    let postMarkerSourcePin = try setPin(source), postMarkerDestinationPin = try setPin(destination)
+    try require(samePin(postMarkerSourcePin, sourcePin) && samePin(postMarkerDestinationPin, destinationPin),
+                "source/destination pin changed after marker creation")
+    let postMarkerTransport = try saveCopyTransportStrict(postMarkerSource)
+    try require(postMarkerTransport == sourceTransport, "source transport changed after marker creation")
+    let (postMarkerMenu, postMarkerMenuSignature, postMarkerSelectedCount) = try exactFileMenuSnapshot(app)
+    let postMarkerWindows = try windows(app)
+    var postMarkerBlockers: [AXUIElement] = []
+    for window in postMarkerWindows where try isBlockingWindowStrict(window) {
+        postMarkerBlockers.append(window)
+    }
+    let postMarkerEvidence = FileMenuCancelPreflightEvidence(
+        exactProcess: !process.isTerminated && process.bundleIdentifier == options.bundleID,
+        expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+        currentDesktop: NSWorkspace.shared.frontmostApplication?.processIdentifier == options.pid,
+        exactSourceWindowFocused: focusedWindowIs(app, postMarkerSource),
+        sourcePinMatches: samePin(postMarkerSourcePin, sourcePin),
+        destinationPinMatches: samePin(postMarkerDestinationPin, destinationPin),
+        transportStopped: postMarkerTransport.values.allSatisfy { $0 == 0 },
+        noBlockingWindows: postMarkerBlockers.isEmpty,
+        uniqueFileMenuCount: CFEqual(postMarkerMenu, menu) ? 1 : 0,
+        selectedMenuCount: postMarkerSelectedCount,
+        fileMenuSelected: postMarkerMenuSignature["selected"] as? Bool == true,
+        fileMenuEnabled: postMarkerMenuSignature["enabled"] as? Bool == true,
+        cancelActionAvailable: postMarkerMenuSignature["cancel_action"] as? Bool == true)
+    try require(fileMenuCancelPreflightAllows(postMarkerEvidence) &&
+                NSDictionary(dictionary: postMarkerMenuSignature).isEqual(to: menuSignature),
+                "File-menu cancel guards changed after one-use marker creation")
+    let (lastMenu, lastMenuSignature, lastSelectedCount) = try exactFileMenuSnapshot(app)
+    try require(CFEqual(lastMenu, menu) && lastSelectedCount == 1 &&
+                NSDictionary(dictionary: lastMenuSignature).isEqual(to: menuSignature) &&
+                focusedWindowIs(app, postMarkerSource),
+                "exact source/menu action boundary changed after marker creation")
+    try requireSameProcess(process, options: options)
+    try requireExpectedGeneration(process, options: options)
+    phase = "cancel-selected-file-menu"
+    fileMenuCancelAttempted = true
+    uiActionAttempted = true
+    AXUIElementSetMessagingTimeout(lastMenu, 2)
+    let cancelError = AXUIElementPerformAction(lastMenu, kAXCancelAction as CFString)
+    try require(cancelError == .success, "AXCancel returned failure; outcome unknown and never retry")
+    phase = "observe-original-pending-open"
+    let deadline = ProcessInfo.processInfo.systemUptime + 90
+    var stable = 0
+    while ProcessInfo.processInfo.systemUptime < deadline {
+        try requireSameProcess(process, options: options)
+        try requireExpectedGeneration(process, options: options)
+        let currentWindows: [AXUIElement]
+        do {
+            currentWindows = try windows(app)
+        } catch {
+            guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                       deadline: deadline, noObservedBlockers: true) else { throw error }
+            stable = 0
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+            continue
+        }
+        var observedBlockers: [AXUIElement] = []
+        let blockers: [AXUIElement]
+        do {
+            for window in currentWindows where try isBlockingWindowStrict(window) { observedBlockers.append(window) }
+            blockers = observedBlockers
+        } catch {
+            guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                       deadline: deadline, noObservedBlockers: observedBlockers.isEmpty) else { throw error }
+            stable = 0
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+            continue
+        }
+        try require(blockers.isEmpty, "blocking window appeared while observing original Open")
+        let (currentMenu, currentMenuSignature, selectedMenus): (AXUIElement, [String: Any], Int)
+        do {
+            (currentMenu, currentMenuSignature, selectedMenus) = try exactFileMenuSnapshot(app)
+        } catch {
+            guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                       deadline: deadline, noObservedBlockers: blockers.isEmpty) else { throw error }
+            stable = 0
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+            continue
+        }
+        try require(CFEqual(currentMenu, lastMenu) && sameFileMenuIdentity(lastMenuSignature, currentMenuSignature),
+                    "File menu identity/signature changed after AXCancel")
+        if selectedMenus == 1 && NSDictionary(dictionary: currentMenuSignature).isEqual(to: menuSignature) {
+            stable = 0
+            try require(pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
+                withinDeadline: ProcessInfo.processInfo.systemUptime < deadline,
+                exactProcess: !process.isTerminated,
+                expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+                noObservedBlockers: blockers.isEmpty, readState: .originalMenuStillSelected)),
+                "unchanged selected File menu exceeded the safe wait boundary")
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+            continue
+        }
+        try require(selectedMenus == 0 && currentMenuSignature["selected"] as? Bool == false,
+                    "a changed or additional menu remained selected after AXCancel")
+        var destinationMatches: [AXUIElement] = []
+        do {
+            for window in currentWindows {
+                guard try role(window) == (kAXWindowRole as String) else { continue }
+                guard let raw = try optionalAXThrowing(window, kAXDocumentAttribute as String) as? String else { continue }
+                if try sameSetURL(raw, expected: destination) { destinationMatches.append(window) }
+            }
+        } catch {
+            guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                       deadline: deadline, noObservedBlockers: blockers.isEmpty) else { throw error }
+            stable = 0
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+            continue
+        }
+        try require(destinationMatches.count <= 1, "destination URL became ambiguous")
+        if let observed = destinationMatches.first {
+            let destinationFocused: Bool
+            do {
+                destinationFocused = try focusedWindowIsThrowing(app, observed)
+            } catch {
+                guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                           deadline: deadline, noObservedBlockers: blockers.isEmpty) else { throw error }
+                stable = 0
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+                continue
+            }
+            try require(destinationFocused, "exact destination Set is not focused")
+            let currentDestination = try setPin(destination)
+            let currentSource = try setPin(source)
+            try require(samePin(currentSource, sourcePin) && sameOpenedDestination(destinationPin, currentDestination),
+                        "source or destination file pin changed unexpectedly")
+            let destinationTransport: [String: Int]
+            do {
+                destinationTransport = try saveCopyTransportStrict(observed)
+            } catch {
+                guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                           deadline: deadline, noObservedBlockers: blockers.isEmpty) else { throw error }
+                stable = 0
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+                continue
+            }
+            try require(destinationTransport.values.allSatisfy { $0 == 0 }, "destination transport is not stopped")
+            let successEvidence = PendingOpenSuccessEvidence(
+                withinDeadline: ProcessInfo.processInfo.systemUptime < deadline,
+                exactProcess: !process.isTerminated && process.bundleIdentifier == options.bundleID,
+                expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+                exactDestinationFocused: destinationFocused,
+                destinationPinStable: sameOpenedDestination(destinationPin, currentDestination),
+                sourcePinUnchanged: samePin(sourcePin, currentSource),
+                sourceAndDestinationTransportStopped: sourceTransport.values.allSatisfy { $0 == 0 } &&
+                    destinationTransport.values.allSatisfy { $0 == 0 },
+                noBlockingWindows: blockers.isEmpty,
+                fileMenuClosed: selectedMenus == 0)
+            try require(pendingOpenSuccessAllows(successEvidence),
+                        "original Open destination acceptance evidence is incomplete")
+            try requireSameProcess(process, options: options)
+            let destinationStillFocused: Bool
+            do {
+                destinationStillFocused = try focusedWindowIsThrowing(app, observed)
+            } catch {
+                guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                           deadline: deadline, noObservedBlockers: blockers.isEmpty) else { throw error }
+                stable = 0
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+                continue
+            }
+            try require(destinationStillFocused, "destination focus changed during verification")
+            let finalSource = try setPin(source), finalDestination = try setPin(destination)
+            try require(samePin(finalSource, sourcePin) && sameOpenedDestination(destinationPin, finalDestination),
+                        "Set bytes/identity changed during stable destination observation")
+            stable += 1
+            if stable >= 3 {
+                var finalBlockerObserved = false
+                do {
+                    try require(ProcessInfo.processInfo.systemUptime < deadline,
+                                "original Open observation deadline expired before final readback")
+                    try requireSameProcess(process, options: options)
+                    try requireExpectedGeneration(process, options: options)
+                    let finalWindows = try windows(app)
+                    var finalBlockers: [AXUIElement] = []
+                    for window in finalWindows {
+                        if try isBlockingWindowStrict(window) {
+                            finalBlockerObserved = true
+                            finalBlockers.append(window)
+                        }
+                    }
+                    try require(finalBlockers.isEmpty, "blocking window appeared before final destination acceptance")
+                    let (finalMenu, finalMenuSignature, finalSelectedMenus) = try exactFileMenuSnapshot(app)
+                    try require(CFEqual(finalMenu, lastMenu) && finalSelectedMenus == 0 &&
+                                finalMenuSignature["selected"] as? Bool == false &&
+                                sameFileMenuIdentity(lastMenuSignature, finalMenuSignature),
+                                "File menu was not closed at final destination acceptance")
+                    var finalDestinationWindows: [AXUIElement] = []
+                    for window in finalWindows {
+                        guard try role(window) == (kAXWindowRole as String) else { continue }
+                        guard let raw = try optionalAXThrowing(window, kAXDocumentAttribute as String) as? String else { continue }
+                        if try sameSetURL(raw, expected: destination) { finalDestinationWindows.append(window) }
+                    }
+                    try require(finalDestinationWindows.count == 1,
+                                "exact destination uniqueness changed before final acceptance")
+                    let finalDestinationFocused = try focusedWindowIsThrowing(app, finalDestinationWindows[0])
+                    try require(finalDestinationFocused,
+                                "exact destination focus changed before final acceptance")
+                    let finalSourcePin = try setPin(source), finalDestinationPin = try setPin(destination)
+                    try require(samePin(finalSourcePin, sourcePin) &&
+                                sameOpenedDestination(destinationPin, finalDestinationPin),
+                                "source/destination pin changed before final acceptance")
+                    let finalTransport = try saveCopyTransportStrict(finalDestinationWindows[0])
+                    try require(finalTransport.values.allSatisfy { $0 == 0 },
+                                "stopped transport readback failed before final acceptance")
+                    let finalEvidence = PendingOpenSuccessEvidence(
+                        withinDeadline: ProcessInfo.processInfo.systemUptime < deadline,
+                        exactProcess: !process.isTerminated && process.bundleIdentifier == options.bundleID,
+                        expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+                        exactDestinationFocused: finalDestinationFocused,
+                        destinationPinStable: sameOpenedDestination(destinationPin, finalDestinationPin),
+                        sourcePinUnchanged: samePin(sourcePin, finalSourcePin),
+                        sourceAndDestinationTransportStopped: sourceTransport.values.allSatisfy { $0 == 0 } &&
+                            finalTransport.values.allSatisfy { $0 == 0 },
+                        noBlockingWindows: finalBlockers.isEmpty,
+                        fileMenuClosed: finalSelectedMenus == 0)
+                    try require(pendingOpenSuccessAllows(finalEvidence),
+                                "final original Open acceptance evidence is incomplete")
+                    try requireSameProcess(process, options: options)
+                    try requireExpectedGeneration(process, options: options)
+                    try require(finalTransport.values.allSatisfy { $0 == 0 } &&
+                                ProcessInfo.processInfo.systemUptime < deadline,
+                                "deadline or stopped readback expired before success receipt")
+                    var report = fileMenuCancelReceiptBase(options)
+                    report["status"] = "original_open_observed"
+                    report["phase"] = "observe-original-pending-open"
+                    report["read_only"] = false
+                    report["same_process"] = true
+                    report["source_file_after"] = finalSourcePin
+                    report["destination_file_before"] = destinationPin
+                    report["destination_file_after"] = finalDestinationPin
+                    report["destination_metadata_delta"] = samePin(destinationPin, finalDestinationPin) ? [] : ["ctime"]
+                    report["transport_before"] = sourceTransport
+                    report["transport_after"] = finalTransport
+                    report["stable_destination_observations"] = stable
+                    report["file_menu_closed"] = true
+                    report["actions"] = ["focus": "verified", "file_menu_cancel": "AXCancel_succeeded", "open": "exact_destination_observed"]
+                    report["manual_inspection_required"] = false
+                    return report
+                } catch {
+                    guard pendingOpenBlockerScanAllowsWait(PendingOpenBlockerScanFailureEvidence(
+                        transientUnavailable: isTransientPostCancelAXReadFailure(error),
+                        blockerAlreadyObserved: finalBlockerObserved)) else { throw error }
+                    stable = 0
+                    try require(pendingOpenPostCancelWaitAllows(PendingOpenPostCancelWaitEvidence(
+                        withinDeadline: ProcessInfo.processInfo.systemUptime < deadline,
+                        exactProcess: !process.isTerminated,
+                        expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+                        noObservedBlockers: true, readState: .transientUnavailable)),
+                        "transient final AX read exceeded the safe wait boundary")
+                    RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+                    continue
+                }
+            }
+        } else {
+            stable = 0
+            var sourceMatches: [AXUIElement] = []
+            do {
+                for window in currentWindows {
+                    guard try role(window) == (kAXWindowRole as String) else { continue }
+                    guard let raw = try optionalAXThrowing(window, kAXDocumentAttribute as String) as? String else { continue }
+                    if try sameSetURL(raw, expected: source) { sourceMatches.append(window) }
+                }
+            } catch {
+                guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                           deadline: deadline, noObservedBlockers: blockers.isEmpty) else { throw error }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+                continue
+            }
+            try require(sourceMatches.count == 1, "source window lost while pending Open remains unresolved")
+            let currentSourceWindow = sourceMatches[0]
+            let sourceFocused: Bool
+            do {
+                sourceFocused = try focusedWindowIsThrowing(app, currentSourceWindow)
+            } catch {
+                guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                           deadline: deadline, noObservedBlockers: blockers.isEmpty) else { throw error }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+                continue
+            }
+            try require(sourceFocused, "source window lost focus while pending Open remains unresolved")
+            let sourceTransportNow: [String: Int]
+            do {
+                sourceTransportNow = try saveCopyTransportStrict(currentSourceWindow)
+            } catch {
+                guard canWaitAfterTransientPostCancelRead(error, process: process, generation: generation,
+                                                           deadline: deadline, noObservedBlockers: blockers.isEmpty) else { throw error }
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+                continue
+            }
+            let waitEvidence = PendingOpenWaitEvidence(
+                exactProcess: !process.isTerminated, expectedGeneration: processGenerationValue(process.launchDate ?? .distantPast) == generation,
+                noBlockingWindows: blockers.isEmpty, onlyOwnedSourceWindow: currentWindows.count == 1 && CFEqual(currentWindows[0], currentSourceWindow),
+                sourcePinMatches: samePin(try setPin(source), sourcePin),
+                sourceTransportStopped: sourceTransportNow.values.allSatisfy { $0 == 0 }, fileMenuClosed: selectedMenus == 0)
+            try require(pendingOpenWaitAllows(waitEvidence), "unsafe state while waiting for original Open")
+        }
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+    }
+    throw LifecycleFailure(phase: phase, message: "original pending Open outcome unknown; exact destination was not stable before timeout; inspect and never retry")
 }
 
 func requireSameProcess(_ process: NSRunningApplication, options: Options) throws {
@@ -2044,15 +2911,20 @@ if options.openExisting {
     do {
         let report = try options.reconcilePendingOpen
             ? runReconcilePendingOpen(options)
-            : runOpenExisting(options)
+            : (options.cancelSelectedFileMenu ? try runFileMenuCancelObserve(options) : try runOpenExisting(options))
         let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
         print(String(data: data, encoding: .utf8) ?? "{}")
     } catch let error as LifecycleFailure {
-        let report = stoppedOpen(options, error: error.message)
+        let report = options.cancelSelectedFileMenu
+            ? stoppedFileMenuCancel(options, error: error.message)
+            : stoppedOpen(options, error: error.message)
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { print(String(data: data, encoding: .utf8) ?? "{}") }
         exit(1)
     } catch {
-        let report = stoppedOpen(options, error: "existing-Set operation unavailable or uncertain: " + String(describing: error))
+        let message = "existing-Set operation unavailable or uncertain: " + String(describing: error)
+        let report = options.cancelSelectedFileMenu
+            ? stoppedFileMenuCancel(options, error: message)
+            : stoppedOpen(options, error: message)
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { print(String(data: data, encoding: .utf8) ?? "{}") }
         exit(1)
     }

@@ -329,7 +329,26 @@ def build_parser() -> argparse.ArgumentParser:
     set_open.add_argument(
         "--expected-generation",
         type=int,
-        help="Live process generation from a fresh read-only inspection; required for dialog reconciliation",
+        help="Live process generation from a fresh read-only inspection; required for dialog reconciliation or exact File-menu cancellation",
+    )
+    set_open.add_argument(
+        "--cancel-selected-file-menu",
+        action="store_true",
+        help="cancel exactly one freshly observed selected File menu, then observe only the already-issued Open",
+    )
+    set_open.add_argument(
+        "--observe-original-pending-open",
+        action="store_true",
+        help="required with --cancel-selected-file-menu; never issues or retries Open",
+    )
+    set_open.add_argument("--original-open-receipt", type=Path)
+    set_open.add_argument("--original-open-receipt-sha256")
+    set_open.add_argument("--preflight-receipt", type=Path)
+    set_open.add_argument("--preflight-receipt-sha256")
+    set_open.add_argument(
+        "--attempt-marker",
+        type=Path,
+        help="exclusive private path consumed before the single AXCancel; an existing marker refuses retry",
     )
     set_open.add_argument("--execute", action="store_true")
     save_as = ax_sub.add_parser(
@@ -797,9 +816,62 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(
                     "--reconcile-pending-open requires --expected-generation"
                 )
-            if not args.reconcile_pending_open and args.expected_generation is not None:
+            cancel_mode = (
+                args.cancel_selected_file_menu or args.observe_original_pending_open
+            )
+            if cancel_mode and not (
+                args.cancel_selected_file_menu
+                and args.observe_original_pending_open
+                and args.expected_generation is not None
+                and args.original_open_receipt is not None
+                and args.original_open_receipt_sha256 is not None
+                and args.attempt_marker is not None
+            ):
                 raise ValueError(
-                    "--expected-generation requires --reconcile-pending-open"
+                    "File-menu cancellation requires both mode flags, generation, exact original receipt/hash, and one-use marker"
+                )
+            if (
+                args.execute
+                and cancel_mode
+                and (
+                    args.preflight_receipt is None
+                    or args.preflight_receipt_sha256 is None
+                )
+            ):
+                raise ValueError(
+                    "File-menu cancellation execute requires reviewed preflight receipt/hash"
+                )
+            if (
+                not args.execute
+                and cancel_mode
+                and (
+                    args.preflight_receipt is not None
+                    or args.preflight_receipt_sha256 is not None
+                )
+            ):
+                raise ValueError(
+                    "preflight receipt/hash are execute-only for File-menu cancellation"
+                )
+            if not cancel_mode and any(
+                value is not None
+                for value in (
+                    args.original_open_receipt,
+                    args.original_open_receipt_sha256,
+                    args.preflight_receipt,
+                    args.preflight_receipt_sha256,
+                    args.attempt_marker,
+                )
+            ):
+                raise ValueError(
+                    "File-menu cancellation inputs require both explicit mode flags"
+                )
+            if (
+                not args.reconcile_pending_open
+                and not cancel_mode
+                and args.expected_generation is not None
+            ):
+                raise ValueError(
+                    "--expected-generation requires a supported guarded Set-open mode"
                 )
             result = run_set_open(
                 args.pid,
@@ -813,6 +885,13 @@ def main(argv: list[str] | None = None) -> int:
                 backup_root=args.backup_root,
                 reconcile_pending_open=args.reconcile_pending_open,
                 expected_generation=args.expected_generation,
+                cancel_selected_file_menu=args.cancel_selected_file_menu,
+                observe_original_pending_open=args.observe_original_pending_open,
+                original_open_receipt=args.original_open_receipt,
+                original_open_receipt_sha256=args.original_open_receipt_sha256,
+                preflight_receipt=args.preflight_receipt,
+                preflight_receipt_sha256=args.preflight_receipt_sha256,
+                attempt_marker=args.attempt_marker,
                 execute=args.execute,
             )
             _json_out(result)
