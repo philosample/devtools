@@ -125,3 +125,16 @@ For native CUA sessions, the explicit app-handle [Live Set Save As helper](docs/
 The separate live-set-open `--reconcile-pending-open` mode requires a fresh process generation and an already-open exact owned Save Changes dialog. It saves once from the exact dialog and observes the original pending Open resolving to a pinned destination; it does not issue another Open. The pending destination cannot be proven from the dialog before Save, and any mismatch or unknown result requires manual inspection with no retry. See [Guarded same-process Set open](docs/LIVE-SET-OPEN.md).
 
 `ax live-transport` inspects one exact Set by default and offers explicit bounded Play or Stop via native AX. Play is limited to 1–15 seconds, requires all 21 MIDI Output Sync controls off, and launches an independent helper that attempts Stop at a monotonic deadline. Its `focus-window` action uses a fresh AX snapshot and a hash-pinned preflight receipt to activate and raise one exact Live-owned window without opening or closing windows. Neither inspect, focus, nor this source/tooling implementation establishes MIDI delivery or hardware behavior. See [Guarded Live transport control](docs/LIVE-TRANSPORT-CONTROL.md).
+
+## RustDesk macOS setup
+
+The optional, standalone [RustDesk all-in-one installer](scripts/rustdesk-all-in-one-macos.sh) prepares an Apple Silicon or Intel Mac for RustDesk client/unattended access, including Colima/Docker verification, helper/Login Item checks, an opt-in AC idle-sleep setting, and a JSON readiness report. The same script can deploy self-hosted RustDesk OSS signaling and relay services on an always-on Mac mini.
+
+```sh
+./scripts/rustdesk-all-in-one-macos.sh setup --install-service --client-autostart --prevent-sleep
+./scripts/rustdesk-all-in-one-macos.sh readiness
+# On the server Mac mini:
+./scripts/rustdesk-all-in-one-macos.sh server --host YOUR_DDNS_HOST --autostart
+```
+
+macOS privacy approvals, unattended password configuration, router forwarding and real remote-session verification require user action. See [docs/RUSTDESK.md](docs/RUSTDESK.md) for client/server setup, security, validation, backup and recovery limitations.
