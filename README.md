@@ -80,11 +80,15 @@ static source evidence, not native compilation or window-opening proof. See
 
 The tools accept raw `mx@c` archives, AMXD files using the observed `ampf` + fixed-size device-tag/`meta` + `ptch` wrapper layout, and plain Max JSON patchers. The observed four-byte device tags are `aaaa` (audio), `iiii` (instrument), and `mmmm` (MIDI); other tags and wrapper variants are reported as unsupported. Encrypted `ciph` payloads are also unsupported. The AMXD metadata value is preserved as opaque wrapper metadata. `max inspect` reports wrapper parsing and graph validity separately; graph validity covers only the parsed JSON structure and ports. The parser bounds-checks archive headers, directory records, offsets, and payload lengths. Archive paths must be single safe filenames and duplicate names are rejected.
 
-Run the standard-library regression suite from this directory:
+Run the regression suite with **pytest** (the runtime CLI remains standard-library-only; pytest is an opt-in development dependency):
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-test.txt
+.venv/bin/python -m pytest -q
 ```
+
+Existing `unittest.TestCase` tests run unchanged under pytest. For repository Git hooks, install the pinned Ruff/Lefthook tools with `python3 -m codex_devtools.quality bootstrap`, inspect `core.hooksPath` and existing hooks, then run `lefthook install`. Pre-commit checks staged Python files with Ruff; pre-push runs pytest using `.venv/bin/python`. See [test and hook setup](docs/QUALITY.md).
 
 ## Local invariants
 
