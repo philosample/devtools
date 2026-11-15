@@ -12,3 +12,6 @@
 - Deployment manifests contain logical relative paths only. Keep machine-specific source/destination roots, plans, receipts, and backups outside Git; never use actual user install paths as fixtures.
 
 - Python style, Ruff and Lefthook versions follow the shared global agent instructions; project-specific checks above remain separate.
+
+- The canonical development test runner is pytest (`.venv/bin/python -m pytest -q`); existing `unittest.TestCase` tests remain supported. Runtime CLI code must stay stdlib-only. Do not add pytest as a runtime dependency.
+- Lefthook pre-commit runs pinned Ruff checks on staged Python files, and pre-push runs pytest. Before installing hook shims, inspect `core.hooksPath` and existing hooks; never overwrite custom hooks without review.
