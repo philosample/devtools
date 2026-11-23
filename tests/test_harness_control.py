@@ -693,6 +693,9 @@ process.on('SIGTERM',()=>process.exit(0));
 
     def test_private_root_and_git_location_refused(self):
         self.root.mkdir(mode=0o755)
+        # mkdir's requested mode is reduced by the caller's umask; force a
+        # deliberately insecure root so this check also works under umask 077.
+        os.chmod(self.root, 0o755)
         with self.assertRaisesRegex(RuntimeError, "private"):
             self.launch()
         os.chmod(self.root, 0o700)
