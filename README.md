@@ -80,11 +80,15 @@ static source evidence, not native compilation or window-opening proof. See
 
 The tools accept raw `mx@c` archives, AMXD files using the observed `ampf` + fixed-size device-tag/`meta` + `ptch` wrapper layout, and plain Max JSON patchers. The observed four-byte device tags are `aaaa` (audio), `iiii` (instrument), and `mmmm` (MIDI); other tags and wrapper variants are reported as unsupported. Encrypted `ciph` payloads are also unsupported. The AMXD metadata value is preserved as opaque wrapper metadata. `max inspect` reports wrapper parsing and graph validity separately; graph validity covers only the parsed JSON structure and ports. The parser bounds-checks archive headers, directory records, offsets, and payload lengths. Archive paths must be single safe filenames and duplicate names are rejected.
 
-Run the standard-library regression suite from this directory:
+Run the regression suite with **pytest** (the runtime CLI remains standard-library-only; pytest is an opt-in development dependency):
 
 ```sh
-python3 -m unittest discover -s tests -v
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-test.txt
+.venv/bin/python -m pytest -q
 ```
+
+Existing `unittest.TestCase` tests run unchanged under pytest. For repository Git hooks, install the pinned Ruff/Lefthook tools with `python3 -m codex_devtools.quality bootstrap`, inspect `core.hooksPath` and existing hooks, then run `lefthook install`. Pre-commit checks staged Python files with Ruff; pre-push runs pytest using `.venv/bin/python`. See [test and hook setup](docs/QUALITY.md).
 
 ## Local invariants
 
@@ -125,3 +129,18 @@ For native CUA sessions, the explicit app-handle [Live Set Save As helper](docs/
 The separate live-set-open `--reconcile-pending-open` mode requires a fresh process generation and an already-open exact owned Save Changes dialog. It saves once from the exact dialog and observes the original pending Open resolving to a pinned destination; it does not issue another Open. The pending destination cannot be proven from the dialog before Save, and any mismatch or unknown result requires manual inspection with no retry. See [Guarded same-process Set open](docs/LIVE-SET-OPEN.md).
 
 `ax live-transport` inspects one exact Set by default and offers explicit bounded Play or Stop via native AX. Play is limited to 1–15 seconds, requires all 21 MIDI Output Sync controls off, and launches an independent helper that attempts Stop at a monotonic deadline. Its `focus-window` action uses a fresh AX snapshot and a hash-pinned preflight receipt to activate and raise one exact Live-owned window without opening or closing windows. Neither inspect, focus, nor this source/tooling implementation establishes MIDI delivery or hardware behavior. See [Guarded Live transport control](docs/LIVE-TRANSPORT-CONTROL.md).
+
+## RustDesk macOS setup
+
+The optional, standalone [RustDesk all-in-one installer](scripts/rustdesk-all-in-one-macos.sh) prepares an Apple Silicon or Intel Mac for RustDesk client/unattended access, including Colima/Docker verification, helper/Login Item checks, an opt-in AC idle-sleep setting, and a JSON readiness report. The same script can deploy self-hosted RustDesk OSS signaling and relay services on an always-on Mac mini. The focused [macOS client helper](scripts/rustdesk-client-macos.sh) installs or updates RustDesk and imports an OSS server address and public key.
+
+For server deployment, the installer enables Colima's experimental gRPC port forwarder because RustDesk ID registration requires UDP; it protects unrelated running Colima containers from an automatic restart.
+
+```sh
+./scripts/rustdesk-all-in-one-macos.sh setup --install-service --client-autostart --prevent-sleep
+./scripts/rustdesk-all-in-one-macos.sh readiness
+# On the server Mac mini:
+./scripts/rustdesk-all-in-one-macos.sh server --host YOUR_DDNS_HOST --autostart
+```
+
+macOS privacy approvals, unattended password configuration, router forwarding and real remote-session verification require user action. See [docs/RUSTDESK.md](docs/RUSTDESK.md) for client/server setup, security, validation, backup and recovery limitations.

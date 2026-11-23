@@ -1,0 +1,2 @@
+# Test runner only; the codex_devtools CLI remains stdlib-only.
+pytest>=8,<10

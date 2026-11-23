@@ -20,6 +20,35 @@ python3 -m codex_devtools.quality remove
 
 Install the hooks for a repository only after its tooling config has been reviewed and merged. First inspect `git config --show-origin --get core.hooksPath`, `git rev-parse --git-path hooks`, and existing non-sample hook files. `lefthook install` writes into the selected hooks directory; do not replace a custom hook or a shared hook path. `lefthook uninstall` removes Lefthook's installed shims. The hooks are separate from the tracked config and may be installed or removed per local repository.
 
+## Pytest regression runner and Lefthook pre-push
+
+The CLI itself stays standard-library-only. Its **development test runner** is pytest; the existing `unittest.TestCase` classes are supported directly by pytest and do not require wholesale conversion.
+
+Create the opt-in test environment (from the repository root):
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-test.txt
+.venv/bin/python -m pytest -q
+```
+
+Pytest discovery is configured in `pytest.ini` and excludes the separate Node `.test.mjs` checks.
+
+After reviewing `core.hooksPath` and any existing non-sample hooks as described below, install tracked Lefthook hooks with:
+
+```sh
+python3 -m codex_devtools.quality bootstrap
+python3 -m codex_devtools.quality doctor
+git config --show-origin --get core.hooksPath || true
+git rev-parse --git-path hooks
+lefthook install
+lefthook run pre-push
+```
+
+Lefthook **pre-commit** remains Ruff check + format check on staged Python files. Its **pre-push** hook runs the entire pytest suite with `.venv/bin/python` and stops the push when the test environment is missing or tests fail. The hook does not install dependencies automatically or modify tracked files. Hooks are installed into the active Git hooks path for this checkout/worktree, not remotely by changes to `lefthook.yml`. Do not overwrite or displace other Git hooks without reviewing them first.
+
+A push to a Git remote does not prove that these checks passed on another machine; review local tool and test output before reporting that status.
+
 ## Run checks
 
 After staging Python changes, run the same checks manually with `lefthook run pre-commit`. Lefthook filters staged file names and quotes paths with spaces. Its jobs read those paths from the working tree, not from the index blob. A partially staged Python file can therefore fail because of unstaged edits; the hook leaves the index and working tree untouched.
