@@ -1,6 +1,6 @@
 # RustDesk macOS setup (client and self-hosted Mac mini)
 
-The standalone server installer is [`scripts/rustdesk-all-in-one-macos.sh`](../scripts/rustdesk-all-in-one-macos.sh). The focused [`scripts/rustdesk-client-macos.sh`](../scripts/rustdesk-client-macos.sh) installs or updates the native RustDesk client and saves the address and public key for a RustDesk OSS server. The all-in-one script deploys the free OSS `hbbs` and `hbbr` containers and configures the Mac mini's native RustDesk client to use that server.
+The standalone server installer is [`scripts/rustdesk-all-in-one-macos.sh`](../scripts/rustdesk-all-in-one-macos.sh). The focused [`scripts/rustdesk-client-macos.sh`](../scripts/rustdesk-client-macos.sh) installs or updates the native RustDesk app when safe, opens it, and verifies saved server settings read-only. RustDesk Network settings are entered by the user in the app; outbound connections do not require a background service. The all-in-one script deploys the free OSS `hbbs` and `hbbr` containers and configures the Mac mini's native RustDesk client to use that server.
 
 The CLI is independent of `python3 -m codex_devtools` and is **opt-in**. Do not run with `sudo`; individual operations such as `--prevent-sleep` prompt for authorization.
 
@@ -28,22 +28,56 @@ Complete/verify these protected steps manually in the RustDesk application and m
 
 1. In **System Settings → Privacy & Security**, grant RustDesk Accessibility and Screen & System Audio Recording; Input Monitoring only if required.
 2. In RustDesk **Settings → Security**, configure a strong permanent unattended-access password and verify the installed helper/service.
-3. When the private server is available, in **Settings → Network → ID/Relay Server**, enter its hostname/IP and the server's `id_ed25519.pub` public key. Leave relay and API fields empty initially for the OSS setup. The focused client helper saves these values through RustDesk's installed service and verifies them; macOS may request administrator authorization.
+3. When the private server is available, in **Settings → Network → ID/Relay Server**, enter its hostname/IP and the server's `id_ed25519.pub` public key. Leave relay and API fields empty initially for the OSS setup. The focused client helper no longer writes these values by CLI. Save them through RustDesk's Network settings and use the helper's read-only `verify` command to check the local config; test an actual connection to confirm.
 4. Verify control from a second computer over a separate network, then after logout and reboot. FileVault pre-boot unlock is not bypassed.
 
-If only client installation is required, run:
+For a **client connecting out to another machine**, use the focused helper.
+It does **not** need Docker/Colima, a background service, admin privileges, or a
+permanent unattended-access password:
 
 ```sh
-./scripts/rustdesk-all-in-one-macos.sh client --install-service --client-autostart
+./scripts/rustdesk-client-macos.sh setup --host 192.168.1.167 --key 'PASTE_PUBLIC_KEY_FROM_SERVER'
 ```
 
-For a fresh client or to point an existing client at the home server, use the focused helper:
+Read the public key from `id_ed25519.pub` on the Mac mini and replace the
+placeholder; **never** copy or share the private `id_ed25519` file. On an
+already-running client, the script preserves the application instead of
+upgrading it. It opens RustDesk, checks the current user's TOML settings without
+modifying them, and prints any missing setup steps.
+
+In the RustDesk app, open **Settings → Network → Unlock Network Settings**,
+enter the ID Server and public Key, leave Relay and API blank for this OSS
+deployment, then save. To verify saved values without altering them:
 
 ```sh
-./scripts/rustdesk-client-macos.sh setup --host 192.168.1.167 --key 'PASTE_PUBLIC_KEY_FROM_SERVER' --install-service --client-autostart
+./scripts/rustdesk-client-macos.sh verify --host 192.168.1.167 --key 'PASTE_PUBLIC_KEY_FROM_SERVER'
 ```
 
-Read the public key from `id_ed25519.pub` on the Mac mini and substitute that value for the placeholder. The server's key file is not normally available on a new client. The helper backs up existing `RustDesk2.toml` settings, repairs ownership left by earlier root-run imports, requests service installation, and waits until the logged-in user's RustDesk service and app are running before saving server settings as that user. It verifies that the resulting config belongs to the logged-in user. Quit RustDesk first. The server's **public** `id_ed25519.pub` value is safe to distribute to clients; never copy `id_ed25519`. macOS privacy permissions and any unattended-access password remain user-controlled steps. This LAN address works for clients on the home network. For use away from home, use a VPN or plan external access separately.
+Verification requires Python 3.11+ for its standard-library TOML parser. It
+only compares local `RustDesk2.toml` values, not whether the service or
+network connection works; connect to the Mac mini's actual RustDesk ID for
+acceptance. The `setup` command can successfully prepare the app while
+marking Network configuration **PENDING**; it does not claim the GUI values
+were saved.
+
+For **incoming unattended access into this Mac**, additionally install the
+RustDesk background service through **Settings → General → Service Control →
+Install** and approve the macOS administrator prompt. The optional
+`--install-service` flag **requires/validates** that service and exits with
+status 2 and instructions if it is not active; it does not install it itself.
+The optional `--client-autostart` flag adds a user Login Item. This separation
+is necessary because RustDesk 1.5.3's macOS `--install-service` CLI is only a
+check for existing plists, while the `--option` CLI requires an installed,
+privileged context and can silently fail. The helper deliberately avoids both
+commands and preserves existing settings.
+
+The all-in-one `client --install-service` path now also verifies an active
+service rather than treating the no-op RustDesk CLI as installation. For
+outbound-only use, omit that flag.
+
+macOS privacy permissions and the unattended-access password are still
+user-controlled steps. The home-LAN address works locally; use a suitable VPN
+to reach it from outside the home without exposing server ports.
 
 The `--prevent-sleep` option is opt-in. Inspect `pmset -g custom` before making power policy changes, particularly on laptops.
 
@@ -57,7 +91,7 @@ Keep both scripts from the repository checkout together on the Mac mini; the ser
 ./scripts/rustdesk-all-in-one-macos.sh status
 ```
 
-`server` starts the containers, installs or updates RustDesk, requests its macOS helper and Login Item, and saves this Mac's client ID server and public key settings. Complete any macOS administrator prompt. The Mac's RustDesk ID is the target ID to enter on phones and other computers; `192.168.1.167` is the server address that each client uses in Network settings.
+`server` starts the containers and prepares the native RustDesk app, but the macOS GUI must install and authorize the unattended-access service before the host setup is complete. The helper refuses to claim a working host service before that verification; configure ID Server and public Key in RustDesk's Network settings. Complete any macOS administrator prompts. The Mac's RustDesk ID is the target ID to enter on phones and other computers; `192.168.1.167` is the server address that each client uses in Network settings.
 
 RustDesk ID registration requires UDP 21116. The default Colima SSH forwarder carries TCP only, so the `server` command starts Colima with its gRPC forwarder, which carries TCP and UDP. Colima marks gRPC forwarding experimental. If Colima is already running with another forwarder, the installer restarts it only when no unrelated containers are running; if other containers are active, it reports their names and stops before interrupting them. The separate `docker` and `setup` commands preserve the current Colima forwarding mode.
 
