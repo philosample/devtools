@@ -569,20 +569,33 @@ status(){
 }
 backup(){
   need_mac; need_deploy
-  local stamp out was_running=0
+  local stamp out was_running=0 failure=''
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   mkdir -p "$BASE/backups"; chmod 700 "$BASE/backups"
-  out="$BASE/backups/rustdesk-${stamp}.tar.gz"
+  out="$BASE/backups/rustdesk-$stamp.tar.gz"
+  [[ ! -e $out ]] || die "Backup archive already exists: $out"
   if [[ -n $(compose ps --status running -q) ]]; then
     was_running=1
     log 'Stopping running RustDesk containers briefly for consistent backup'
-    compose stop
+    if ! compose stop; then
+      compose start || warn 'RustDesk restart failed after unsuccessful stop; inspect status'
+      die 'Could not stop RustDesk containers for backup'
+    fi
   fi
-  restart_backup(){ if ((was_running)); then compose start || warn 'RustDesk restart failed; inspect status'; fi; }
-  trap restart_backup EXIT
-  (cd "$BASE" && tar -czf "$out" data .env compose.yaml)
-  chmod 600 "$out"
-  restart_backup; was_running=0; trap - EXIT
+  # Explicitly handle expected failures before function-local restart state
+  # goes out of scope; an EXIT trap cannot safely refer to that local state.
+  if ! (cd "$BASE" && tar -czf "$out" data .env compose.yaml); then
+    failure='RustDesk backup archive creation failed'
+  elif ! chmod 600 "$out"; then
+    failure='RustDesk backup permissions could not be secured'
+  fi
+  if [[ -n $failure && -e $out ]]; then
+    rm -f -- "$out" || warn "Could not remove incomplete backup: $out"
+  fi
+  if ((was_running)); then
+    compose start || die 'RustDesk containers could not be restarted after backup; inspect status immediately'
+  fi
+  [[ -z $failure ]] || die "$failure; restart of previously running containers was attempted"
   log "Backup created: $out"
   warn 'Archive includes private RustDesk identity key. Encrypt and copy off the Mac mini.'
 }
