@@ -10,6 +10,9 @@ HOST=''; KEY=''; BASE="${RUSTDESK_HOME:-$HOME/Services/rustdesk}"
 INSTALL_BREW=0; AUTOSTART=0; NO_TEST=0; NO_CLIENT=0; INSTALL_SERVICE=0; CLIENT_AUTOSTART=0; PREVENT_SLEEP=0
 CPU=''; MEMORY=''; DO_UPGRADE=0
 IMAGE='rustdesk/rustdesk-server:latest'; PROJECT='rustdesk-oss'
+# Only a RustDesk app executable counts as a running client; never match this
+# installer or a similarly named shell command in readiness diagnostics.
+RUSTDESK_PROCESS_PATTERN='^/Applications/RustDesk[.]app/Contents/MacOS/RustDesk([[:space:]]|$)'
 
 log(){ printf '\n==> %s\n' "$*"; }
 warn(){ printf 'WARNING: %s\n' "$*" >&2; }
@@ -473,14 +476,14 @@ write_readiness_json(){
   report_dir="$HOME/Library/Application Support/rustdesk-setup"
   report_file="$report_dir/readiness.json"
   mkdir -p "$report_dir"
-  python3 - "$report_file" "$HOST" "$login_status" "$service_state" "$sleep_value" "$KEY" <<'PY_JSON'
+  python3 - "$report_file" "$HOST" "$login_status" "$service_state" "$sleep_value" "$KEY" "$RUSTDESK_PROCESS_PATTERN" <<'PY_JSON'
 from pathlib import Path
 import json, subprocess, sys, datetime
-path, host, login, service, sleep, key = sys.argv[1:]
+path, host, login, service, sleep, key, process_pattern = sys.argv[1:]
 def run(*args):
     return subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 app = Path('/Applications/RustDesk.app').exists()
-process = run('pgrep','-if','RustDesk.app/Contents/MacOS|rustdesk')
+process = run('pgrep','-f',process_pattern)
 report = {
   'generated_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
   'app_installed': app,
@@ -508,7 +511,7 @@ PY_JSON
 client_report(){
   log 'Local RustDesk readiness report'
   if [[ -d /Applications/RustDesk.app ]]; then echo 'PASS RustDesk app installed'; else echo 'FAIL RustDesk app missing'; fi
-  if pgrep -if 'RustDesk.app/Contents/MacOS|rustdesk' >/dev/null 2>&1; then
+  if pgrep -f "$RUSTDESK_PROCESS_PATTERN" >/dev/null 2>&1; then
     echo 'PASS RustDesk process appears active'
   else
     echo 'CHECK RustDesk process not detected'
