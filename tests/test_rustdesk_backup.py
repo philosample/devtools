@@ -66,8 +66,13 @@ class RustDeskBackupTests(unittest.TestCase):
     def run_backup(self, **flags: int) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(
-            {"RUNNING": "1", "FAIL_TAR": "0", "FAIL_CHMOD": "0",
-             "FAIL_STOP": "0", "FAIL_START": "0"}
+            {
+                "RUNNING": "1",
+                "FAIL_TAR": "0",
+                "FAIL_CHMOD": "0",
+                "FAIL_STOP": "0",
+                "FAIL_START": "0",
+            }
         )
         env.update({k: str(v) for k, v in flags.items()})
         return subprocess.run(
