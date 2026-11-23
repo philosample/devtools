@@ -38,15 +38,11 @@ class RustDeskMacClientTests(unittest.TestCase):
         self.bin_dir.mkdir()
         stubs = {
             "uname": "#!/bin/sh\nprintf 'Darwin\\n'\n",
-            "pgrep": "#!/bin/sh\n[ \"$MOCK_RUNNING\" = 1 ]\n",
-            "brew": (
-                "#!/bin/sh\n"
-                "printf 'brew %s\\n' \"$*\" >> \"$EVENTS\"\n"
-                "exit 0\n"
-            ),
+            "pgrep": '#!/bin/sh\n[ "$MOCK_RUNNING" = 1 ]\n',
+            "brew": ('#!/bin/sh\nprintf \'brew %s\\n\' "$*" >> "$EVENTS"\nexit 0\n'),
             "open": "#!/bin/sh\nprintf 'open\\n' >> \"$EVENTS\"\n",
             "osascript": "#!/bin/sh\ncat >/dev/null\n",
-            "launchctl": "#!/bin/sh\n[ \"$MOCK_SERVICE\" = 1 ]\n",
+            "launchctl": '#!/bin/sh\n[ "$MOCK_SERVICE" = 1 ]\n',
         }
         for name, script in stubs.items():
             command = self.bin_dir / name
@@ -73,9 +69,7 @@ class RustDeskMacClientTests(unittest.TestCase):
 
     def save_settings(self, *, host: str = HOST, key: str = KEY):
         self.config.write_text(
-            "[options]\n"
-            f"custom-rendezvous-server = '{host}'\n"
-            f"key = '{key}'\n"
+            f"[options]\ncustom-rendezvous-server = '{host}'\nkey = '{key}'\n"
         )
 
     def run_client(self, command: str = "setup", *options: str, **flags: str):
@@ -165,9 +159,9 @@ class RustDeskMacClientTests(unittest.TestCase):
         content = CLIENT.read_text()
         self.assertNotIn('"$BIN" --install-service', content)
         self.assertNotIn('"$BIN" --option', content)
-        self.assertNotIn('sudo -v', content)
-        self.assertNotIn('sudo chown', content)
-        self.assertNotIn('Config::set_options', content)
+        self.assertNotIn("sudo -v", content)
+        self.assertNotIn("sudo chown", content)
+        self.assertNotIn("Config::set_options", content)
 
     def test_all_in_one_rejects_missing_service_instead_of_claiming_success(self):
         source = ALL_IN_ONE.read_text()
