@@ -173,10 +173,12 @@ class RustDeskMacClientTests(unittest.TestCase):
         source = ALL_IN_ONE.read_text()
         start = source.index("\nconfigure_client_service(){") + 1
         end = source.index("\nconfigure_client_autostart(){", start)
-        function = source[start:end].replace(
+        function = source[start:end]
+        function = function.replace(
             "/Library/LaunchAgents/com.carriez.RustDesk_server.plist",
             str(self.plist),
-        ).replace(
+        )
+        function = function.replace(
             "/Library/LaunchDaemons/com.carriez.RustDesk_service.plist",
             str(self.daemon),
         )
