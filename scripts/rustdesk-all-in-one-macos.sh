@@ -406,8 +406,9 @@ configure_client_service(){
     # macOS RustDesk 1.5.3 --install-service only checks for existing plists;
     # a zero exit code does not mean the service was installed or started.
     local plist='/Library/LaunchAgents/com.carriez.RustDesk_server.plist'
+    local daemon='/Library/LaunchDaemons/com.carriez.RustDesk_service.plist'
     local label='com.carriez.RustDesk_server'
-    if [[ -f $plist ]] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+    if [[ -f $plist && -f $daemon ]] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
       log 'Verified RustDesk user background service is registered'
     else
       die 'RustDesk service is not active. In RustDesk > Settings > General > Service Control choose Install, approve macOS authorization, then rerun. Outbound-only clients can omit --install-service.'
