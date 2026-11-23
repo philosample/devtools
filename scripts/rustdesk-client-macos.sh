@@ -93,6 +93,7 @@ fi
 
 CONFIG="$HOME/Library/Preferences/com.carriez.RustDesk/RustDesk2.toml"
 SERVICE_PLIST='/Library/LaunchAgents/com.carriez.RustDesk_server.plist'
+SERVICE_DAEMON='/Library/LaunchDaemons/com.carriez.RustDesk_service.plist'
 SERVICE_LABEL='com.carriez.RustDesk_server'
 
 # RustDesk 1.5.3 on macOS: --install-service checks installation only; it does
@@ -135,7 +136,7 @@ sys.exit(1)
 PY
 }
 service_ready(){
-  [[ -f $SERVICE_PLIST ]] &&
+  [[ -f $SERVICE_PLIST && -f $SERVICE_DAEMON ]] &&
     launchctl print "gui/$(id -u)/$SERVICE_LABEL" >/dev/null 2>&1
 }
 network_steps(){
