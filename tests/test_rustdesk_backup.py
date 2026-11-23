@@ -102,8 +102,15 @@ class RustDeskBackupTests(unittest.TestCase):
         self.assertEqual(len(archives), 1)
         self.assertEqual(archives[0].stat().st_mode & 0o777, 0o600)
         with tarfile.open(archives[0]) as tf:
+            # macOS BSD tar includes AppleDouble metadata entries (._name).
+            # Keep checking the real backup payload without rejecting those.
+            payload_names = sorted(
+                name
+                for name in tf.getnames()
+                if not name.rsplit("/", 1)[-1].startswith("._")
+            )
             self.assertEqual(
-                sorted(tf.getnames()),
+                payload_names,
                 [".env", "compose.yaml", "data", "data/fake-test-only"],
             )
 
