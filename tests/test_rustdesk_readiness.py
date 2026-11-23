@@ -78,10 +78,10 @@ class RustDeskReadinessTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            report_path = (
-                home / "Library" / "Application Support" / "rustdesk-setup" / "readiness.json"
+            report_dir = home / "Library" / "Application Support" / "rustdesk-setup"
+            report = json.loads(
+                (report_dir / "readiness.json").read_text(encoding="utf-8")
             )
-            report = json.loads(report_path.read_text(encoding="utf-8"))
             observed_calls = [
                 json.loads(line)
                 for line in calls.read_text(encoding="utf-8").splitlines()
