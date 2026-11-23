@@ -57,9 +57,9 @@ class RustDeskMacClientTests(unittest.TestCase):
         # non-root EUID check because isolated CI may itself run as root.
         guard = "[[ $EUID -ne 0 ]] || die 'Run as your normal user, not with sudo'"
         self.assertIn(guard, original)
-        patched = original.replace(guard, "[[ 1 -ne 0 ]] || die 'nonroot'").replace(
-            "/Applications/RustDesk.app", str(self.app)
-        ).replace(
+        patched = original.replace(guard, "[[ 1 -ne 0 ]] || die 'nonroot'")
+        patched = patched.replace("/Applications/RustDesk.app", str(self.app))
+        patched = patched.replace(
             "/Library/LaunchAgents/com.carriez.RustDesk_server.plist",
             str(self.plist),
         )
