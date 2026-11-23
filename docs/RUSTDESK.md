@@ -43,7 +43,7 @@ For a fresh client or to point an existing client at the home server, use the fo
 ./scripts/rustdesk-client-macos.sh setup --host 192.168.1.167 --key "$(cat ~/Services/rustdesk/data/id_ed25519.pub)" --install-service --client-autostart
 ```
 
-It backs up existing `RustDesk2.toml` settings, updates only the OSS server fields through RustDesk's service, and opens RustDesk. Quit RustDesk first. The helper requests service installation and administrator authorization before saving the settings. The server's **public** `id_ed25519.pub` value is safe to distribute to clients; never copy `id_ed25519`. macOS privacy permissions and any unattended-access password remain user-controlled steps. This LAN address works for clients on the home network. For use away from home, use a VPN or plan external access separately.
+It backs up existing `RustDesk2.toml` settings, repairs ownership left by earlier root-run imports, requests service installation, and waits until the logged-in user's RustDesk service and app are running before saving server settings as that user. It verifies that the resulting config belongs to the logged-in user. Quit RustDesk first. The server's **public** `id_ed25519.pub` value is safe to distribute to clients; never copy `id_ed25519`. macOS privacy permissions and any unattended-access password remain user-controlled steps. This LAN address works for clients on the home network. For use away from home, use a VPN or plan external access separately.
 
 The `--prevent-sleep` option is opt-in. Inspect `pmset -g custom` before making power policy changes, particularly on laptops.
 

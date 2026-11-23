@@ -19,7 +19,7 @@ RustDesk macOS client setup (Apple Silicon / Intel)
   ./rustdesk-client-macos.sh help
 
 Options:
-  --install-service   Request RustDesk's macOS background helper.
+  --install-service   Install and verify RustDesk's macOS background helper.
   --client-autostart  Add RustDesk as a user Login Item.
   --skip-update       Keep the installed RustDesk app version.
 
@@ -58,7 +58,7 @@ find_brew(){
 }
 find_brew || die 'Homebrew is required; install it from brew.sh, then rerun'
 
-if [[ -e /Applications/RustDesk.app ]] && pgrep -f '^/Applications/RustDesk.app/Contents/MacOS/RustDesk$' >/dev/null 2>&1; then
+if [[ -e /Applications/RustDesk.app ]] && pgrep -f '^/Applications/RustDesk.app/Contents/MacOS/RustDesk([[:space:]]|$)' >/dev/null 2>&1; then
   die 'Quit RustDesk first so its running process cannot overwrite imported settings'
 fi
 
@@ -95,20 +95,56 @@ fi
 if ((!INSTALL_SERVICE)); then
   die 'Client setup needs RustDesk service access to save network settings; rerun with --install-service'
 fi
-log 'Requesting RustDesk service installation or repair'
-"$BIN" --install-service || die 'RustDesk service installation failed or was cancelled'
-log 'Authorizing RustDesk network settings update; macOS may request your administrator password'
+log 'Authorizing RustDesk service installation; macOS may request your administrator password'
 sudo -v
 if [[ -n $BACKUP_DIR ]]; then
   [[ ! -f $CONFIG ]] || { sudo cat "$CONFIG" > "$BACKUP_DIR/RustDesk2.toml"; chmod 600 "$BACKUP_DIR/RustDesk2.toml"; }
   [[ ! -f $LEGACY_CONFIG ]] || { sudo cat "$LEGACY_CONFIG" > "$BACKUP_DIR/RustDesk.toml"; chmod 600 "$BACKUP_DIR/RustDesk.toml"; }
   log "Saved existing RustDesk settings to $BACKUP_DIR"
 fi
-OLD_HOST=$(sudo "$BIN" --option custom-rendezvous-server)
-OLD_RELAY=$(sudo "$BIN" --option relay-server)
-OLD_API=$(sudo "$BIN" --option api-server)
-OLD_KEY=$(sudo "$BIN" --option key)
-set_option(){ sudo "$BIN" --option "$1" "$2" >/dev/null; }
+
+# Older versions of this helper ran the option CLI through sudo, which could
+# create a root-owned config. Repair that file before RustDesk's user service
+# reads it so the normal user's instance can persist its own configuration.
+if [[ -e $CONFIG ]]; then
+  sudo chown "$(id -un):$(id -gn)" "$CONFIG"
+  chmod 600 "$CONFIG"
+fi
+
+log 'Requesting RustDesk service installation or repair'
+"$BIN" --install-service || die 'RustDesk service installation failed or was cancelled'
+SERVICE_PLIST='/Library/LaunchAgents/com.carriez.RustDesk_server.plist'
+SERVICE_LABEL='com.carriez.RustDesk_server'
+USER_UID=$(id -u)
+SERVICE_READY=0
+for _ in {1..60}; do
+  if [[ -f $SERVICE_PLIST ]] && launchctl print "gui/$USER_UID/$SERVICE_LABEL" >/dev/null 2>&1; then
+    SERVICE_READY=1
+    break
+  fi
+  sleep 1
+done
+((SERVICE_READY)) || die 'RustDesk user service did not become active. Approve its macOS administrator prompt, then rerun; no client settings were changed.'
+
+log 'Starting the RustDesk app for this user'
+open -a "$APP_PATH"
+APP_READY=0
+for _ in {1..30}; do
+  if pgrep -f '^/Applications/RustDesk.app/Contents/MacOS/RustDesk([[:space:]]|$)' >/dev/null 2>&1; then
+    APP_READY=1
+    break
+  fi
+  sleep 1
+done
+((APP_READY)) || die 'RustDesk did not start for the logged-in user; no client settings were changed.'
+
+# Keep this CLI in the logged-in user's context so RustDesk uses the user's
+# service/config instead of root's fallback configuration.
+OLD_HOST=$("$BIN" --option custom-rendezvous-server)
+OLD_RELAY=$("$BIN" --option relay-server)
+OLD_API=$("$BIN" --option api-server)
+OLD_KEY=$("$BIN" --option key)
+set_option(){ "$BIN" --option "$1" "$2" >/dev/null; }
 restore_options(){
   set_option custom-rendezvous-server "$OLD_HOST"
   set_option relay-server "$OLD_RELAY"
@@ -119,11 +155,18 @@ if ! set_option custom-rendezvous-server "$HOST" || ! set_option relay-server ''
   restore_options
   die 'RustDesk could not save the server settings; previous values were restored'
 fi
-if [[ $(sudo "$BIN" --option custom-rendezvous-server) != "$HOST" || $(sudo "$BIN" --option key) != "$KEY" ]]; then
+if [[ $("$BIN" --option custom-rendezvous-server) != "$HOST" || $("$BIN" --option relay-server) != '' || $("$BIN" --option api-server) != '' || $("$BIN" --option key) != "$KEY" ]]; then
   restore_options
   die 'RustDesk did not confirm the self-hosted server settings; previous values were restored'
 fi
-sudo chown "$(id -un):$(id -gn)" "$CONFIG"
+if [[ ! -f $CONFIG ]]; then
+  restore_options
+  die 'RustDesk reported success but did not create the logged-in user config; previous values were restored where possible'
+fi
+if [[ $(stat -f '%u' "$CONFIG") != "$USER_UID" ]]; then
+  restore_options
+  die 'RustDesk config is not owned by the logged-in user; previous values were restored'
+fi
 chmod 600 "$CONFIG"
 log "Saved RustDesk ID server $HOST and verified its public key"
 
