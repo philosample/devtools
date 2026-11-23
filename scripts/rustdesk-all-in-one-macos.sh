@@ -403,11 +403,14 @@ EOF
 # Never silently elevate privileges or modify macOS TCC databases.
 configure_client_service(){
   if ((INSTALL_SERVICE)); then
-    local bin='/Applications/RustDesk.app/Contents/MacOS/RustDesk'
-    [[ -x $bin ]] || { warn 'RustDesk executable unavailable; install its service through the app UI'; return 0; }
-    log 'Requesting RustDesk service installation (may require macOS approval)'
-    if ! "$bin" --install-service; then
-      warn 'Service installation unsuccessful. Open RustDesk > Settings > General/Security and install its service manually.'
+    # macOS RustDesk 1.5.3 --install-service only checks for existing plists;
+    # a zero exit code does not mean the service was installed or started.
+    local plist='/Library/LaunchAgents/com.carriez.RustDesk_server.plist'
+    local label='com.carriez.RustDesk_server'
+    if [[ -f $plist ]] && launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+      log 'Verified RustDesk user background service is registered'
+    else
+      die 'RustDesk service is not active. In RustDesk > Settings > General > Service Control choose Install, approve macOS authorization, then rerun. Outbound-only clients can omit --install-service.'
     fi
   fi
 }
