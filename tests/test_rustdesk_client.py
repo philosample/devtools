@@ -29,6 +29,7 @@ class RustDeskMacClientTests(unittest.TestCase):
         binary.write_text("#!/bin/sh\nexit 37\n")
         binary.chmod(0o755)
         self.plist = self.root / "service.plist"
+        self.daemon = self.root / "daemon.plist"
         self.config = (
             self.home / "Library/Preferences/com.carriez.RustDesk/RustDesk2.toml"
         )
@@ -62,6 +63,10 @@ class RustDeskMacClientTests(unittest.TestCase):
         patched = patched.replace(
             "/Library/LaunchAgents/com.carriez.RustDesk_server.plist",
             str(self.plist),
+        )
+        patched = patched.replace(
+            "/Library/LaunchDaemons/com.carriez.RustDesk_service.plist",
+            str(self.daemon),
         )
         self.script = self.root / "client.sh"
         self.script.write_text(patched)
@@ -142,6 +147,7 @@ class RustDeskMacClientTests(unittest.TestCase):
     def test_installed_service_is_detected_without_cli_install(self):
         self.save_settings()
         self.plist.touch()
+        self.daemon.touch()
         result = self.run_client(
             "setup", "--skip-update", "--install-service", service="1"
         )
@@ -171,6 +177,9 @@ class RustDeskMacClientTests(unittest.TestCase):
         function = source[start:end].replace(
             "/Library/LaunchAgents/com.carriez.RustDesk_server.plist",
             str(self.plist),
+        ).replace(
+            "/Library/LaunchDaemons/com.carriez.RustDesk_service.plist",
+            str(self.daemon),
         )
         command = (
             "set -Eeuo pipefail\n"
@@ -197,6 +206,7 @@ class RustDeskMacClientTests(unittest.TestCase):
         self.assertEqual(missing.returncode, 2, missing.stderr)
         self.assertIn("Service Control", missing.stderr)
         self.plist.touch()
+        self.daemon.touch()
         env["MOCK_SERVICE"] = "1"
         present = subprocess.run(
             ["bash", "-c", command],
