@@ -45,6 +45,7 @@ Workflow:
 --autostart is USER-LOGIN autostart, NOT pre-login boot availability.
 Server data stored at ~/Services/rustdesk by default (RUSTDESK_HOME overrides).
 Router ports: TCP 21115-21117, UDP 21116. DDNS / forwarding remain manual.
+The server command enables Colima's experimental gRPC forwarder for UDP; it restarts a running Colima profile only when unrelated containers are not active.
 Don't run with sudo. Does not uninstall Docker Desktop or delete any Docker data.
 EOF
 }
@@ -164,15 +165,34 @@ install_docker(){
   docker buildx version
 }
 start_colima(){
-  local args=(--runtime docker)
+  local args=(--runtime docker) forwarder='ssh' other_containers
+  [[ $CMD != server ]] || args+=(--port-forwarder grpc)
+  [[ -z $CPU ]] || args+=(--cpus "$CPU")
+  [[ -z $MEMORY ]] || args+=(--memory "$MEMORY")
+  [[ -z $CPU || $CPU =~ ^[1-9][0-9]*$ ]] || die '--cpu must be positive integer'
+  [[ -z $MEMORY || $MEMORY =~ ^[1-9][0-9]*$ ]] || die '--memory must be positive integer (GiB)'
   if colima status >/dev/null 2>&1; then
-    log 'Colima already running; preserving current VM settings'
+    if [[ $CMD == server ]]; then
+      forwarder=$(sed -nE 's/^portForwarder:[[:space:]]*([[:alnum:]]+).*$/\1/p' "$HOME/.colima/default/colima.yaml" 2>/dev/null | head -1)
+      forwarder=${forwarder:-ssh}
+      if [[ $forwarder != grpc ]]; then
+        other_containers=$(docker --context colima ps --format '{{.Names}} {{.Label "com.docker.compose.project"}}' | awk -v project="$PROJECT" '$2 != project { print $1 }')
+        [[ -z $other_containers ]] || die "RustDesk needs UDP forwarding, which Colima's '$forwarder' mode does not provide. Stop unrelated Colima containers before rerunning; left running: ${other_containers//$'\n'/, }"
+        warn "Colima's gRPC port forwarder is experimental; RustDesk needs it to carry UDP 21116 for ID registration. Restarting Colima (only RustDesk containers are running)."
+        colima stop
+        colima start "${args[@]}"
+      else
+        log 'Colima gRPC forwarding is already enabled for RustDesk UDP 21116'
+      fi
+    else
+      log 'Colima already running; preserving current VM settings'
+    fi
   else
-    [[ -z $CPU || $CPU =~ ^[1-9][0-9]*$ ]] || die '--cpu must be positive integer'
-    [[ -z $MEMORY || $MEMORY =~ ^[1-9][0-9]*$ ]] || die '--memory must be positive integer (GiB)'
-    [[ -z $CPU ]] || args+=(--cpus "$CPU")
-    [[ -z $MEMORY ]] || args+=(--memory "$MEMORY")
-    log 'Starting Colima Docker runtime'
+    if [[ $CMD == server ]]; then
+      log 'Starting Colima with experimental gRPC forwarding for RustDesk UDP 21116'
+    else
+      log 'Starting Colima Docker runtime'
+    fi
     colima start "${args[@]}"
   fi
   docker context inspect colima >/dev/null 2>&1 || die 'Docker context "colima" unavailable'
@@ -205,7 +225,27 @@ write_deploy(){
   if [[ -f $BASE/.env ]]; then
     local old
     old=$(sed -n 's/^RUSTDESK_HOST=//p' "$BASE/.env" | head -1)
-    [[ $old == "$HOST" ]] || die "Existing host '$old' differs from '$HOST'; edit $BASE/.env deliberately"
+    if [[ $old != "$HOST" ]]; then
+      local backup="$BASE/.env.before-host-change-$(date +%Y%m%dT%H%M%S)"
+      cp -p "$BASE/.env" "$backup"
+      python3 - "$BASE/.env" "$HOST" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+host = sys.argv[2]
+lines = path.read_text().splitlines()
+for index, line in enumerate(lines):
+    if line.startswith("RUSTDESK_HOST="):
+        lines[index] = "RUSTDESK_HOST=" + host
+        break
+else:
+    lines.insert(0, "RUSTDESK_HOST=" + host)
+path.write_text("\n".join(lines) + "\n")
+PY
+      chmod 600 "$BASE/.env"
+      log "Updated advertised host from '$old' to '$HOST'; prior settings saved to $backup"
+    fi
   else
     printf 'RUSTDESK_HOST=%s\nRUSTDESK_IMAGE=%s\n' "$HOST" "$IMAGE" > "$BASE/.env"
     chmod 600 "$BASE/.env"
@@ -280,8 +320,14 @@ network(){
   pub=$(curl -4fsS --connect-timeout 3 --max-time 7 https://api.ipify.org 2>/dev/null || true)
   printf 'Interface: %s\nLAN IP: %s\nObserved public IPv4: %s\n' "${iface:-unknown}" "${lan:-unknown}" "${pub:-unknown}"
   [[ -z $HOST ]] || { printf 'Host: %s\n' "$HOST"; dscacheutil -q host -a name "$HOST" 2>/dev/null | head -10 || true; }
-  printf 'On router: reserve Mac mini LAN IP, forward TCP 21115-21117 and UDP 21116.\n'
-  printf 'Compare WAN IP shown on router with public IP above; CGNAT/double NAT may block forwarding.\n'
+  printf 'For clients on the home LAN, no router forwarding or DDNS is needed.\n'
+  printf 'For access away from home, use a VPN or separately configure external reachability.\n'
+}
+configure_server_client(){
+  local helper="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rustdesk-client-macos.sh"
+  [[ -x $helper ]] || die "Missing companion client setup script: $helper"
+  log 'Configuring this Mac as a RustDesk client on its own self-hosted server'
+  "$helper" setup --host "$HOST" --key "$(cat "$BASE/data/id_ed25519.pub")" --install-service --client-autostart
 }
 server_setup(){
   need_mac; validate_host
@@ -295,7 +341,10 @@ server_setup(){
   local i
   for ((i=0;i<45;i++)); do [[ -s $BASE/data/id_ed25519.pub ]] && break; sleep 1; done
   [[ -s $BASE/data/id_ed25519.pub ]] || { compose logs --tail=60; die 'RustDesk public key not generated'; }
+  chmod 600 "$BASE/data/id_ed25519"
+  chmod 644 "$BASE/data/id_ed25519.pub"
   compose ps
+  if ((!NO_CLIENT)); then configure_server_client; else warn 'Native RustDesk client setup skipped by --no-client; this Mac will not be reachable as a desktop target until configured separately.'; fi
   public_key
   network
   cat <<EOF
@@ -307,11 +356,11 @@ API Server: leave blank (OSS)
 Key: copy public key printed above
 
 MANUAL:
-1. Router: reserve Mac mini LAN IP, port-forward TCP 21115/21116/21117 and UDP 21116.
-2. Confirm your ISP allows incoming connections (no CGNAT/double NAT).
-3. Enable macOS user login after reboot for Colima --autostart; this is NOT pre-login service.
-4. Prevent system sleep and test remote access from outside your network.
-5. Test another Mac with: $APP client --host $HOST --key PUBLIC_KEY
+1. In RustDesk Security, set a strong permanent password for unattended access.
+2. Approve Accessibility and Screen & System Audio Recording in macOS Privacy & Security.
+3. Confirm the Mac mini's displayed RustDesk ID, then connect to that ID from another client using the same server host and key.
+4. Enable macOS user login after reboot for Colima --autostart; this is NOT pre-login service.
+5. For access away from home, use a VPN or separately configure external reachability; LAN clients need no router forwarding.
 EOF
 }
 client_setup(){

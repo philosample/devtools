@@ -128,7 +128,9 @@ The separate live-set-open `--reconcile-pending-open` mode requires a fresh proc
 
 ## RustDesk macOS setup
 
-The optional, standalone [RustDesk all-in-one installer](scripts/rustdesk-all-in-one-macos.sh) prepares an Apple Silicon or Intel Mac for RustDesk client/unattended access, including Colima/Docker verification, helper/Login Item checks, an opt-in AC idle-sleep setting, and a JSON readiness report. The same script can deploy self-hosted RustDesk OSS signaling and relay services on an always-on Mac mini.
+The optional, standalone [RustDesk all-in-one installer](scripts/rustdesk-all-in-one-macos.sh) prepares an Apple Silicon or Intel Mac for RustDesk client/unattended access, including Colima/Docker verification, helper/Login Item checks, an opt-in AC idle-sleep setting, and a JSON readiness report. The same script can deploy self-hosted RustDesk OSS signaling and relay services on an always-on Mac mini. The focused [macOS client helper](scripts/rustdesk-client-macos.sh) installs or updates RustDesk and imports an OSS server address and public key.
+
+For server deployment, the installer enables Colima's experimental gRPC port forwarder because RustDesk ID registration requires UDP; it protects unrelated running Colima containers from an automatic restart.
 
 ```sh
 ./scripts/rustdesk-all-in-one-macos.sh setup --install-service --client-autostart --prevent-sleep
