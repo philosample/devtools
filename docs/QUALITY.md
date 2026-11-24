@@ -60,8 +60,10 @@ The [GitHub Actions workflow](../.github/workflows/regression.yml) runs on pull
 requests and pushes to `main`. It uses a hosted macOS runner with Python 3.14
 and Node 24. It runs the pytest suite, the Node Save As fake-app tests, and
 Bash syntax checks for both RustDesk scripts. The Python suite includes macOS
-Swift compile checks and synthetic subprocess tests. Real Live, Max, MIDI,
-RustDesk, and hardware operation require separate acceptance.
+Swift compile checks and both Lefthook integration tests. CI installs the pinned
+Ruff and Lefthook releases into the test environment, verifies the executable
+versions, and requires the hook tests. Real Live, Max, MIDI, RustDesk, and
+hardware operation require separate acceptance.
 
 ## Run checks
 
