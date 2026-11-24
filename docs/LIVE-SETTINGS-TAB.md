@@ -49,7 +49,7 @@ MIDI delivery evidence.
 Focused source and command-boundary checks:
 
 ```sh
-python3 -m unittest tests.test_live_settings_tab -v
+.venv/bin/python -m pytest -q tests/test_live_settings_tab.py
 swiftc -framework ApplicationServices -framework AppKit -framework CoreGraphics \
   codex_devtools/live_settings_tab.swift -o /tmp/codex-live-settings-tab-check
 ```

@@ -76,7 +76,7 @@ a MIDI pass/fail result.
 Focused source checks:
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_ax_snapshot.py' -v
+.venv/bin/python -m pytest -q tests/test_ax_snapshot.py
 swiftc -framework ApplicationServices -framework AppKit \
   codex_devtools/ax_snapshot.swift -o /tmp/codex-ax-snapshot
 ```

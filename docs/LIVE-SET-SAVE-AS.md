@@ -124,7 +124,8 @@ protocol/acceptance gates remain owned by the studio repository.
 ## Source-only verification
 
 ```sh
-python3 -m unittest tests.test_live_set_save_as_native tests.test_live_set_open tests.test_live_set_lifecycle -v
+.venv/bin/python -m pytest -q tests/test_live_set_save_as_native.py \
+  tests/test_live_set_open.py tests/test_live_set_lifecycle.py
 swiftc -framework ApplicationServices -framework AppKit -framework CoreGraphics \
   codex_devtools/live_set_lifecycle.swift -o /private/tmp/live-save-as-source-check
 ```

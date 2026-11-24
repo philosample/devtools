@@ -81,7 +81,7 @@ Timeouts use Node's own monotonic clock, including checks at completion. Receive
 ## Verification
 
 ```sh
-python3 -m unittest discover -s tests -p test_harness_control.py -v
+.venv/bin/python -m pytest -q tests/test_harness_control.py
 ```
 
 Tests require an actual discovered Node executable (absence is a failing prerequisite, not a skip). They launch the real CommonJS helper and Python CLI in separate processes with private temporary mailboxes, using a stub callback that counts real dispatches. Positive cases assert exact positive counts; two simultaneous Python processes produce one callback. Tests cover explicit asynchronous completion, ACK retention, pins/nonces/mixed instances, replay, invalid commands/arguments, stale/crashed ownership, manual reconciliation, callback exceptions, wall discontinuity and both asynchronous and synchronously blocked timeout fencing. A retained-callback regression completes 33 requests, reuses the first UUID after pruning, and verifies that only the current admission can release its actor. Exact 65,536/65,537-byte descriptor boundary checks verify readable registration and rejection before file side effects. These checks do not run Max/Live, open MIDI ports or establish native musical behavior.
@@ -159,7 +159,7 @@ infer permission from an absent PID or a complete-looking saved receipt.
 Focused checks use actual discovered Node and separate Python processes:
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_harness*.py' -v
+.venv/bin/python -m pytest -q tests/test_harness_control.py tests/test_harness_reconcile.py
 ```
 
 They preserve unknown-effect command evidence, check exact identities/pins and

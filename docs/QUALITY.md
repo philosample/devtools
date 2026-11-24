@@ -34,7 +34,7 @@ python3 -m venv .venv
 
 Pytest discovery is configured in `pytest.ini` and excludes the separate Node `.test.mjs` checks.
 
-After reviewing `core.hooksPath` and any existing non-sample hooks as described below, install tracked Lefthook hooks with:
+After reviewing `core.hooksPath` and any existing non-sample hooks, install tracked Lefthook hooks with the following commands.
 
 ```sh
 python3 -m codex_devtools.quality bootstrap
@@ -42,16 +42,35 @@ python3 -m codex_devtools.quality doctor
 git config --show-origin --get core.hooksPath || true
 git rev-parse --git-path hooks
 lefthook install
-lefthook run pre-push
+lefthook run pre-push --no-auto-install
 ```
 
-Lefthook **pre-commit** remains Ruff check + format check on staged Python files. Its **pre-push** hook runs the entire pytest suite with `.venv/bin/python` and stops the push when the test environment is missing or tests fail. The hook does not install dependencies automatically or modify tracked files. Hooks are installed into the active Git hooks path for this checkout/worktree, not remotely by changes to `lefthook.yml`. Do not overwrite or displace other Git hooks without reviewing them first.
+Lefthook **pre-commit** runs Ruff check and format check on staged Python files.
+The **pre-push** hook clears Git's repository-local environment before running
+pytest with `.venv/bin/python` so test subprocesses discover their own temporary
+repositories. A missing test environment or failed test stops the push. Hook
+installation is a separate local step. Linked worktrees can share the active
+hooks directory, so review any existing hooks first.
 
 A push to a Git remote does not prove that these checks passed on another machine; review local tool and test output before reporting that status.
 
+## Hosted regression checks
+
+The [GitHub Actions workflow](../.github/workflows/regression.yml) runs on pull
+requests and pushes to `main`. It uses a hosted macOS runner with Python 3.14
+and Node 24. It runs the pytest suite, the Node Save As fake-app tests, and
+Bash syntax checks for both RustDesk scripts. The Python suite includes macOS
+Swift compile checks and synthetic subprocess tests. Real Live, Max, MIDI,
+RustDesk, and hardware operation require separate acceptance.
+
 ## Run checks
 
-After staging Python changes, run the same checks manually with `lefthook run pre-commit`. Lefthook filters staged file names and quotes paths with spaces. Its jobs read those paths from the working tree, not from the index blob. A partially staged Python file can therefore fail because of unstaged edits; the hook leaves the index and working tree untouched.
+After staging Python changes, run the same checks manually with
+`lefthook run pre-commit --no-auto-install`. The flag keeps manual checks from
+synchronizing the Git hook shims, which linked worktrees can share. Lefthook
+filters staged file names and quotes paths with spaces. It checks the working
+tree versions, so unstaged edits in a partially staged file can affect the
+result. The check leaves the index and working tree intact.
 
 For local checks or CI over an explicit changed-file list, run:
 
@@ -60,7 +79,7 @@ ruff-0.17.3 check --force-exclude -- path/to/file.py "path with spaces.py"
 ruff-0.17.3 format --check --force-exclude -- path/to/file.py "path with spaces.py"
 ```
 
-CI should pass only the changed Python paths to these commands; when no Python path changed, skip both commands. A full-repository Ruff run currently reports pre-existing lint and format findings in all audited repositories. The hooks adopt checks incrementally as Python files are changed, and no full-repository pass is claimed.
+Pass only changed Python paths to these commands. The project uses incremental Ruff adoption because untouched files still have lint and format findings. The hosted workflow covers functional regression checks and the local pre-commit hook covers Ruff.
 
 When a check fails, review fixes on specific files:
 
