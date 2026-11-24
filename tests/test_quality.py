@@ -344,6 +344,7 @@ class QualityHookIntegrationTests(unittest.TestCase):
             'test "$*" = "-m pytest -q" &&\n'
             'test -z "${GIT_DIR+x}${GIT_WORK_TREE+x}${GIT_INDEX_FILE+x}" ||\n'
             '{ echo "Unexpected inherited Git context" >&2; exit 1; }\n'
+            ": > pytest-ran\n"
         )
         python.chmod(0o755)
         env = {
@@ -361,6 +362,9 @@ class QualityHookIntegrationTests(unittest.TestCase):
             capture_output=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(
+            (self.root / "pytest-ran").is_file(), "Lefthook did not invoke pytest"
+        )
 
     def test_space_no_match_failure_and_partially_staged_files(self):
         spaced = self.root / "good file.py"
