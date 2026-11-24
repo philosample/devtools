@@ -694,7 +694,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertLess(focus_check, return_key)
         self.assertLess(return_key, dismissed)
 
-    def test_go_to_folder_uses_one_frontmost_session_chord_with_consistent_flags(self):
+    def test_go_to_folder_uses_one_frontmost_session_chord_and_releases_modifiers(self):
         native_source = (
             Path(__file__).resolve().parents[1]
             / "codex_devtools"
@@ -718,7 +718,19 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertLess(down, foreground_check)
         chord = event_stroke[event_stroke.index("func postChord(") :]
         self.assertIn("let modifiers: CGEventFlags = [.maskCommand, .maskShift]", chord)
-        self.assertIn("postKeyStroke(pid: pid, code: key, flags: modifiers)", chord)
+        self.assertIn("CGEventSource.flagsState(.combinedSessionState)", chord)
+        self.assertIn("event.type = .flagsChanged", chord)
+        command_release = chord.index(
+            "defer { commandUp.post(tap: .cgSessionEventTap) }"
+        )
+        command_down = chord.index("commandDown.post(tap: .cgSessionEventTap)")
+        shift_release = chord.index("defer { shiftUp.post(tap: .cgSessionEventTap) }")
+        shift_down = chord.index("shiftDown.post(tap: .cgSessionEventTap)")
+        stroke = chord.index("postKeyStroke(pid: pid, code: key, flags: modifiers)")
+        self.assertLess(command_release, command_down)
+        self.assertLess(command_down, shift_release)
+        self.assertLess(shift_release, shift_down)
+        self.assertLess(shift_down, stroke)
 
     def test_swift_skips_stale_save_panel_rows_but_keeps_exact_control_uniqueness(self):
         native_source = (
