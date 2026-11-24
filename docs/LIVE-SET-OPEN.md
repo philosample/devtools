@@ -207,7 +207,7 @@ artifact identity. There is no force quit, restart, Space switch, coordinate inp
 or prompt adoption. The existing Save As/Quit/reopen command remains unchanged.
 
 ```sh
-python3 -m unittest tests.test_live_set_open tests.test_live_set_lifecycle -v
+.venv/bin/python -m pytest -q tests/test_live_set_open.py tests/test_live_set_lifecycle.py
 swiftc -framework ApplicationServices -framework AppKit -framework CoreGraphics \
   codex_devtools/live_set_lifecycle.swift -o /tmp/codex-live-set-open-check
 ```

@@ -330,6 +330,38 @@ class QualityHookIntegrationTests(unittest.TestCase):
     def _reset_index(self):
         _git(self.root, "reset", "-q")
 
+    def test_pre_push_drops_inherited_git_context_before_running_pytest(self):
+        config = Path(__file__).resolve().parents[1] / "lefthook.yml"
+        shutil.copyfile(config, self.root / config.name)
+        _git(self.root, "add", config.name)
+        _git(
+            self.root, "-c", "core.hooksPath=/dev/null", "commit", "-m", "hook fixture"
+        )
+        python = self.root / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text(
+            "#!/bin/sh\n"
+            'test "$*" = "-m pytest -q" &&\n'
+            'test -z "${GIT_DIR+x}${GIT_WORK_TREE+x}${GIT_INDEX_FILE+x}" ||\n'
+            '{ echo "Unexpected inherited Git context" >&2; exit 1; }\n'
+        )
+        python.chmod(0o755)
+        env = {
+            **os.environ,
+            "GIT_DIR": str(self.root / ".git"),
+            "GIT_WORK_TREE": str(self.root),
+            "GIT_INDEX_FILE": str(self.root / ".git" / "index"),
+        }
+        result = subprocess.run(
+            ["lefthook", "run", "pre-push", "--no-auto-install"],
+            cwd=self.root,
+            env=env,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_space_no_match_failure_and_partially_staged_files(self):
         spaced = self.root / "good file.py"
         spaced.write_text("value = 1\n")

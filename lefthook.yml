@@ -15,4 +15,10 @@ pre-commit:
 pre-push:
   commands:
     pytest:
-      run: .venv/bin/python -m pytest -q
+      run: |
+        # Test subprocesses must discover their own temporary Git repositories.
+        git_local_vars="$(git rev-parse --local-env-vars)" || exit 1
+        for name in $git_local_vars; do
+          unset "$name"
+        done
+        exec .venv/bin/python -m pytest -q

@@ -1,0 +1,37 @@
+name: DevTools regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Offline regression (macOS)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Run Python regression tests
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements-test.txt
+          .venv/bin/python -m pytest -q -rs
+      - name: Run Node fake-app tests
+        run: node tests/live_set_save_as.test.mjs
+      - name: Check RustDesk shell syntax
+        run: |
+          bash -n scripts/rustdesk-all-in-one-macos.sh
+          bash -n scripts/rustdesk-client-macos.sh

@@ -117,7 +117,7 @@ Run the pure guard/fake-app tests with an existing Node runtime:
 ```sh
 node tests/live_set_save_as.test.mjs
 node --check cua/live_set_save_as.mjs
-python3 -m unittest discover -s tests -p 'test_live_set_save_as.py' -v
+.venv/bin/python -m pytest -q tests/test_live_set_save_as.py
 ```
 
 When Node is absent from PATH, discover the existing executable using

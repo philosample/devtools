@@ -218,7 +218,7 @@ trust/process/launch interfaces, and Swift compilation do not open Live or
 exercise the native UI:
 
 ```sh
-python3 -m unittest tests.test_live_set_lifecycle -v
+.venv/bin/python -m pytest -q tests/test_live_set_lifecycle.py
 swiftc -framework ApplicationServices -framework AppKit -framework CoreGraphics \
   codex_devtools/live_set_lifecycle.swift -o /tmp/codex-live-lifecycle
 ```

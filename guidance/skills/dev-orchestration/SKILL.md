@@ -59,7 +59,10 @@ Assign one operator to the shared desktop or browser session at a time, includin
 
 Keep universal routing in `AGENTS.md`, procedures here, and project commands near the project. Add specialized agent definitions only after repeated work shows a need for different persistent instructions or settings.
 
-When assessing an existing agent system or making efficiency claims, read [references/audit.md](references/audit.md). Do not load that reference for ordinary development delegation.
+When assessing an existing agent system, inventory the affected agents, callers,
+handoffs, and checks. For efficiency claims, compare completion quality,
+parent-plus-child tokens, tool calls, and side effects on the same tasks and
+revisions. The installed skill's audit reference has the full workflow.
 
 ## Reusable tool promotion
 

@@ -17,9 +17,12 @@ EXCLUDED_DIRS = {
     ".pytest_cache",
     ".mypy_cache",
     ".ruff_cache",
+    ".venv",
+    "venv",
     "outputs",
     "work",
 }
+EXCLUDED_FILES = {".git", ".DS_Store"}
 
 
 def _json_out(value) -> None:
@@ -46,6 +49,8 @@ def _manifest(root: Path, destination: Path) -> dict:
             if d not in EXCLUDED_DIRS and not (Path(current) / d).is_symlink()
         )
         for name in sorted(names):
+            if name in EXCLUDED_FILES:
+                continue
             path = Path(current) / name
             if path.is_symlink() or not path.is_file():
                 continue

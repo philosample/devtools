@@ -74,5 +74,5 @@ owning project's native procedure.
 Focused regression command:
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_max_inline_inputs.py' -v
+.venv/bin/python -m pytest -q tests/test_max_inline_inputs.py
 ```
