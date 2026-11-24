@@ -1218,8 +1218,9 @@ func postChord(pid: pid_t, key: CGKeyCode) throws {
     try checkSaveCopyDeadline()
     let modifiers: CGEventFlags = [.maskCommand, .maskShift]
     let shortcutModifiers: CGEventFlags = [.maskCommand, .maskShift, .maskControl, .maskAlternate]
-    try require(CGEventSource.flagsState(.combinedSessionState).intersection(shortcutModifiers).isEmpty,
-                "shortcut modifiers are already held before Go To Folder")
+    // The combined session can retain flags from a prior synthetic shortcut.
+    try require(CGEventSource.flagsState(.hidSystemState).intersection(shortcutModifiers).isEmpty,
+                "hardware shortcut modifiers are already held before Go To Folder")
 
     // Use the same modifier transitions as a physical Command-Shift shortcut.
     // Pre-create the releases so neither a foreground change nor a deadline

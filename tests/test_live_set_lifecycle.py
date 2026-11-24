@@ -718,7 +718,7 @@ class LiveSetLifecycleTests(unittest.TestCase):
         self.assertLess(down, foreground_check)
         chord = event_stroke[event_stroke.index("func postChord(") :]
         self.assertIn("let modifiers: CGEventFlags = [.maskCommand, .maskShift]", chord)
-        self.assertIn("CGEventSource.flagsState(.combinedSessionState)", chord)
+        self.assertIn("CGEventSource.flagsState(.hidSystemState)", chord)
         self.assertIn("event.type = .flagsChanged", chord)
         command_release = chord.index(
             "defer { commandUp.post(tap: .cgSessionEventTap) }"
