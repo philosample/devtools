@@ -182,7 +182,11 @@ def draw_box(o, b, key, ports=True):
 
 
 def check_output_paths(input_path, outputs):
-    paths = [Path(input_path), *map(Path, outputs)]
+    outputs = list(map(Path, outputs))
+    for output in outputs:
+        if output.is_dir():
+            raise ValueError(f"output path must be a file, not a directory: {output}")
+    paths = [Path(input_path), *outputs]
     for first, second in combinations(paths, 2):
         try:
             aliases = first.samefile(second)
@@ -212,7 +216,10 @@ def to_png(svg_path, png_path, size=2000):
         thumbnail = Path(directory) / (Path(svg_path).name + ".png")
         if not thumbnail.is_file():
             return False
-        shutil.move(thumbnail, png_path)
+        try:
+            thumbnail.replace(png_path)
+        except OSError:
+            return False
     return True
 
 

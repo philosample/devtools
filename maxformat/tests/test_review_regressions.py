@@ -40,6 +40,15 @@ class ReviewRegressions(unittest.TestCase):
             check=False,
         )
 
+    def make_directory_destination(self, path, symlink):
+        if symlink:
+            target = path.with_name(path.name + ".target")
+            target.mkdir()
+            path.symlink_to(target, target_is_directory=True)
+            return target
+        path.mkdir()
+        return path
+
     def test_rejects_source_as_output_even_through_a_file_alias(self):
         alias = self.directory / "alias.maxpat"
         os.link(self.source, alias)
@@ -178,6 +187,32 @@ class ReviewRegressions(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertEqual(self.source.read_bytes(), source)
 
+    def test_formatter_cli_rejects_preview_directories_before_writing(self):
+        for index, symlink in enumerate((False, True)):
+            output = self.directory / f"candidate-{index}.maxpat"
+            png = output.with_suffix(".png")
+            target = self.make_directory_destination(png, symlink)
+            svg = output.with_suffix(".svg")
+            with self.subTest(symlink=symlink):
+                result = self.format_patch(self.source, output, "--png")
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn("directory", result.stderr)
+                self.assertFalse(output.exists())
+                self.assertFalse(svg.exists())
+                self.assertEqual(list(target.iterdir()), [])
+
+    def test_preview_cli_rejects_png_directories_before_writing_svg(self):
+        for index, symlink in enumerate((False, True)):
+            svg = self.directory / f"preview-{index}.svg"
+            png = svg.with_suffix(".png")
+            target = self.make_directory_destination(png, symlink)
+            with self.subTest(symlink=symlink):
+                result = self.preview(self.source, "-o", svg, "--png")
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertIn("directory", result.stderr)
+                self.assertFalse(svg.exists())
+                self.assertEqual(list(target.iterdir()), [])
+
     def test_timed_out_png_conversion_removes_scratch_directory(self):
         scratch = []
 
@@ -206,3 +241,29 @@ class ReviewRegressions(unittest.TestCase):
             cli.save_png(messy(), self.output)
         self.assertEqual(svg.read_text(encoding="utf-8"), "existing preview")
         self.assertEqual(png.read_bytes(), b"png")
+
+    def test_png_publication_uses_exact_file_path_and_overwrites_regular_files(self):
+        svg = self.directory / "preview.svg"
+        svg.write_text("preview", encoding="utf-8")
+        png_directory = self.directory / "preview.png"
+        png_directory.mkdir()
+        existing_png = self.directory / "existing.png"
+        existing_png.write_bytes(b"old png")
+
+        def converter(args, **kwargs):
+            output_dir = Path(args[args.index("-o") + 1])
+            thumbnail = output_dir / (Path(args[-1]).name + ".png")
+            thumbnail.write_bytes(b"new png")
+
+        with (
+            patch.object(render.shutil, "which", return_value="/usr/bin/qlmanage"),
+            patch.object(render.subprocess, "run", side_effect=converter),
+        ):
+            self.assertFalse(render.to_png(svg, png_directory))
+        self.assertEqual(list(png_directory.iterdir()), [])
+        with (
+            patch.object(render.shutil, "which", return_value="/usr/bin/qlmanage"),
+            patch.object(render.subprocess, "run", side_effect=converter),
+        ):
+            self.assertTrue(render.to_png(svg, existing_png))
+        self.assertEqual(existing_png.read_bytes(), b"new png")
