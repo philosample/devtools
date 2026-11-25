@@ -267,3 +267,36 @@ class ReviewRegressions(unittest.TestCase):
         ):
             self.assertTrue(render.to_png(svg, existing_png))
         self.assertEqual(existing_png.read_bytes(), b"new png")
+
+    def test_png_publication_stages_outside_converter_scratch(self):
+        svg = self.directory / "preview.svg"
+        svg.write_text("preview", encoding="utf-8")
+        png = self.directory / "nested" / "preview.png"
+        png.parent.mkdir()
+        converter_directories = []
+        real_replace = os.replace
+
+        def converter(args, **kwargs):
+            output_dir = Path(args[args.index("-o") + 1])
+            converter_directories.append(output_dir)
+            thumbnail = output_dir / (Path(args[-1]).name + ".png")
+            thumbnail.write_bytes(b"new png")
+
+        def replace(staged, destination):
+            staged = Path(staged)
+            self.assertEqual(staged.parent.parent, png.parent)
+            self.assertEqual(Path(destination), png)
+            self.assertEqual(staged.read_bytes(), b"new png")
+            real_replace(staged, destination)
+
+        with (
+            patch.object(render.shutil, "which", return_value="/usr/bin/qlmanage"),
+            patch.object(render.subprocess, "run", side_effect=converter),
+            patch.object(render.os, "replace", side_effect=replace),
+        ):
+            self.assertTrue(render.to_png(svg, png))
+
+        self.assertEqual(len(converter_directories), 1)
+        self.assertNotEqual(converter_directories[0], png.parent)
+        self.assertEqual(png.read_bytes(), b"new png")
+        self.assertEqual(list(png.parent.iterdir()), [png])

@@ -202,6 +202,7 @@ def to_png(svg_path, png_path, size=2000):
     quick_look = shutil.which("qlmanage")
     if not quick_look:
         return False
+    png_path = Path(png_path)
     with tempfile.TemporaryDirectory() as directory:
         try:
             subprocess.run(
@@ -217,7 +218,10 @@ def to_png(svg_path, png_path, size=2000):
         if not thumbnail.is_file():
             return False
         try:
-            thumbnail.replace(png_path)
+            with tempfile.TemporaryDirectory(dir=png_path.parent) as staging_dir:
+                staged_png = Path(staging_dir) / png_path.name
+                shutil.copyfile(thumbnail, staged_png)
+                os.replace(staged_png, png_path)
         except OSError:
             return False
     return True
