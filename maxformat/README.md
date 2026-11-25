@@ -47,6 +47,20 @@ Lay it out (sources on top, everything they feed below them), with a preview ima
 ./maxformat.py examples/messy-synth.maxpat examples/messy-synth.clean.maxpat --png
 ```
 
+The static previews below show the intentionally messy source and its formatted
+output. They are source-derived renders from `maxlayout.render`, not screenshots
+from Max or Live. The formatted patch keeps execution order explicit with two
+`[t]` objects.
+
+**Before:** the source patch scores 0.0.
+
+![MaxFormat sample before layout](examples/messy-synth-before.png)
+
+**After:** the formatted patch scores 89.2 and adds two `[t]` objects to
+retain execution order.
+
+![MaxFormat sample after layout](examples/messy-synth-after.png)
+
 Keep its existing arrangement, just tidier:
 
 ```sh
