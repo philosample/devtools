@@ -1215,8 +1215,31 @@ func postKeyStroke(pid: pid_t, code: CGKeyCode, flags: CGEventFlags = []) throws
 }
 
 func postChord(pid: pid_t, key: CGKeyCode) throws {
-    // Modifier flags describe modifier state at each event, including key-up.
+    try checkSaveCopyDeadline()
     let modifiers: CGEventFlags = [.maskCommand, .maskShift]
+    let shortcutModifiers: CGEventFlags = [.maskCommand, .maskShift, .maskControl, .maskAlternate]
+    // The combined session can retain flags from a prior synthetic shortcut.
+    try require(CGEventSource.flagsState(.hidSystemState).intersection(shortcutModifiers).isEmpty,
+                "hardware shortcut modifiers are already held before Go To Folder")
+
+    // Use the same modifier transitions as a physical Command-Shift shortcut.
+    // Pre-create the releases so neither a foreground change nor a deadline
+    // can leave a synthetic modifier held.
+    let commandDown = try makeKeyEvent(code: 55, down: true, flags: .maskCommand)
+    let shiftDown = try makeKeyEvent(code: 56, down: true, flags: modifiers)
+    let shiftUp = try makeKeyEvent(code: 56, down: false, flags: .maskCommand)
+    let commandUp = try makeKeyEvent(code: 55, down: false, flags: [])
+    for event in [commandDown, shiftDown, shiftUp, commandUp] {
+        event.type = .flagsChanged
+    }
+    try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                "exact Live PID lost foreground before Go To Folder")
+    defer { commandUp.post(tap: .cgSessionEventTap) }
+    commandDown.post(tap: .cgSessionEventTap)
+    try require(NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                "foreground changed before posting Shift for Go To Folder")
+    defer { shiftUp.post(tap: .cgSessionEventTap) }
+    shiftDown.post(tap: .cgSessionEventTap)
     try postKeyStroke(pid: pid, code: key, flags: modifiers)
 }
 
