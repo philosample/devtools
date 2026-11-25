@@ -29,6 +29,9 @@ jobs:
           python -m venv .venv
           .venv/bin/python -m pip install -r requirements-test.txt
           .venv/bin/python -m pytest -q -rs
+      - name: Run MaxFormat tests
+        working-directory: maxformat
+        run: ../.venv/bin/python -m unittest discover -s tests -t .
       - name: Run Node fake-app tests
         run: node tests/live_set_save_as.test.mjs
       - name: Check RustDesk shell syntax

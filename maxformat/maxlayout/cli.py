@@ -1,0 +1,175 @@
+"""maxformat.py - make Max patches clean and readable.
+
+  maxformat.py input.maxpat output.maxpat     lay out a patch: sources on top,
+                                              everything they feed below them
+  maxformat.py input.maxpat --check           just score it
+  maxformat.py spec.json output.maxpat        build a new patch from a spec
+
+The input file is never changed. Nothing is written if the result would
+behave differently from the input.
+"""
+import argparse
+import copy
+import json
+import os
+import sys
+
+from .maxpat import load, save, read_json, Patcher, walk_patchers, describe
+from . import layout, route, style, present, lint, render, build
+
+
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(prog='maxformat.py', description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('input', nargs='?', help='a .maxpat to clean up, or a .json spec to build from')
+    ap.add_argument('output', nargs='?', help='where to write the result')
+    ap.add_argument('--check', action='store_true',
+                    help='only score the input; write nothing')
+    ap.add_argument('--keep-layout', action='store_true',
+                    help="keep the input's arrangement; just tidy it (grid, spacing, cords)")
+    ap.add_argument('--route-only', action='store_true',
+                    help='only straighten cords; never move boxes')
+    ap.add_argument('--no-triggers', action='store_true',
+                    help="never add [t] objects; refuse instead if execution order would change")
+    ap.add_argument('--presentation', action='store_true',
+                    help='also lay out presentation mode')
+    ap.add_argument('--theme', choices=['pcb', 'graphite', 'light'],
+                    help='colour the patch (default: leave colours alone)')
+    ap.add_argument('--png', action='store_true',
+                    help='also save a preview image next to the output')
+    ap.add_argument('--object', metavar='NAME',
+                    help='describe a Max object and what its inlets/outlets carry (e.g. --object cycle~)')
+    a = ap.parse_args(argv)
+    if a.object:
+        return a
+    if not a.input:
+        ap.error("give an input file (or --object NAME)")
+    if not os.path.exists(a.input):
+        ap.error(f"no such file: {a.input}")
+    if not a.check and not a.output:
+        ap.error("give an output file (or use --check)")
+    return a
+
+
+def bar(score):
+    n = int(round(score / 5))
+    return '█' * n + '░' * (20 - n)
+
+
+def save_png(doc, out):
+    png = os.path.splitext(out)[0] + '.png'
+    svg = os.path.splitext(out)[0] + '.svg'
+    with open(svg, 'w') as f:
+        f.write(render.render(Patcher(doc['patcher']), square=True))
+    if render.to_png(svg, png):
+        os.remove(svg)
+        print(f"  preview {png}")
+    else:
+        print(f"  preview {svg}")
+
+
+def is_spec(path):
+    if not path.lower().endswith('.json'):
+        return False
+    try:
+        d = read_json(path)
+    except ValueError:
+        return False
+    return isinstance(d, dict) and 'objects' in d
+
+
+def build_from_spec(a):
+    spec = read_json(a.input)
+    if a.theme:
+        spec['theme'] = a.theme
+    doc, ids = build.build(spec, name=os.path.splitext(os.path.basename(a.output))[0])
+    res = lint.lint_doc(doc, presentation=True, min_gap=build.STYLE['min_gap'])
+    save(doc, a.output)
+    print(f"  built   {bar(res['score'])}  {res['score']:5.1f}   ({len(ids)} objects)")
+    for tip in res['advice']:
+        print(f"  advice: {tip}")
+    print(f"✓ wrote {a.output}")
+    if a.png:
+        save_png(doc, a.output)
+    return 0
+
+
+def main(argv=None):
+    a = parse_args(argv)
+    if a.object:
+        print(describe(a.object))
+        return 0
+    if is_spec(a.input):
+        if a.check:
+            sys.exit("--check takes a .maxpat, not a spec")
+        return build_from_spec(a)
+
+    try:
+        original = load(a.input)
+    except (ValueError, UnicodeDecodeError):
+        sys.exit(f"{a.input} is not a .maxpat (Max for Live .amxd files must be saved as .maxpat first)")
+    before = lint.lint_doc(original)
+    if a.check:
+        lint.print_report(before)
+        return 0
+
+    doc = copy.deepcopy(original)
+    added = 0
+    if not a.route_only:
+        mode = 'tidy' if a.keep_layout else 'flow'
+        problems, added = layout.layout_doc(doc, mode, fanout='keep' if a.no_triggers else 'trigger',
+                                            hgap=build.STYLE['side_gap'], vgap=build.STYLE['row_gap'])
+        if problems:
+            print("✗ not saved: this would change the order cords fire in:", file=sys.stderr)
+            for p in problems:
+                print('   ' + p, file=sys.stderr)
+            print("  run without --no-triggers to make the order explicit with [t] objects", file=sys.stderr)
+            return 1
+    for P in walk_patchers(doc['patcher']):
+        route.route_patcher(P)
+    sends = 0
+    if not a.route_only and not a.keep_layout:
+        # cords bigger than a screen (or crossing 3+) become a named [s]/[r] pair
+        for P in walk_patchers(doc['patcher']):
+            sends += layout.insert_sends(P, [ln for ln, _ in lint.long_cords(P)])
+        if sends:
+            problems, more = layout.layout_doc(doc, 'flow', fanout='keep' if a.no_triggers else 'trigger',
+                                               hgap=build.STYLE['side_gap'], vgap=build.STYLE['row_gap'])
+            if problems:
+                print("✗ not saved: this would change the order cords fire in:", file=sys.stderr)
+                for p in problems:
+                    print('   ' + p, file=sys.stderr)
+                return 1
+            added += more
+            for P in walk_patchers(doc['patcher']):
+                route.route_patcher(P)
+    if a.theme:
+        style.apply(doc, a.theme)
+    if a.presentation:
+        present.present(Patcher(doc['patcher']), auto=True)
+
+    after = lint.lint_doc(doc, before=original)
+    changed = [s for v in after['behaviour'].values() for s in v]
+    if changed:
+        print("✗ not saved: the result would behave differently:", file=sys.stderr)
+        for s in changed[:6]:
+            print('   ' + s, file=sys.stderr)
+        return 1
+
+    save(doc, a.output)
+    print(f"  before  {bar(before['score'])}  {before['score']:5.1f}")
+    print(f"  after   {bar(after['score'])}  {after['score']:5.1f}")
+    for tip in after['advice']:
+        print(f"  advice: {tip}")
+    if added:
+        print(f"  added {added} [t] object(s) to keep execution order")
+    if sends:
+        print(f"  replaced {sends} long cord(s) with a named [s]/[r] pair")
+    print(f"✓ wrote {a.output}")
+    if a.png:
+        save_png(doc, a.output)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

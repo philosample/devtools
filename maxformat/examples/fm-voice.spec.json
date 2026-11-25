@@ -1,0 +1,156 @@
+{
+  "title": "FM Voice",
+  "objects": [
+    {
+      "id": "pitch",
+      "ui": "live.dial",
+      "param": {
+        "name": "Pitch",
+        "min": 20,
+        "max": 2000,
+        "init": 220,
+        "unit": "Hz"
+      },
+      "present": true
+    },
+    {
+      "id": "ratio",
+      "ui": "live.dial",
+      "param": {
+        "name": "Ratio",
+        "min": 0.25,
+        "max": 8,
+        "init": 2,
+        "unit": "float"
+      },
+      "present": true
+    },
+    {
+      "id": "index",
+      "ui": "live.dial",
+      "param": {
+        "name": "Index",
+        "min": 0,
+        "max": 20,
+        "init": 3,
+        "unit": "float"
+      },
+      "present": true
+    },
+    {
+      "id": "mul",
+      "text": "* 1."
+    },
+    {
+      "id": "sigf",
+      "text": "sig~"
+    },
+    {
+      "id": "modf",
+      "text": "*~ 2."
+    },
+    {
+      "id": "mod",
+      "text": "cycle~"
+    },
+    {
+      "id": "dev",
+      "text": "*~"
+    },
+    {
+      "id": "devamt",
+      "text": "*~"
+    },
+    {
+      "id": "sum",
+      "text": "+~"
+    },
+    {
+      "id": "car",
+      "text": "cycle~"
+    },
+    {
+      "id": "gain",
+      "ui": "live.gain~",
+      "param": {
+        "name": "Level",
+        "min": -70,
+        "max": 6,
+        "init": -12,
+        "unit": "dB"
+      },
+      "present": true
+    },
+    {
+      "id": "lb",
+      "text": "loadbang"
+    },
+    {
+      "id": "dspon",
+      "message": "startwindow"
+    },
+    {
+      "id": "mdac",
+      "text": "dac~"
+    }
+  ],
+  "cords": [
+    "pitch:0 -> sigf:0",
+    "pitch:0 -> mul:0",
+    "ratio:0 -> mul:1",
+    "mul:0 -> modf:1",
+    "sigf:0 -> modf:0",
+    "modf:0 -> mod:0",
+    "mod:0 -> dev:0",
+    "modf:0 -> dev:1",
+    "dev:0 -> devamt:0",
+    "index:0 -> devamt:1",
+    "devamt:0 -> sum:0",
+    "sigf:0 -> sum:1",
+    "sum:0 -> car:0",
+    "car:0 -> gain:0",
+    "gain:0 -> mdac:0",
+    "gain:0 -> mdac:1",
+    "lb:0 -> dspon:0",
+    "dspon:0 -> mdac:0"
+  ],
+  "modules": [
+    {
+      "title": "CONTROLS",
+      "members": [
+        "pitch",
+        "ratio",
+        "index"
+      ]
+    },
+    {
+      "title": "MODULATOR",
+      "members": [
+        "mul",
+        "sigf",
+        "modf",
+        "mod",
+        "dev",
+        "devamt"
+      ],
+      "note": "Turn up Index for brighter, more metallic tones."
+    },
+    {
+      "title": "CARRIER",
+      "members": [
+        "sum",
+        "car"
+      ]
+    },
+    {
+      "title": "OUTPUT",
+      "members": [
+        "gain",
+        "mdac",
+        "lb",
+        "dspon"
+      ]
+    }
+  ],
+  "version": "1.0"
+}

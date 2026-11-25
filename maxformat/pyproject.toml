@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maxformat"
+version = "0.1.0"
+description = "Make Max/MSP patches look like circuit boards: right-angle cords, grid layout, verified-safe."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+maxformat = "maxlayout.cli:main"
+
+[tool.setuptools]
+packages = ["maxlayout"]
+
+[tool.setuptools.package-data]
+maxlayout = ["data/objdb.json", "data/refdb.json"]
