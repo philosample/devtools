@@ -17,4 +17,4 @@ maxformat = "maxlayout.cli:main"
 packages = ["maxlayout"]
 
 [tool.setuptools.package-data]
-maxlayout = ["data/objdb.json"]
+maxlayout = ["data/objdb.json", "data/refdb.json"]

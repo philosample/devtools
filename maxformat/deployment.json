@@ -1,0 +1,29 @@
+{
+  "format": "codex-devtools-deployment-manifest-v1",
+  "files": [
+    "README.md",
+    "max-patch-layout/SKILL.md",
+    "max-patch-layout/references/commands.md",
+    "max-patch-layout/references/layout-and-routing.md",
+    "max-patch-layout/references/maxpat-format.md",
+    "max-patch-layout/references/presentation.md",
+    "maxformat.py",
+    "maxlayout/__init__.py",
+    "maxlayout/__main__.py",
+    "maxlayout/build.py",
+    "maxlayout/cli.py",
+    "maxlayout/data/objdb.json",
+    "maxlayout/data/refdb.json",
+    "maxlayout/layout.py",
+    "maxlayout/lint.py",
+    "maxlayout/maxpat.py",
+    "maxlayout/mine_objdb.py",
+    "maxlayout/mine_refdb.py",
+    "maxlayout/present.py",
+    "maxlayout/render.py",
+    "maxlayout/route.py",
+    "maxlayout/spine.py",
+    "maxlayout/style.py",
+    "pyproject.toml"
+  ]
+}

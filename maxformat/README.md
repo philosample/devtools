@@ -1,11 +1,11 @@
 # maxformat
 
-A Claude skill, plus the generator it uses, for Max/MSP patches that are clean and
+An agent skill and the generator it uses, for Max/MSP patches that are clean and
 readable. Modules are titled columns, signal flows top to bottom, spacing is
 generous, cords run at right angles, and every patch gets a presentation view.
 
-- **The skill:** [`max-patch-layout/SKILL.md`](max-patch-layout/SKILL.md) is the house
-  style Claude follows whenever it writes a patch.
+- **The skill:** [`max-patch-layout/SKILL.md`](max-patch-layout/SKILL.md) describes
+  the house style and selects detailed references by task.
 - **The generator:** `maxformat.py` applies that style precisely, building a new
   patch from a spec or cleaning up an existing one.
 
@@ -13,7 +13,8 @@ generous, cords run at right angles, and every patch gets a presentation view.
 ./maxformat.py input.maxpat output.maxpat [options]
 ```
 
-Python 3.9+, no dependencies. PNG previews need macOS.
+Python 3.9+ with no runtime dependencies. PNG previews need macOS. Use a fresh
+output path for each candidate. Existing paths can be overwritten.
 
 ## Files
 
@@ -52,7 +53,8 @@ Keep its existing arrangement, just tidier:
 ./maxformat.py examples/messy-synth.maxpat examples/messy-synth.clean.maxpat --keep-layout
 ```
 
-Open the result in Max:
+Open an ordinary Max patch in a licensed Max session or edit a Max for Live
+device from Live as appropriate:
 
 ```sh
 open examples/messy-synth.clean.maxpat
@@ -61,7 +63,7 @@ open examples/messy-synth.clean.maxpat
 Build a new patch from a spec:
 
 ```sh
-./maxformat.py examples/fm-voice.spec.json examples/fm-voice.maxpat --png
+./maxformat.py examples/fm-voice.spec.json /tmp/fm-voice.candidate.maxpat --png
 ```
 
 Only redraw cords, without moving any boxes:
@@ -92,6 +94,8 @@ When that would happen, it adds a `[t]` object to keep the order explicit
 
 ## Using the skill
 
-Point Claude Code at this repo, or symlink `max-patch-layout/` into
-`~/.claude/skills/`. Claude then follows the house style whenever it creates or
-edits a Max patch.
+The [deployment manifest](deployment.json) lists the offline tool and skill files
+for a versioned local installation with DevTools. Link the installed
+`max-patch-layout/` into the agent’s skills directory and expose the installed
+`maxformat.py` through the local `maxformat` command. Use the same installed
+revision for the command and skill.
