@@ -27,6 +27,8 @@ python3 -m maxlayout.render out.maxpat -o after.svg --png
 
 Use the same patcher and view for both images. Add `--presentation` for the stored presentation geometry or `--subpatcher obj-12` for an embedded view. If the ID is reused in different patchers, use the full path printed in the error. For a dense or unusually tall view, retain the scalable SVG and export the relevant embedded views separately. Quick Look PNGs are bounded thumbnails and the SVG remains available if conversion fails. For device screenshots, use the owning project's native Max or Live procedure and pin the loaded artifact.
 
+When a change has a visible result, embed the readable before/after pair in the PR description at the same view, viewport size, and zoom. Label source-derived `maxlayout.render` previews as such; reserve “screenshot” for images captured from the named native application. For private repositories, use GitHub image attachments or commit-pinned `github.com/.../blob/<sha>/...?...raw=1` links. Avoid `raw.githubusercontent.com` links, which can return 404 to reviewers without public access. Include the source or candidate hash and renderer/host so reviewers can trace each image. Write “Not applicable” for changes with no visible result.
+
 ## New patches
 
 Describe the objects, cord endpoints, and modules in a JSON spec. Give each object a stable `id`. Use `text` for object boxes, `message` for message boxes, `ui` for controls, and `label` for short comments. Give modules descriptive `title` and `members`. Cords use zero-based port numbers such as `"pitch:0 -> oscillator:0"`. For unknown externals or argument-dependent objects, declare `inlets`, `outlets`, and `outlettype` explicitly.
