@@ -8,7 +8,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from maxlayout import cli, render
+from maxlayout import cli, render, route
+from maxlayout.maxpat import Patcher
 
 from tests.helpers import MESSY, ROOT, messy
 
@@ -123,6 +124,25 @@ class ReviewRegressions(unittest.TestCase):
         candidate = json.loads(self.output.read_bytes())["patcher"]
         self.assertEqual(candidate["boxes"], root["boxes"])
         self.assertEqual(candidate["lines"], root["lines"])
+
+    def test_sealed_cord_endpoints_bypass_the_route_search(self):
+        router = route.Router(Patcher(messy()["patcher"]))
+        router.xs = router.ys = list(range(7))
+        start = (1, 1)
+        goal = (4, 4)
+        for blocked in (
+            {(0, 1), (2, 1), (1, 2)},
+            {(3, 4), (5, 4), (4, 3), (4, 5)},
+        ):
+            with self.subTest(blocked=blocked):
+                router.blocked = blocked
+                with patch.object(
+                    route.heapq, "heappop", wraps=route.heapq.heappop
+                ) as pop:
+                    self.assertIsNone(
+                        router.search(start, goal, (("obj-1", 0), ("obj-2", 0)))
+                    )
+                pop.assert_not_called()
 
     def test_unknown_subpatcher_writes_no_preview(self):
         output = self.directory / "preview.svg"
