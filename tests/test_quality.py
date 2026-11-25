@@ -290,7 +290,8 @@ def _git(
 
 
 @unittest.skipUnless(
-    shutil.which("lefthook") and shutil.which("ruff-0.17.3"),
+    os.environ.get("DEVTOOLS_REQUIRE_HOOK_TESTS") == "1"
+    or (shutil.which("lefthook") and shutil.which("ruff-0.17.3")),
     "pinned Ruff and Lefthook are required",
 )
 class QualityHookIntegrationTests(unittest.TestCase):

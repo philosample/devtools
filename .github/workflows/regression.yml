@@ -25,9 +25,17 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - name: Run Python regression tests
+        env:
+          DEVTOOLS_REQUIRE_HOOK_TESTS: '1'
         run: |
           python -m venv .venv
-          .venv/bin/python -m pip install -r requirements-test.txt
+          ruff_version="$(.venv/bin/python -c 'from codex_devtools.quality import RUFF_VERSION; print(RUFF_VERSION)')"
+          lefthook_version="$(.venv/bin/python -c 'from codex_devtools.quality import LEFTHOOK_VERSION; print(LEFTHOOK_VERSION)')"
+          .venv/bin/python -m pip install -r requirements-test.txt "ruff==$ruff_version" "lefthook==$lefthook_version"
+          ln -s ruff ".venv/bin/ruff-$ruff_version"
+          ln -s lefthook ".venv/bin/lefthook-$lefthook_version"
+          export PATH="$PWD/.venv/bin:$PATH"
+          PIPX_BIN_DIR="$PWD/.venv/bin" .venv/bin/python -m codex_devtools.quality doctor
           .venv/bin/python -m pytest -q -rs
       - name: Run MaxFormat tests
         working-directory: maxformat
