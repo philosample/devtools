@@ -12,7 +12,9 @@ maxformat input.maxpat out.maxpat --keep-layout --no-triggers
 
 `--route-only` keeps all object positions. `--keep-layout` tidies the existing arrangement. A full reflow can insert typed trigger objects and replace long cords with named send/receive pairs. Use `--no-triggers` to refuse a change to fan-out firing order without inserting a trigger. Review any connectivity and namespace changes before adopting a reflow. Use `--presentation` or `--theme` only when the requested change includes that view or styling.
 
-`--check` can score an existing patch whose box IDs fall outside the formatter's rewrite rules. Read its diagnostics before routing a dense graph. The formatter requires each patcher's box IDs to be unique `obj-<number>` values before it writes a candidate. Preserve named IDs owned by an existing device or generator.
+`--check` can score a graph with existing box IDs outside the formatter's rewrite rules. It refuses a cord whose source or destination box is missing from the same patcher. The formatter requires each patcher's box IDs to be unique `obj-<number>` values before writing a candidate. Fix graph defects or migrate IDs in the project's editable source or generator, keeping stable Live parameter IDs.
+
+Read standard error along with the score. An incomplete-routing diagnostic gives the patcher and count of cords the router could not place. Inspect those paths in the candidate before accepting it. If a dense patch exceeds the time available, keep its source and render the relevant embedded views. Record an unchanged baseline or a declined candidate explicitly.
 
 ## Before and after images
 

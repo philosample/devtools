@@ -120,6 +120,30 @@ def unsupported_input_ids(doc):
     return issues
 
 
+def dangling_patchlines(doc):
+    issues = []
+    for patcher in walk_patchers(doc["patcher"]):
+        for entry in patcher.d.get("lines", []):
+            line = entry["patchline"]
+            missing = [
+                f"{end} {line[end][0]!r}"
+                for end in ("source", "destination")
+                if line[end][0] not in patcher.by_id
+            ]
+            if missing:
+                issues.append(f"{patcher.path}: missing {', '.join(missing)}")
+    return issues
+
+
+def route_document(doc):
+    incomplete = {}
+    for patcher in walk_patchers(doc["patcher"]):
+        _, failed = route.route_patcher(patcher)
+        if failed:
+            incomplete[patcher.path] = failed
+    return incomplete
+
+
 def is_spec(path):
     if not path.lower().endswith(".json"):
         return False
@@ -159,9 +183,17 @@ def main(argv=None):
     try:
         original = load(a.input)
     except (ValueError, UnicodeDecodeError):
+        original = None
+    if not isinstance(original, dict) or not isinstance(original.get("patcher"), dict):
         sys.exit(
             f"{a.input} is not a .maxpat (Max for Live .amxd files must be saved as .maxpat first)"
         )
+    missing_endpoints = dangling_patchlines(original)
+    if missing_endpoints:
+        print("invalid patch: patchlines reference missing boxes:", file=sys.stderr)
+        for issue in missing_endpoints[:6]:
+            print(f"  {issue}", file=sys.stderr)
+        return 1
     input_id_issues = unsupported_input_ids(original)
     if input_id_issues:
         action = "check only" if a.check else "not saved"
@@ -203,8 +235,7 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return 1
-    for P in walk_patchers(doc["patcher"]):
-        route.route_patcher(P)
+    incomplete_routes = route_document(doc)
     sends = 0
     if not a.route_only and not a.keep_layout:
         # cords bigger than a screen (or crossing 3+) become a named [s]/[r] pair
@@ -227,8 +258,7 @@ def main(argv=None):
                     print("   " + p, file=sys.stderr)
                 return 1
             added += more
-            for P in walk_patchers(doc["patcher"]):
-                route.route_patcher(P)
+            incomplete_routes = route_document(doc)
     if a.theme:
         style.apply(doc, a.theme)
     if a.presentation:
@@ -251,6 +281,12 @@ def main(argv=None):
         print(f"  added {added} [t] object(s) to keep execution order")
     if sends:
         print(f"  replaced {sends} long cord(s) with a named [s]/[r] pair")
+    for patcher_path, failed in incomplete_routes.items():
+        print(
+            f"  incomplete routing: {patcher_path}: {failed} "
+            f"{'cord' if failed == 1 else 'cords'} could not be routed",
+            file=sys.stderr,
+        )
     print(f"✓ wrote {a.output}")
     if a.png:
         save_png(doc, a.output)

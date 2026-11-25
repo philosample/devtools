@@ -54,7 +54,14 @@ class ReviewRegressions(unittest.TestCase):
 
     def test_reports_existing_named_ids_and_skips_routing_on_refusal(self):
         doc = messy()
-        doc["patcher"]["boxes"][0]["box"]["id"] = "named-anchor"
+        box = doc["patcher"]["boxes"][0]["box"]
+        old_id = box["id"]
+        box["id"] = "named-anchor"
+        for entry in doc["patcher"]["lines"]:
+            for end in ("source", "destination"):
+                endpoint = entry["patchline"][end]
+                if endpoint[0] == old_id:
+                    endpoint[0] = box["id"]
         self.source.write_text(json.dumps(doc), encoding="utf-8")
         review = self.format_patch(self.source, "--check")
         self.assertEqual(review.returncode, 0, review.stderr)
@@ -64,6 +71,58 @@ class ReviewRegressions(unittest.TestCase):
         self.assertEqual(result, 1)
         router.assert_not_called()
         self.assertFalse(self.output.exists())
+
+    def test_missing_box_in_nested_patchline_refuses_check_and_rewrite(self):
+        doc = messy()
+        parent = next(
+            entry["box"]
+            for entry in doc["patcher"]["boxes"]
+            if "patcher" in entry["box"]
+        )
+        line = parent["patcher"]["lines"][0]["patchline"]
+        line["destination"][0] = "obj-999999"
+        self.source.write_text(json.dumps(doc), encoding="utf-8")
+        for args in (("--check",), (self.output, "--route-only")):
+            with self.subTest(args=args):
+                result = self.format_patch(self.source, *args)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f"root/{parent['id']}:", result.stderr)
+                self.assertIn("missing destination 'obj-999999'", result.stderr)
+                self.assertFalse(self.output.exists())
+
+    def test_route_only_reports_a_cord_with_no_path(self):
+        doc = messy()
+        root = doc["patcher"]
+        boxes = [
+            ("obj-1", [225, 20, 30, 22]),
+            ("obj-2", [60, 130, 30, 22]),
+            ("obj-3", [0, 0, 150, 220]),
+        ]
+        root["boxes"] = [
+            {
+                "box": {
+                    "id": box_id,
+                    "maxclass": "newobj",
+                    "text": "int",
+                    "numinlets": 2,
+                    "numoutlets": 1,
+                    "patching_rect": rect,
+                }
+            }
+            for box_id, rect in boxes
+        ]
+        root["lines"] = [
+            {"patchline": {"source": ["obj-1", 0], "destination": ["obj-2", 0]}}
+        ]
+        self.source.write_text(json.dumps(doc), encoding="utf-8")
+        result = self.format_patch(self.source, self.output, "--route-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "incomplete routing: root: 1 cord could not be routed", result.stderr
+        )
+        candidate = json.loads(self.output.read_bytes())["patcher"]
+        self.assertEqual(candidate["boxes"], root["boxes"])
+        self.assertEqual(candidate["lines"], root["lines"])
 
     def test_unknown_subpatcher_writes_no_preview(self):
         output = self.directory / "preview.svg"
