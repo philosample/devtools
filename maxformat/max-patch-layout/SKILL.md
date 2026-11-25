@@ -8,8 +8,9 @@ description: Generate, lay out, or review editable Max/MSP and Max for Live .max
 Use `maxformat` when installed. Run the checkout's `python3 maxformat/maxformat.py` from DevTools when the command is unavailable.
 
 - For a new patch, put the main chain in a left-aligned vertical spine. Place branches on the right and utilities on the left. Use titled columns for tall patches. Label performer controls, use default colors, and provide a presentation view.
-- For an existing patch, start with `maxformat input.maxpat --check`. Write a separate candidate. Preserve reviewed placement, presentation, parameter IDs, cord types, execution order, hidden wiring, and subpatcher port order. Prefer cord-only changes when placement already works.
-- Read the output diff and any preview. A preview or static check establishes graph and layout facts. Use the owning project's Max or Live procedure for runtime behavior.
+- For an existing patch, start with `maxformat input.maxpat --check`. Use a distinct candidate path. Resolve missing patchline endpoints or unsupported box IDs through the owning project's authoring or generation workflow.
+- Preserve reviewed placement, presentation, parameter IDs, cord types, execution order, hidden wiring, and subpatcher port order. Prefer cord-only changes when placement already works. Compare images only for a verified candidate and record unchanged layouts as unchanged.
+- Review the output diff, routing diagnostics, and preview before accepting a candidate. Label read-only renders as source-derived. Use the owning project's Max or Live procedure for native screenshots and runtime checks.
 
 Read only the reference needed for the work:
 

@@ -2,6 +2,15 @@
 
 <!-- Explain the concrete problem, resulting behavior, scope and material risks. -->
 
+## Visual before and after (when applicable)
+
+<!-- Put readable before/after images directly in the PR description. Keep the same patcher/view, viewport size and zoom. Use GitHub attachments or commit-pinned GitHub blob links for private-repository images; raw.githubusercontent.com links may 404 for reviewers. Label source-derived renders versus native application screenshots, and include the exact artifact hash and renderer/host. Write “Not applicable” when the change has no visible result. -->
+
+- Before image:
+- After image:
+- Artifact hash and renderer/host:
+- Image provenance: source-derived / native / not applicable
+
 ## Persisted plan and ownership
 
 - Plan ID and link/path under `~/workstation-docs/plans`:
